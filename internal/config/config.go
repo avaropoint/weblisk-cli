@@ -10,11 +10,12 @@ import (
 
 // Config holds resolved build configuration.
 type Config struct {
-	Origin  string
-	Dist    string
-	Port    int    // WL_PORT — dev server port (default: 3000)
-	CDN     string // WL_CDN — if set, importmaps point here instead of /lib/weblisk/
-	License string // WL_LICENSE — pro license key for downloading pro modules
+	Origin           string
+	Dist             string
+	Port             int      // WL_PORT — dev server port (default: 3000)
+	CDN              string   // WL_CDN — if set, importmaps point here instead of /lib/weblisk/
+	License          string   // WL_LICENSE — pro license key for downloading pro modules
+	BlueprintSources []string // WL_BLUEPRINT_SOURCES — additional blueprint repo URLs
 }
 
 // Vars stores loaded WL_* environment variables.
@@ -79,5 +80,16 @@ func Resolve() Config {
 	// Strip trailing slash for consistent concatenation
 	cdn = strings.TrimRight(cdn, "/")
 	license := os.Getenv("WL_LICENSE")
-	return Config{Origin: origin, Dist: dist, Port: port, CDN: cdn, License: license}
+
+	var blueprintSources []string
+	if src := os.Getenv("WL_BLUEPRINT_SOURCES"); src != "" {
+		for _, s := range strings.Split(src, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				blueprintSources = append(blueprintSources, s)
+			}
+		}
+	}
+
+	return Config{Origin: origin, Dist: dist, Port: port, CDN: cdn, License: license, BlueprintSources: blueprintSources}
 }

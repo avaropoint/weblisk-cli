@@ -79,7 +79,7 @@ weblisk-cli/
 │   ├── project/               Scaffold new projects from templates
 │   │   └── templates/         Embedded HTML/CSS/JS templates
 │   ├── dispatch/              AI dispatch pipeline
-│   │   ├── blueprints.go      Blueprint loader (git clone + cache)
+│   │   ├── blueprints.go      Multi-source blueprint loader
 │   │   ├── dispatch.go        Prompt construction + response parsing
 │   │   └── provider.go        LLM provider abstraction
 │   ├── server/                Server subcommands (init, start, verify)
@@ -92,11 +92,44 @@ weblisk-cli/
 
 ## Blueprint System
 
-Blueprints are loaded from the [weblisk-blueprints](https://github.com/avaropoint/weblisk-blueprints) repository.
-On first use, the repo is cloned into `.weblisk/blueprints/` and cached locally.
+Blueprints are implementation-agnostic Markdown specifications that describe
+what agents and orchestrators must do. The CLI loads blueprints from multiple
+sources, resolving in priority order:
 
-The CLI reads blueprint markdown, constructs prompts, and sends them to the
-configured AI model to generate server and agent implementations.
+1. **Local project** — `./blueprints/` in your project directory (highest priority)
+2. **Custom sources** — additional repos listed in `WL_BLUEPRINT_SOURCES`
+3. **Core** — [weblisk-blueprints](https://github.com/avaropoint/weblisk-blueprints) (always present as fallback)
+
+Each remote source is shallow-cloned and cached in `.weblisk/blueprints/`.
+The first source that contains a requested blueprint wins, so custom and
+local blueprints can override or extend the core set.
+
+### Multiple Blueprint Sources
+
+Add additional blueprint repositories via `.env`:
+
+```bash
+# Comma-separated list of Git repo URLs
+WL_BLUEPRINT_SOURCES=https://github.com/acme-corp/acme-blueprints.git,https://github.com/avaropoint/weblisk-blueprints-ecommerce.git
+```
+
+This supports several distribution models:
+
+| Source Type | Example | Typical Access |
+|---|---|---|
+| Core (open source) | `avaropoint/weblisk-blueprints` | Public, always available |
+| Vertical/partner | `avaropoint/weblisk-blueprints-ecommerce` | Granted per-customer |
+| Customer-owned | `acme-corp/acme-blueprints` | Customer's own repo |
+| Local project | `./blueprints/` | Project-scoped, checked in |
+
+Access control is handled by Git — private repos require the user's existing
+Git credentials (SSH key or GitHub CLI auth). No additional auth layer needed.
+
+### Refreshing Blueprints
+
+```bash
+weblisk blueprints update   # Clears cache and re-fetches all sources
+```
 
 ## Environment Variables
 
@@ -107,6 +140,7 @@ configured AI model to generate server and agent implementations.
 | `WL_DIST` | Output directory | `dist` |
 | `WL_CDN` | CDN base URL | — |
 | `WL_LICENSE` | Pro license key | — |
+| `WL_BLUEPRINT_SOURCES` | Additional blueprint repo URLs (comma-separated) | — |
 | `WL_AI_PROVIDER` | AI backend | `openai` |
 | `WL_AI_MODEL` | Model name | provider default |
 | `WL_AI_BASE_URL` | Endpoint override | — |
