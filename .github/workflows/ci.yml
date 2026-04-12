@@ -1,0 +1,43 @@
+# ── CI: Weblisk CLI ──────────────────────────────────────────
+#
+# Runs on every push and PR to main.
+# Validates that the CLI compiles cleanly on all target platforms.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build (host)
+        run: go build -ldflags="-s -w -X main.version=ci" -o /dev/null .
+
+      - name: Cross-compile check
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in \
+            "darwin  arm64" \
+            "darwin  amd64" \
+            "linux   amd64" \
+            "linux   arm64" \
+            "windows amd64"; do
+            set -- $target
+            GOOS=$1 GOARCH=$2 go build -ldflags="-s -w -X main.version=ci" -o /dev/null .
+            echo "  ✓ ${1}/${2}"
+          done

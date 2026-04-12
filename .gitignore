@@ -1,0 +1,6 @@
+weblisk
+weblisk-cli
+dist/
+.weblisk/
+.env
+.DS_Store

@@ -1,0 +1,58 @@
+# ── Release: Weblisk CLI ─────────────────────────────────────
+#
+# Triggered on tags matching: v*
+# Cross-compiles the CLI for 5 platforms and creates a GitHub Release.
+#
+# The install scripts (hosted on cdn.weblisk.dev) download from:
+#   https://github.com/avaropoint/weblisk-cli/releases/latest/download/weblisk-{os}-{arch}
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build CLI binaries
+        env:
+          CGO_ENABLED: "0"
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p bin
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          for target in \
+            "darwin  arm64" \
+            "darwin  amd64" \
+            "linux   amd64" \
+            "linux   arm64" \
+            "windows amd64"; do
+            set -- $target
+            ext=""; [ "$1" = "windows" ] && ext=".exe"
+            out="bin/weblisk-${1}-${2}${ext}"
+            GOOS=$1 GOARCH=$2 go build -ldflags="$LDFLAGS" -o "$out" .
+            echo "  ✓ ${1}/${2}"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Weblisk CLI v${{ steps.version.outputs.version }}"
+          generate_release_notes: true
+          files: bin/weblisk-*
