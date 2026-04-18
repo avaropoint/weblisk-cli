@@ -23,7 +23,7 @@ import (
 const coreTemplateRepo = "https://github.com/avaropoint/weblisk-templates.git"
 
 const defaultName = "My App"
-const defaultCDN = "https://cdn.weblisk.dev/v1/"
+const defaultCDN = "https://cdn.weblisk.dev/"
 
 // Manifest represents the manifest.json structure.
 type Manifest struct {
