@@ -6,7 +6,7 @@ package project
 //   3. Core:           github.com/avaropoint/weblisk-templates (always)
 //
 // Templates are plain HTML/CSS/JS files — no template engine.
-// The CLI does simple string replacement for project name and CDN base.
+// Files are copied as-is with sensible defaults.
 
 import (
 	"crypto/sha256"
@@ -21,9 +21,6 @@ import (
 )
 
 const coreTemplateRepo = "https://github.com/avaropoint/weblisk-templates.git"
-
-const defaultName = "My App"
-const defaultCDN = "https://cdn.weblisk.dev/"
 
 // Manifest represents the manifest.json structure.
 type Manifest struct {
@@ -182,25 +179,8 @@ func ResolveFile(root, relPath string) (string, error) {
 	return "", fmt.Errorf("template file %q not found in any source", relPath)
 }
 
-// ApplyReplacements performs project-specific string substitutions on content.
-// Replaces the default placeholder name and optionally swaps CDN for local path.
-func ApplyReplacements(content, projectName string, local bool, lib string) string {
-	title := toScaffoldTitle(projectName)
-	slug := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(projectName, " ", "-"), "_", "-"))
-
-	content = strings.ReplaceAll(content, defaultName, title)
-	content = strings.ReplaceAll(content, "my-app", slug)
-
-	if local {
-		content = strings.ReplaceAll(content, defaultCDN, "/"+lib+"/")
-	}
-
-	return content
-}
-
-// CopyScaffoldDir copies a scaffold set into the project directory,
-// applying string replacements to all text files.
-func CopyScaffoldDir(scaffoldDir, projectDir, projectName string, local bool, lib string) (int, error) {
+// CopyScaffoldDir copies a scaffold set into the project directory.
+func CopyScaffoldDir(scaffoldDir, projectDir string) (int, error) {
 	count := 0
 
 	err := filepath.WalkDir(scaffoldDir, func(path string, d os.DirEntry, err error) error {
@@ -221,21 +201,18 @@ func CopyScaffoldDir(scaffoldDir, projectDir, projectName string, local bool, li
 			return err
 		}
 
-		// Apply replacements to text files.
-		content := ApplyReplacements(string(data), projectName, local, lib)
-
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
 		}
 		count++
-		return os.WriteFile(dest, []byte(content), 0644)
+		return os.WriteFile(dest, data, 0644)
 	})
 
 	return count, err
 }
 
 // CopyInitFiles copies init config files (env, gitignore) into the project.
-func CopyInitFiles(root, projectDir, projectName string) error {
+func CopyInitFiles(root, projectDir string) error {
 	manifest, err := LoadManifest(root)
 	if err != nil {
 		return nil // No manifest — skip init files.
@@ -247,7 +224,6 @@ func CopyInitFiles(root, projectDir, projectName string) error {
 			fmt.Fprintf(os.Stderr, "  [warn] Init file %s: %v\n", entry.File, err)
 			continue
 		}
-		content = ApplyReplacements(content, projectName, false, "")
 		dest := filepath.Join(projectDir, entry.Dest)
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err

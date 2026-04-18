@@ -3,9 +3,8 @@ package project
 // Project Scaffold
 //
 // Creates new Weblisk projects by copying a scaffold set from
-// weblisk-templates. Templates are plain HTML/CSS/JS files — the
-// CLI does simple string replacement for the project name and
-// CDN base path. No template engine required.
+// weblisk-templates. Templates are plain HTML/CSS/JS files with
+// sensible defaults — no template engine or string replacement.
 
 import (
 	"fmt"
@@ -44,14 +43,14 @@ func Scaffold(name, cwd, tmpl string, local bool, lib string) error {
 		return err
 	}
 
-	count, err := CopyScaffoldDir(scaffoldDir, projectDir, name, local, lib)
+	count, err := CopyScaffoldDir(scaffoldDir, projectDir)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("    %d files\n", count)
 
 	// Copy init config files (.env, .gitignore).
-	if err := CopyInitFiles(cwd, projectDir, name); err != nil {
+	if err := CopyInitFiles(cwd, projectDir); err != nil {
 		return err
 	}
 	fmt.Printf("    .env\n")
@@ -60,7 +59,7 @@ func Scaffold(name, cwd, tmpl string, local bool, lib string) error {
 	// Write weblisk.json
 	configJSON := fmt.Sprintf(`{
   "name": "%s",
-  "version": "1.0.0"`, name)
+  "version": "1.0.0"`, sanitizeJSON(name))
 	if lib != config.DefaultLib {
 		configJSON += fmt.Sprintf(`,
   "lib": "%s"`, lib)
@@ -148,14 +147,8 @@ func extractFramework(projectDir, lib string) (int, error) {
 
 // Helpers
 
-func toScaffoldTitle(name string) string {
-	name = strings.ReplaceAll(name, "-", " ")
-	name = strings.ReplaceAll(name, "_", " ")
-	words := strings.Fields(name)
-	for i, w := range words {
-		if len(w) > 0 {
-			words[i] = strings.ToUpper(w[:1]) + w[1:]
-		}
-	}
-	return strings.Join(words, " ")
+func sanitizeJSON(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
 }
