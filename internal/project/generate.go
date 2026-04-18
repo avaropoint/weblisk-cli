@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 )
 
 // RePageName is the regex used to sanitize page names.
@@ -28,17 +27,15 @@ func AddPage(name, root string) error {
 		return err
 	}
 
-	data := TplData{
-		Name:       safeName,
-		Title:      title,
-		TitleLower: strings.ToLower(title),
-		Year:       fmt.Sprintf("%d", time.Now().Year()),
-	}
-
-	content, err := RenderTpl(root, "page", "page.html.tpl", data)
+	content, err := ResolveFile(root, "pages/blank.html")
 	if err != nil {
 		return err
 	}
+
+	// Replace the default placeholder title/name with the actual page name.
+	content = strings.ReplaceAll(content, "Page Title", title)
+	content = strings.ReplaceAll(content, "Page description.", title+" page.")
+	content = strings.ReplaceAll(content, "This is the page content.", "This is the "+strings.ToLower(title)+" page.")
 
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		return err
@@ -61,11 +58,13 @@ func AddIsland(name, root string) error {
 		return err
 	}
 
-	data := TplData{Name: safeName}
-	content, err := RenderTpl(root, "island", "island.js.tpl", data)
+	content, err := ResolveFile(root, "islands/starter.js")
 	if err != nil {
 		return err
 	}
+
+	// Replace the default placeholder island name.
+	content = strings.ReplaceAll(content, "my-island", safeName)
 
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		return err

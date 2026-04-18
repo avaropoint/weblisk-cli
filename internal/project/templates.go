@@ -4,6 +4,9 @@ package project
 //   1. Local project:  ./templates/ in the user's project
 //   2. Custom sources: WL_TEMPLATE_SOURCES (comma-separated Git URLs)
 //   3. Core:           github.com/avaropoint/weblisk-templates (always)
+//
+// Templates are plain HTML/CSS/JS files — no template engine.
+// The CLI does simple string replacement for project name and CDN base.
 
 import (
 	"crypto/sha256"
@@ -19,24 +22,41 @@ import (
 
 const coreTemplateRepo = "https://github.com/avaropoint/weblisk-templates.git"
 
-// TemplateManifest represents the templates.json structure.
-type TemplateManifest struct {
-	Version    string                       `json:"version"`
-	Categories map[string]TemplateCategory  `json:"categories"`
-	Sets       map[string]TemplateSet       `json:"sets"`
-	Core       []string                     `json:"core"`
+const defaultName = "My App"
+const defaultCDN = "https://cdn.weblisk.dev/v1/"
+
+// Manifest represents the manifest.json structure.
+type Manifest struct {
+	Version  string                    `json:"version"`
+	Defaults ManifestDefaults          `json:"defaults"`
+	Scaffold map[string]ManifestEntry  `json:"scaffold"`
+	Pages    map[string]ManifestFile   `json:"pages"`
+	Islands  map[string]ManifestFile   `json:"islands"`
+	Init     map[string]ManifestInit   `json:"init"`
 }
 
-// TemplateCategory describes a template directory.
-type TemplateCategory struct {
+// ManifestDefaults holds the placeholder values used in templates.
+type ManifestDefaults struct {
+	Name string `json:"name"`
+	CDN  string `json:"cdn"`
+}
+
+// ManifestEntry describes a scaffold set directory.
+type ManifestEntry struct {
 	Description string `json:"description"`
 	Path        string `json:"path"`
 }
 
-// TemplateSet defines which scaffold templates to use for a project type.
-type TemplateSet struct {
-	Description string   `json:"description"`
-	Scaffold    []string `json:"scaffold"`
+// ManifestFile describes a single template file.
+type ManifestFile struct {
+	Description string `json:"description"`
+	File        string `json:"file"`
+}
+
+// ManifestInit describes an init config file and its output destination.
+type ManifestInit struct {
+	Dest string `json:"dest"`
+	File string `json:"file"`
 }
 
 // templateSourceDir returns a deterministic cache directory name for a repo URL.
@@ -106,64 +126,139 @@ func ensureTemplatesCloned(repoURL, cacheDir string) error {
 	return nil
 }
 
-// LoadManifest reads templates.json from the first source that has one.
-func LoadManifest(root string) (*TemplateManifest, error) {
+// LoadManifest reads manifest.json from the first source that has one.
+func LoadManifest(root string) (*Manifest, error) {
 	dirs := resolvedTemplateSources(root)
 	for _, dir := range dirs {
-		path := filepath.Join(dir, "templates.json")
+		path := filepath.Join(dir, "manifest.json")
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		var m TemplateManifest
+		var m Manifest
 		if err := json.Unmarshal(data, &m); err != nil {
-			fmt.Fprintf(os.Stderr, "  [warn] Invalid templates.json in %s: %v\n", dir, err)
+			fmt.Fprintf(os.Stderr, "  [warn] Invalid manifest.json in %s: %v\n", dir, err)
 			continue
 		}
 		return &m, nil
 	}
-	return nil, fmt.Errorf("no templates.json found in any template source")
+	return nil, fmt.Errorf("no manifest.json found in any template source")
 }
 
-// ResolveTemplate reads a template file by category and name, checking sources in order.
-// For example: ResolveTemplate(root, "scaffold", "home.html.tpl")
-func ResolveTemplate(root, category, name string) (string, error) {
+// ResolveScaffoldDir finds the scaffold set directory, checking sources in order.
+// Returns the absolute path to the scaffold set directory.
+func ResolveScaffoldDir(root, setName string) (string, error) {
+	dirs := resolvedTemplateSources(root)
+
+	// Try the manifest-declared path first.
+	manifest, _ := LoadManifest(root)
+	path := "scaffold/" + setName + "/"
+	if manifest != nil {
+		if entry, ok := manifest.Scaffold[setName]; ok {
+			path = entry.Path
+		} else if entry, ok := manifest.Scaffold["default"]; ok {
+			path = entry.Path
+		}
+	}
+
+	for _, dir := range dirs {
+		scaffoldDir := filepath.Join(dir, path)
+		if info, err := os.Stat(scaffoldDir); err == nil && info.IsDir() {
+			return scaffoldDir, nil
+		}
+	}
+	return "", fmt.Errorf("scaffold set %q not found in any source", setName)
+}
+
+// ResolveFile reads a single file by relative path, checking sources in order.
+func ResolveFile(root, relPath string) (string, error) {
 	dirs := resolvedTemplateSources(root)
 	for _, dir := range dirs {
-		path := filepath.Join(dir, category, name)
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(filepath.Join(dir, relPath))
 		if err == nil {
 			return string(data), nil
 		}
 	}
-	return "", fmt.Errorf("template %s/%s not found in any source (%d sources checked)", category, name, len(dirs))
+	return "", fmt.Errorf("template file %q not found in any source", relPath)
 }
 
-// ResolveTemplateSet returns the list of scaffold template names for a given set.
-// Falls back to the "default" set if the requested set doesn't exist.
-func ResolveTemplateSet(root, setName string) ([]string, error) {
-	manifest, err := LoadManifest(root)
-	if err != nil {
-		// Fallback: hardcoded default if no manifest is available.
-		return []string{"home.html.tpl", "404.html.tpl"}, nil
+// ApplyReplacements performs project-specific string substitutions on content.
+// Replaces the default placeholder name and optionally swaps CDN for local path.
+func ApplyReplacements(content, projectName string, local bool) string {
+	title := toScaffoldTitle(projectName)
+	slug := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(projectName, " ", "-"), "_", "-"))
+
+	content = strings.ReplaceAll(content, defaultName, title)
+	content = strings.ReplaceAll(content, "my-app", slug)
+
+	if local {
+		content = strings.ReplaceAll(content, defaultCDN, "/lib/weblisk/")
 	}
 
-	if set, ok := manifest.Sets[setName]; ok {
-		return set.Scaffold, nil
-	}
-	if set, ok := manifest.Sets["default"]; ok {
-		return set.Scaffold, nil
-	}
-	return []string{"home.html.tpl", "404.html.tpl"}, nil
+	return content
 }
 
-// ResolveCoreTemplates returns the list of core template names that are always included.
-func ResolveCoreTemplates(root string) []string {
+// CopyScaffoldDir copies a scaffold set into the project directory,
+// applying string replacements to all text files.
+func CopyScaffoldDir(scaffoldDir, projectDir, projectName string, local bool) (int, error) {
+	count := 0
+	appDir := filepath.Join(scaffoldDir, "app")
+
+	err := filepath.WalkDir(appDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(appDir, path)
+		if rel == "." {
+			return nil
+		}
+		dest := filepath.Join(projectDir, "app", rel)
+		if d.IsDir() {
+			return os.MkdirAll(dest, 0755)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		// Apply replacements to text files.
+		content := ApplyReplacements(string(data), projectName, local)
+
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return err
+		}
+		count++
+		return os.WriteFile(dest, []byte(content), 0644)
+	})
+
+	return count, err
+}
+
+// CopyInitFiles copies init config files (env, gitignore) into the project.
+func CopyInitFiles(root, projectDir, projectName string) error {
 	manifest, err := LoadManifest(root)
 	if err != nil {
-		return []string{"styles.css.tpl", "sw.js.tpl", "shell.js.tpl", "env.tpl", "gitignore.tpl"}
+		return nil // No manifest — skip init files.
 	}
-	return manifest.Core
+
+	for _, entry := range manifest.Init {
+		content, err := ResolveFile(root, entry.File)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  [warn] Init file %s: %v\n", entry.File, err)
+			continue
+		}
+		content = ApplyReplacements(content, projectName, false)
+		dest := filepath.Join(projectDir, entry.Dest)
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dest, []byte(content), 0644); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // UpdateTemplates removes all cached template sources, forcing a re-fetch.

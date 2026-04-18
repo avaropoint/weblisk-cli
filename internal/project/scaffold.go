@@ -2,58 +2,20 @@ package project
 
 // Project Scaffold
 //
-// Creates new Weblisk projects from templates resolved via
-// multi-source template resolution. Templates are fetched from
-// weblisk-templates or overridden via local/custom sources.
+// Creates new Weblisk projects by copying a scaffold set from
+// weblisk-templates. Templates are plain HTML/CSS/JS files — the
+// CLI does simple string replacement for the project name and
+// CDN base path. No template engine required.
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"text/template"
-	"time"
 )
 
 const clientRepo = "https://github.com/avaropoint/weblisk.git"
-
-// TplData holds the template rendering context.
-type TplData struct {
-	Name       string
-	Title      string
-	TitleLower string
-	Year       string
-	CDNBase    string
-	Port       string
-}
-
-// RenderTpl renders a template from the resolved sources with the given data.
-// The category/name is resolved via multi-source template resolution.
-func RenderTpl(root, category, name string, data TplData) (string, error) {
-	content, err := ResolveTemplate(root, category, name)
-	if err != nil {
-		return "", err
-	}
-
-	tmpl, err := template.New(name).Parse(content)
-	if err != nil {
-		return "", fmt.Errorf("parsing template %q: %w", name, err)
-	}
-
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("executing template %q: %w", name, err)
-	}
-
-	return buf.String(), nil
-}
-
-// ReadTpl reads a raw template without rendering.
-func ReadTpl(root, category, name string) (string, error) {
-	return ResolveTemplate(root, category, name)
-}
 
 // Scaffold creates a new Weblisk project directory.
 func Scaffold(name, cwd, tmpl string, local bool) error {
@@ -67,47 +29,26 @@ func Scaffold(name, cwd, tmpl string, local bool) error {
 		return fmt.Errorf("creating project directory: %w", err)
 	}
 
-	title := toScaffoldTitle(name)
-	cdnBase := "https://cdn.weblisk.dev/v1/"
-	if local {
-		cdnBase = "/lib/weblisk/"
-	}
-
-	data := TplData{
-		Name:       name,
-		Title:      title,
-		TitleLower: strings.ToLower(title),
-		Year:       fmt.Sprintf("%d", time.Now().Year()),
-		CDNBase:    cdnBase,
-		Port:       "3000",
-	}
-
 	fmt.Printf("\n  Creating %s\n\n", name)
 
-	// Resolve scaffold templates from multi-source resolution
-	pages, err := ResolveTemplateSet(cwd, tmpl)
+	// Resolve and copy the scaffold set directory.
+	scaffoldDir, err := ResolveScaffoldDir(cwd, tmpl)
 	if err != nil {
 		return err
 	}
-	for _, page := range pages {
-		outPath := templateOutputPath(page, projectDir)
-		if err := writeRenderedTpl(cwd, "scaffold", page, outPath, data); err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(projectDir, outPath)
-		fmt.Printf("    %s\n", rel)
-	}
 
-	// Render core files from resolved sources
-	coreTemplates := ResolveCoreTemplates(cwd)
-	for _, ct := range coreTemplates {
-		dest := coreOutputPath(ct, projectDir)
-		if err := writeRenderedTpl(cwd, "core", ct, dest, data); err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(projectDir, dest)
-		fmt.Printf("    %s\n", rel)
+	count, err := CopyScaffoldDir(scaffoldDir, projectDir, name, local)
+	if err != nil {
+		return err
 	}
+	fmt.Printf("    app/ (%d files)\n", count)
+
+	// Copy init config files (.env, .gitignore).
+	if err := CopyInitFiles(cwd, projectDir, name); err != nil {
+		return err
+	}
+	fmt.Printf("    .env\n")
+	fmt.Printf("    .gitignore\n")
 
 	// Write weblisk.json
 	configContent := fmt.Sprintf(`{
@@ -116,7 +57,7 @@ func Scaffold(name, cwd, tmpl string, local bool) error {
 }
 `, name)
 	configPath := filepath.Join(projectDir, "weblisk.json")
-	if err := writeScaffoldFile(configPath, configContent); err != nil {
+	if err := writeFile(configPath, configContent); err != nil {
 		return err
 	}
 	fmt.Printf("    weblisk.json\n")
@@ -138,44 +79,7 @@ func Scaffold(name, cwd, tmpl string, local bool) error {
 	return nil
 }
 
-func templateOutputPath(tpl, projectDir string) string {
-	name := strings.TrimSuffix(tpl, ".tpl")
-	if name == "home.html" {
-		name = "index.html"
-	}
-	return filepath.Join(projectDir, "app", name)
-}
-
-// coreOutputPath maps a core template name to its output destination.
-func coreOutputPath(tpl, projectDir string) string {
-	switch tpl {
-	case "styles.css.tpl":
-		return filepath.Join(projectDir, "app", "css", "styles.css")
-	case "sw.js.tpl":
-		return filepath.Join(projectDir, "app", "sw.js")
-	case "shell.js.tpl":
-		return filepath.Join(projectDir, "app", "js", "islands", "shell.js")
-	case "env.tpl":
-		return filepath.Join(projectDir, ".env")
-	case "gitignore.tpl":
-		return filepath.Join(projectDir, ".gitignore")
-	default:
-		name := strings.TrimSuffix(tpl, ".tpl")
-		return filepath.Join(projectDir, name)
-	}
-}
-
-// File Writers
-
-func writeRenderedTpl(root, category, tpl, dest string, data TplData) error {
-	content, err := RenderTpl(root, category, tpl, data)
-	if err != nil {
-		return err
-	}
-	return writeScaffoldFile(dest, content)
-}
-
-func writeScaffoldFile(path, content string) error {
+func writeFile(path, content string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating directory %s: %w", dir, err)
