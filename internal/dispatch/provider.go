@@ -1,6 +1,6 @@
 package dispatch
 
-// ── LLM Provider ────────────────────────────────────────────
+// LLM Provider
 //
 // Abstraction over LLM backends. Supports OpenAI, Ollama,
 // Anthropic, Cloudflare Workers AI, and OpenAI-compatible.
@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-// ── Interface ───────────────────────────────────────────────
+// Interface
 
 // Provider is the interface for AI model backends.
 type Provider interface {
@@ -29,7 +29,7 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-// ── OpenAI-compatible ───────────────────────────────────────
+// OpenAI-compatible
 
 // OpenAIProvider implements the Provider interface for OpenAI-compatible APIs.
 type OpenAIProvider struct {
@@ -96,7 +96,7 @@ func (p *OpenAIProvider) Chat(messages []Message) (string, error) {
 	return result.Choices[0].Message.Content, nil
 }
 
-// ── Anthropic ───────────────────────────────────────────────
+// Anthropic
 
 // AnthropicProvider implements the Provider interface for Anthropic's API.
 type AnthropicProvider struct {
@@ -179,7 +179,7 @@ func (p *AnthropicProvider) Chat(messages []Message) (string, error) {
 	return text.String(), nil
 }
 
-// ── Factory ─────────────────────────────────────────────────
+// Factory
 
 // NewProvider creates a Provider from WL_AI_* environment variables.
 func NewProvider() (Provider, error) {
@@ -248,7 +248,7 @@ func NewProvider() (Provider, error) {
 	}
 }
 
-// ── Provider Config ─────────────────────────────────────────
+// Provider Config
 
 // ProviderConfig describes the current AI provider configuration.
 type ProviderConfig struct {

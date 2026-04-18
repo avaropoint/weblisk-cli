@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// ─── HTML Minifier ───────────────────────────────────────────
+// HTML Minifier
 
 var (
 	reHTMLComment = regexp.MustCompile(`(?s)<!--[\s\S]*?-->`)
@@ -72,7 +72,7 @@ func MinifyHTML(html string) string {
 	return strings.Join(lines, "\n")
 }
 
-// ─── CSS Minifier ────────────────────────────────────────────
+// CSS Minifier
 
 var (
 	reCSSComment = regexp.MustCompile(`(?s)/\*[\s\S]*?\*/`)
@@ -92,7 +92,7 @@ func MinifyCSS(css string) string {
 	return strings.TrimSpace(css)
 }
 
-// ─── JavaScript Minifier ─────────────────────────────────────
+// JavaScript Minifier
 
 var (
 	reJSWhitespace = regexp.MustCompile(`\s+`)

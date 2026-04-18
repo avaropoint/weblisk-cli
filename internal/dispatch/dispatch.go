@@ -1,12 +1,7 @@
 package dispatch
 
-// ── AI Dispatch Pipeline ────────────────────────────────────
-//
-// Loads blueprints, constructs prompts, sends to the user's
-// configured AI model, parses the response into code files,
-// and writes them to the target directory.
-//
-// This is the core of "CLI as blueprint carrier + AI dispatcher."
+// Loads blueprints, constructs prompts, sends to the user's configured
+// AI model, parses the response into code files, and writes them to disk.
 
 import (
 	"encoding/json"
@@ -24,7 +19,6 @@ type GeneratedFile struct {
 	Lang    string // language (go, js, toml, etc.)
 }
 
-// ── Dispatch Entry Points ───────────────────────────────────
 
 // ServerInit generates orchestrator code using the AI model.
 func ServerInit(root, platform string) error {
@@ -69,7 +63,7 @@ func ServerInit(root, platform string) error {
 		return err
 	}
 
-	fmt.Printf("  ✓ Generated %d files in server/\n", written)
+	fmt.Printf("  [ok] Generated %d files in server/\n", written)
 	for _, f := range files {
 		fmt.Printf("    %s\n", f.Path)
 	}
@@ -126,7 +120,7 @@ func AgentCreate(root, name, platform string) error {
 		return err
 	}
 
-	fmt.Printf("  ✓ Generated %d files in agents/%s/\n", written, name)
+	fmt.Printf("  [ok] Generated %d files in agents/%s/\n", written, name)
 	for _, f := range files {
 		fmt.Printf("    %s\n", f.Path)
 	}
@@ -135,7 +129,6 @@ func AgentCreate(root, name, platform string) error {
 	return nil
 }
 
-// ── Provider Requirement ────────────────────────────────────
 
 // RequireProvider creates and validates an AI provider.
 func RequireProvider() (Provider, error) {
@@ -157,7 +150,7 @@ func RequireProvider() (Provider, error) {
 		return nil, fmt.Errorf("AI provider not reachable: %w\n\n"+
 			"  Check your WL_AI_* configuration", testErr)
 	}
-	fmt.Println("  ✓ AI provider connected")
+	fmt.Println("  [ok] AI provider connected")
 
 	return provider, nil
 }
@@ -218,7 +211,7 @@ func PrintProviderStatus() {
 	fmt.Printf("  AI Provider:\n  %s\n\n", string(data))
 }
 
-// ── Prompt Construction ─────────────────────────────────────
+// Prompt Construction
 
 const orchestratorSystemPrompt = `You are a code generation agent for the Weblisk framework.
 You generate complete, working orchestrator server implementations.
@@ -314,7 +307,7 @@ The agent must register with an orchestrator and handle all protocol
 endpoints exactly as specified.`, name, platform, specs, platformBP, domainSection)
 }
 
-// ── Response Parsing ────────────────────────────────────────
+// Response Parsing
 
 var reFilenameComment = regexp.MustCompile(`(?m)^//\s*filename:\s*(.+?)\s*$`)
 var reCodeBlock = regexp.MustCompile("(?s)```(\\w+)?(?:\\s+(.+?))?\\n(.*?)```")
@@ -397,7 +390,7 @@ func inferLang(path string) string {
 	}
 }
 
-// ── File Writing ────────────────────────────────────────────
+// File Writing
 
 func writeGeneratedFiles(targetDir string, files []GeneratedFile) (int, error) {
 	if err := os.MkdirAll(targetDir, 0755); err != nil {

@@ -12,20 +12,6 @@ import (
 	"time"
 )
 
-// Modules is the canonical list of pro modules available for download.
-var Modules = []string{
-	"analytics.js",
-	"ab.js",
-	"form.js",
-	"table.js",
-	"auth.js",
-	"pay.js",
-	"chart.js",
-	"toast.js",
-	"tabs.js",
-	"crdt.js",
-}
-
 const proValidateURL = "https://cdn.weblisk.dev/pro/validate"
 const proRegisterURL = "https://cdn.weblisk.dev/pro/register"
 const proCDNBase = "https://cdn.weblisk.dev/pro/"
@@ -39,24 +25,23 @@ type validateResponse struct {
 }
 
 // Activate validates a license key, downloads pro modules, and optionally
-// registers a production domain for tracking. No runtime verification is
-// needed — pro modules ship as static files in the build output.
+// registers a production domain for CDN-mode serving.
 func Activate(root, key, domain, version string) error {
 	if key == "" {
 		return fmt.Errorf("license key required. Usage: weblisk license --key=WL-XXXX-XXXX-XXXX-XXXX [--domain=example.com]")
 	}
 
 	fmt.Println()
-	fmt.Println("  ⚡ Weblisk License")
+	fmt.Println("  Weblisk License")
 	fmt.Println()
-	fmt.Printf("  Validating license key...\n")
+	fmt.Println("  Validating license key...")
 
 	modules, err := validateKey(key, version)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("  ✓ License valid — %d pro modules available\n\n", len(modules))
+	fmt.Printf("  [ok] License valid -- %d pro modules available\n\n", len(modules))
 
 	// Download pro modules
 	proDir := filepath.Join(root, "lib", "weblisk", "pro")
@@ -67,15 +52,15 @@ func Activate(root, key, domain, version string) error {
 	downloaded := 0
 	for _, mod := range modules {
 		if err := DownloadModule(key, mod, proDir, version); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ %s — %v\n", mod, err)
+			fmt.Fprintf(os.Stderr, "  [error] %s -- %v\n", mod, err)
 			continue
 		}
-		fmt.Printf("  ✓ pro/%s\n", mod)
+		fmt.Printf("  [ok] pro/%s\n", mod)
 		downloaded++
 
 		dts := strings.TrimSuffix(mod, ".js") + ".d.ts"
 		if err := DownloadModule(key, dts, proDir, version); err == nil {
-			fmt.Printf("  ✓ pro/%s\n", dts)
+			fmt.Printf("  [ok] pro/%s\n", dts)
 		}
 	}
 
@@ -89,9 +74,9 @@ func Activate(root, key, domain, version string) error {
 	// that domain (and its subdomains) to load pro modules directly.
 	if domain != "" {
 		if err := registerDomain(key, domain, version); err != nil {
-			fmt.Fprintf(os.Stderr, "  Warning: domain registration failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "  [warn] domain registration failed: %v\n", err)
 		} else {
-			fmt.Printf("\n  ✓ Domain registered: %s (+ subdomains)\n", domain)
+			fmt.Printf("\n  [ok] Domain registered: %s (+ subdomains)\n", domain)
 		}
 	}
 
@@ -159,7 +144,7 @@ func validateKey(key, version string) ([]string, error) {
 
 	modules := result.Modules
 	if len(modules) == 0 {
-		modules = Modules
+		return nil, fmt.Errorf("server returned no modules for this license")
 	}
 
 	return modules, nil

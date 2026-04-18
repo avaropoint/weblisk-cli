@@ -27,33 +27,34 @@ func Vendor(root, dest string) error {
 	}
 
 	fmt.Println()
-	fmt.Println("  ⚡ Weblisk Vendor")
+	fmt.Println("  Weblisk Vendor")
 	fmt.Printf("  Downloading framework to %s/\n\n", dest)
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return fmt.Errorf("creating directory %s: %w", dest, err)
 	}
 
+	files := pro.FrameworkFiles()
 	client := &http.Client{Timeout: 15 * time.Second}
 	downloaded := 0
 	failed := 0
 
-	for _, file := range pro.FrameworkFiles {
+	for _, file := range files {
 		fileDest := filepath.Join(destDir, filepath.FromSlash(file))
 		if err := os.MkdirAll(filepath.Dir(fileDest), 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ %s — %v\n", file, err)
+			fmt.Fprintf(os.Stderr, "  [error] %s -- %v\n", file, err)
 			failed++
 			continue
 		}
 
 		if err := vendorDownload(client, vendorCDNBase+file, fileDest); err != nil {
 			if strings.HasSuffix(file, ".js") {
-				fmt.Fprintf(os.Stderr, "  ✗ %s — %v\n", file, err)
+				fmt.Fprintf(os.Stderr, "  [error] %s -- %v\n", file, err)
 				failed++
 			}
 			continue
 		}
-		fmt.Printf("  ✓ %s\n", file)
+		fmt.Printf("  [ok] %s\n", file)
 		downloaded++
 	}
 

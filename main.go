@@ -1,11 +1,6 @@
 package main
 
-// Weblisk CLI — Zero-dependency static site builder + AI agent dispatcher.
-//
-// A standalone Go binary. No runtime, no package manager, no dependencies.
-// The CLI is a blueprint carrier — it describes how agents and servers should
-// work, dispatches to the user's AI model to generate implementations, and
-// verifies they comply with the protocol specification.
+// Weblisk CLI — zero-dependency static site builder and AI agent dispatcher.
 
 import (
 	"fmt"
@@ -146,7 +141,7 @@ func main() {
 	}
 }
 
-// ── Arg parsers ─────────────────────────────────────────────
+// Arg parsers
 
 func parseNewArgs(args []string) (string, string, bool) {
 	var name, template string
@@ -217,11 +212,11 @@ func parseDevArgs(args []string) (string, int) {
 	return abs, port
 }
 
-// ── Help ────────────────────────────────────────────────────
+// Help text
 
 func printHelp() {
 	fmt.Print(`
-  ⚡ Weblisk CLI v` + version + `
+  Weblisk CLI v` + version + `
 
   Usage:
     weblisk <command> [options]

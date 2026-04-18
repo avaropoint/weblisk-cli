@@ -1,6 +1,6 @@
 package protocol
 
-// ── Cryptographic Identity ──────────────────────────────────
+// Cryptographic Identity
 //
 // Ed25519 key pairs for agent identity. Every agent generates a
 // keypair on first run and stores it. All messages are signed.
@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-// ── Key Management ──────────────────────────────────────────
+// Key Management
 
 // Identity holds an agent's Ed25519 key pair.
 type Identity struct {
@@ -90,7 +90,7 @@ func LoadIdentity(name, dir string) (*Identity, error) {
 	return &Identity{PublicKey: pub, PrivateKey: priv, Name: name}, nil
 }
 
-// ── Message Signing ─────────────────────────────────────────
+// Message Signing
 
 // Sign produces an Ed25519 signature of the given data.
 func (id *Identity) Sign(data []byte) string {
@@ -120,7 +120,7 @@ func VerifySignature(pubKeyHex, signatureHex string, data []byte) bool {
 	return ed25519.Verify(pubKey, data, sig)
 }
 
-// ── Token System ────────────────────────────────────────────
+// Token System
 
 var b64 = base64.RawURLEncoding
 
@@ -228,7 +228,7 @@ func splitToken(token string) []string {
 	return parts
 }
 
-// ── Helpers ─────────────────────────────────────────────────
+// Helpers
 
 // GenerateID creates a random hex ID for tasks, channels, etc.
 func GenerateID() string {

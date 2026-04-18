@@ -28,7 +28,7 @@ func Serve(root string, port int) error {
 
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Println()
-	fmt.Println("  ⚡ Weblisk dev server")
+	fmt.Println("  Weblisk Dev Server")
 	fmt.Println()
 	fmt.Printf("  Local: http://localhost:%d\n", port)
 	fmt.Printf("  Root:  %s\n", root)

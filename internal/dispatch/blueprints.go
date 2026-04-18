@@ -1,17 +1,9 @@
 package dispatch
 
-// ── Blueprint Loader ────────────────────────────────────────
-//
 // Resolves blueprints from multiple sources with fallthrough:
-//
 //   1. Local project:  ./blueprints/ in the user's project
 //   2. Custom sources: WL_BLUEPRINT_SOURCES (comma-separated Git URLs)
 //   3. Core:           github.com/avaropoint/weblisk-blueprints (always)
-//
-// Each remote source is cloned into .weblisk/blueprints/<source-name>/
-// and cached. When loading a blueprint, sources are checked in order;
-// the first match wins. This lets customers override core blueprints
-// and pull from private/partner repositories.
 
 import (
 	"crypto/sha256"
@@ -61,7 +53,7 @@ func resolvedSources(root string) []string {
 	for _, repo := range cfg.BlueprintSources {
 		cacheDir := filepath.Join(root, ".weblisk", "blueprints", sourceDir(repo))
 		if err := ensureCloned(repo, cacheDir); err != nil {
-			fmt.Fprintf(os.Stderr, "  ⚠ Blueprint source %s: %v\n", repo, err)
+			fmt.Fprintf(os.Stderr, "  [warn] Blueprint source %s: %v\n", repo, err)
 			continue
 		}
 		dirs = append(dirs, cacheDir)
@@ -70,7 +62,7 @@ func resolvedSources(root string) []string {
 	// 3. Core blueprints (always present as fallback).
 	coreDir := filepath.Join(root, ".weblisk", "blueprints", sourceDir(coreRepo))
 	if err := ensureCloned(coreRepo, coreDir); err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠ Core blueprints: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  [warn] Core blueprints: %v\n", err)
 	} else {
 		dirs = append(dirs, coreDir)
 	}
@@ -98,7 +90,7 @@ func ensureCloned(repoURL, cacheDir string) error {
 		return fmt.Errorf("cloning %s: %w\n  If this is a private repo, ensure your Git credentials have access.", repoURL, err)
 	}
 
-	fmt.Printf("  ✓ Cached %s\n", filepath.Base(cacheDir))
+	fmt.Printf("  [ok] Cached %s\n", filepath.Base(cacheDir))
 	return nil
 }
 
@@ -153,7 +145,7 @@ func UpdateBlueprints(root string) error {
 	if len(dirs) == 0 {
 		return fmt.Errorf("no blueprint sources available after refresh")
 	}
-	fmt.Printf("  ✓ %d blueprint source(s) ready\n", len(dirs))
+	fmt.Printf("  [ok] %d blueprint source(s) ready\n", len(dirs))
 	return nil
 }
 

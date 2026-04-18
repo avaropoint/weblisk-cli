@@ -44,7 +44,7 @@ func AddPage(name, root string) error {
 		return err
 	}
 
-	fmt.Printf("  ✓ app/%s.html\n", safeName)
+	fmt.Printf("  [ok] app/%s.html\n", safeName)
 	fmt.Printf("\n  Page ready: /%s.html\n\n", safeName)
 	return nil
 }
@@ -71,7 +71,7 @@ func AddIsland(name, root string) error {
 		return err
 	}
 
-	fmt.Printf("  ✓ app/js/islands/%s.js\n", safeName)
+	fmt.Printf("  [ok] app/js/islands/%s.js\n", safeName)
 	fmt.Println()
 	fmt.Println("  Island ready. Add to your HTML:")
 	fmt.Printf("    <div data-island=\"%s\">\n", safeName)
@@ -81,7 +81,7 @@ func AddIsland(name, root string) error {
 	return nil
 }
 
-// ─── Helpers ─────────────────────────────────────────────────
+// Helpers
 
 func sanitizeName(name string) string {
 	return RePageName.ReplaceAllString(strings.ToLower(name), "")

@@ -1,11 +1,11 @@
 package protocol
 
-// ── Protocol Types ──────────────────────────────────────────
+// Protocol Types
 //
 // All types for the Weblisk Agent Protocol v1. Every agent and
 // orchestrator speaks this exact contract — no exceptions.
 
-// ── Path Constants ──────────────────────────────────────────
+// Path Constants
 
 const PathPrefix = "/v1"
 
@@ -21,7 +21,7 @@ const (
 	PathAudit    = PathPrefix + "/audit"
 )
 
-// ── Agent Types ─────────────────────────────────────────────
+// Agent Types
 
 // AgentManifest describes an agent's capabilities.
 type AgentManifest struct {
@@ -49,7 +49,7 @@ type IOSpec struct {
 	Required bool   `json:"required,omitempty"`
 }
 
-// ── Task Types ──────────────────────────────────────────────
+// Task Types
 
 // TaskRequest is what the orchestrator sends to an agent.
 type TaskRequest struct {
@@ -91,7 +91,7 @@ type ChangeDiff struct {
 	After  string `json:"after"`
 }
 
-// ── Messaging Types ─────────────────────────────────────────
+// Messaging Types
 
 // AgentMessage is a message between agents or from orchestrator.
 type AgentMessage struct {
@@ -106,7 +106,7 @@ type AgentMessage struct {
 	Signature string         `json:"signature,omitempty"`
 }
 
-// ── Service Discovery Types ─────────────────────────────────
+// Service Discovery Types
 
 // ServiceEntry describes a registered agent in the directory.
 type ServiceEntry struct {
@@ -123,7 +123,7 @@ type ServiceDirectory struct {
 	UpdatedAt int64          `json:"updated_at,omitempty"`
 }
 
-// ── Registration Types ──────────────────────────────────────
+// Registration Types
 
 // RegisterRequest is what an agent sends to register.
 type RegisterRequest struct {
@@ -140,7 +140,7 @@ type RegisterResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// ── Orchestrator Types ──────────────────────────────────────
+// Orchestrator Types
 
 // OrchestratorInfo is returned by the orchestrator health endpoint.
 type OrchestratorInfo struct {
@@ -151,7 +151,7 @@ type OrchestratorInfo struct {
 	Uptime    int64  `json:"uptime"`
 }
 
-// ── Channel Types ───────────────────────────────────────────
+// Channel Types
 
 // ChannelRequest asks to open a direct channel between agents.
 type ChannelRequest struct {
@@ -167,7 +167,7 @@ type ChannelGrant struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// ── Audit Types ─────────────────────────────────────────────
+// Audit Types
 
 // HealthStatus is returned by the health check endpoint.
 type HealthStatus struct {

@@ -59,7 +59,7 @@ func handleCreate(name string, args []string, root string) error {
 	}
 
 	fmt.Println()
-	fmt.Println("  ⚡ Weblisk Agent Create")
+	fmt.Println("  Weblisk Agent Create")
 	fmt.Println()
 	fmt.Printf("  Agent:     %s\n", name)
 	fmt.Printf("  Platform:  %s\n", platform)
@@ -143,7 +143,7 @@ func handleVerify(args []string) error {
 
 func handleList(root string) error {
 	fmt.Println()
-	fmt.Println("  ⚡ Agents")
+	fmt.Println("  Agents")
 	fmt.Println()
 
 	agentsDir := filepath.Join(root, "agents")
@@ -234,7 +234,7 @@ func ParseArgs(args []string) ([]string, string) {
 // PrintHelp shows agent command usage.
 func PrintHelp() {
 	fmt.Print(`
-  ⚡ Weblisk Agent
+  Weblisk Agent
 
   Usage:
     weblisk agent create <name> [--platform local-go|cloudflare]

@@ -1,6 +1,6 @@
 package protocol
 
-// ── Protocol Verification ───────────────────────────────────
+// Protocol Verification
 //
 // Tests a running orchestrator or agent against the Weblisk
 // protocol specification. Makes HTTP requests and validates
@@ -19,12 +19,12 @@ func jsonReader(data []byte) io.Reader {
 	return bytes.NewReader(data)
 }
 
-// ── Verify Orchestrator ─────────────────────────────────────
+// Verify Orchestrator
 
 // VerifyOrchestrator runs protocol compliance tests against a running orchestrator.
 func VerifyOrchestrator(url string) error {
 	fmt.Println()
-	fmt.Println("  ⚡ Verifying Orchestrator Protocol Compliance")
+	fmt.Println("  Verifying Orchestrator Protocol Compliance")
 	fmt.Printf("  Target: %s\n\n", url)
 
 	pass := 0
@@ -219,12 +219,12 @@ func VerifyOrchestrator(url string) error {
 	return nil
 }
 
-// ── Verify Agent ────────────────────────────────────────────
+// Verify Agent
 
 // VerifyAgent runs protocol compliance tests against a running agent.
 func VerifyAgent(url string) error {
 	fmt.Println()
-	fmt.Println("  ⚡ Verifying Agent Protocol Compliance")
+	fmt.Println("  Verifying Agent Protocol Compliance")
 	fmt.Printf("  Target: %s\n\n", url)
 
 	pass := 0

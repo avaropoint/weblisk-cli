@@ -1,6 +1,6 @@
 package project
 
-// ── Project Scaffold ────────────────────────────────────────
+// Project Scaffold
 //
 // Creates new Weblisk projects from embedded templates.
 // Renders .tpl files with project-specific data. Framework
@@ -89,7 +89,7 @@ func Scaffold(name, cwd, tmpl string, local bool) error {
 		Port:       "3000",
 	}
 
-	fmt.Printf("\n  ⚡ Creating %s\n\n", name)
+	fmt.Printf("\n  Creating %s\n\n", name)
 
 	// Render templates based on chosen template set
 	pages := templateSet(tmpl)
@@ -151,7 +151,7 @@ func Scaffold(name, cwd, tmpl string, local bool) error {
 	return nil
 }
 
-// ── Template Sets ───────────────────────────────────────────
+// Template Sets
 
 func templateSet(tmpl string) []string {
 	base := []string{"home.html.tpl", "404.html.tpl"}
@@ -176,7 +176,7 @@ func templateOutputPath(tpl, projectDir string) string {
 	return filepath.Join(projectDir, "app", name)
 }
 
-// ── File Writers ────────────────────────────────────────────
+// File Writers
 
 func writeRenderedTpl(tpl, dest string, data TplData) error {
 	content, err := RenderTpl(tpl, data)
@@ -243,7 +243,7 @@ func extractFramework(projectDir string) (int, error) {
 	return count, err
 }
 
-// ── Helpers ─────────────────────────────────────────────────
+// Helpers
 
 func toScaffoldTitle(name string) string {
 	name = strings.ReplaceAll(name, "-", " ")

@@ -36,7 +36,7 @@ func Build(root string, opts Options) error {
 	distDir := filepath.Join(root, cfg.Dist)
 
 	fmt.Println()
-	fmt.Println("  ⚡ Weblisk build")
+	fmt.Println("  Weblisk Build")
 	fmt.Println()
 	fmt.Printf("  Origin: %s\n", cfg.Origin)
 	fmt.Printf("  Output: %s\n", distDir)
@@ -64,7 +64,7 @@ func Build(root string, opts Options) error {
 	if cfg.CDN != "" {
 		count := rewriteImportMaps(distDir, cfg.CDN)
 		if count > 0 {
-			fmt.Printf("  ✓ %d pages rewritten → %s\n", count, cfg.CDN)
+		fmt.Printf("  [ok] %d pages rewritten to %s\n", count, cfg.CDN)
 		}
 	}
 
@@ -72,18 +72,18 @@ func Build(root string, opts Options) error {
 	fwDir := filepath.Join(distDir, "lib", "weblisk")
 	fwCount, err := minifyDir(fwDir)
 	if err == nil && fwCount > 0 {
-		fmt.Printf("  ✓ %d framework modules minified\n", fwCount)
+		fmt.Printf("  [ok] %d framework modules minified\n", fwCount)
 	}
 
 	// Opt-in: minify user pages and app code
 	if opts.Minify {
 		htmlCount := minifyHTMLFiles(distDir)
 		if htmlCount > 0 {
-			fmt.Printf("  ✓ %d pages minified\n", htmlCount)
+			fmt.Printf("  [ok] %d pages minified\n", htmlCount)
 		}
 		appCount := minifyUserAssets(distDir)
 		if appCount > 0 {
-			fmt.Printf("  ✓ %d app assets minified\n", appCount)
+			fmt.Printf("  [ok] %d app assets minified\n", appCount)
 		}
 	}
 
@@ -94,18 +94,18 @@ func Build(root string, opts Options) error {
 	if opts.Fingerprint {
 		count, err := fingerprint(distDir)
 		if err == nil && count > 0 {
-			fmt.Printf("  ✓ %d assets fingerprinted\n", count)
+			fmt.Printf("  [ok] %d assets fingerprinted\n", count)
 		}
 	}
 
 	// Generate sitemap.xml
 	sitemapRoutes := filterRoutes(routes, "404")
 	writeSitemap(filepath.Join(distDir, "sitemap.xml"), cfg.Origin, sitemapRoutes)
-	fmt.Println("  ✓ sitemap.xml")
+	fmt.Println("  [ok] sitemap.xml")
 
 	// Generate robots.txt
 	writeRobots(filepath.Join(distDir, "robots.txt"), cfg.Origin)
-	fmt.Println("  ✓ robots.txt")
+	fmt.Println("  [ok] robots.txt")
 
 	if cfg.CDN != "" {
 		fmt.Printf("\n  Done. Deploy %s/lib/weblisk/ → CDN, everything else → site host.\n\n", cfg.Dist)
@@ -114,8 +114,6 @@ func Build(root string, opts Options) error {
 	}
 	return nil
 }
-
-// ─── Asset Copier ────────────────────────────────────────────
 
 func copyAssets(src, dest, projectRoot string) error {
 	entries, err := os.ReadDir(src)
@@ -171,8 +169,6 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// ─── CDN import-map rewriter ─────────────────────────────────
-
 func rewriteImportMaps(dir, cdn string) int {
 	count := 0
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -198,7 +194,7 @@ func rewriteImportMaps(dir, cdn string) int {
 	return count
 }
 
-// ─── Minification helpers ────────────────────────────────────
+
 
 type fileEntry struct {
 	abs string
@@ -298,8 +294,6 @@ func minifyUserAssets(distDir string) int {
 	return count
 }
 
-// ─── Route collection ────────────────────────────────────────
-
 func collectRoutes(dir, prefix string) []string {
 	var routes []string
 	entries, err := os.ReadDir(dir)
@@ -318,7 +312,7 @@ func collectRoutes(dir, prefix string) []string {
 			routes = append(routes, sub...)
 		} else if filepath.Ext(entry.Name()) == ".html" {
 			route := prefix + "/" + entry.Name()
-			fmt.Printf("  ✓ %s\n", route[1:])
+			fmt.Printf("  [ok] %s\n", route[1:])
 			routes = append(routes, route)
 		}
 	}
@@ -334,8 +328,6 @@ func filterRoutes(routes []string, exclude string) []string {
 	}
 	return out
 }
-
-// ─── Sitemap / Robots ────────────────────────────────────────
 
 func writeSitemap(path, origin string, routes []string) {
 	var b strings.Builder

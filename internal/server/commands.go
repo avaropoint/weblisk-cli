@@ -54,7 +54,7 @@ func handleInit(args []string, root string) error {
 	}
 
 	fmt.Println()
-	fmt.Println("  ⚡ Weblisk Server Init")
+	fmt.Println("  Weblisk Server Init")
 	fmt.Println()
 	fmt.Printf("  Platform:  %s\n", platform)
 	fmt.Printf("  AI Model:  %s\n", dispatch.DiscoverProvider())
@@ -119,7 +119,7 @@ func handleVerify(args []string) error {
 
 func handleStatus() error {
 	fmt.Println()
-	fmt.Println("  ⚡ Weblisk Server Status")
+	fmt.Println("  Weblisk Server Status")
 	fmt.Println()
 	dispatch.PrintProviderStatus()
 	return nil
@@ -147,7 +147,7 @@ func ParsePort(args []string) int {
 // PrintHelp shows server command usage.
 func PrintHelp() {
 	fmt.Print(`
-  ⚡ Weblisk Server
+  Weblisk Server
 
   Usage:
     weblisk server init [--platform local-go|cloudflare]
