@@ -56,26 +56,6 @@ func main() {
 			fatal("build failed: %v", err)
 		}
 
-	case "add":
-		if len(rest) < 2 {
-			fatal("Usage: weblisk add <page|island> <name>")
-		}
-		kind, name := rest[0], rest[1]
-		cwd, _ := os.Getwd()
-		config.Load(cwd)
-		switch kind {
-		case "page":
-			if err := project.AddPage(name, cwd); err != nil {
-				fatal("add page failed: %v", err)
-			}
-		case "island":
-			if err := project.AddIsland(name, cwd); err != nil {
-				fatal("add island failed: %v", err)
-			}
-		default:
-			fatal("Unknown type %q. Use: page or island", kind)
-		}
-
 	case "version", "--version", "-v":
 		fmt.Printf("weblisk v%s\n", version)
 
@@ -236,8 +216,6 @@ func printHelp() {
       --lib <path>      Local framework path (default: lib/weblisk)
     dev [root]          Start a local dev server
       --port <n>        Port number (default: 3000)
-    add page <name>     Add a new HTML page
-    add island <name>   Add an island script
     build [root]        Copy site to dist/ for deployment
       --minify          Minify HTML, CSS, and JS
       --fingerprint     Hash asset filenames for cache busting

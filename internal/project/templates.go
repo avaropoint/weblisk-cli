@@ -24,30 +24,15 @@ const coreTemplateRepo = "https://github.com/avaropoint/weblisk-templates.git"
 
 // Manifest represents the manifest.json structure.
 type Manifest struct {
-	Version  string                    `json:"version"`
-	Defaults ManifestDefaults          `json:"defaults"`
-	Scaffold map[string]ManifestEntry  `json:"scaffold"`
-	Pages    map[string]ManifestFile   `json:"pages"`
-	Islands  map[string]ManifestFile   `json:"islands"`
-	Init     map[string]ManifestInit   `json:"init"`
-}
-
-// ManifestDefaults holds the placeholder values used in templates.
-type ManifestDefaults struct {
-	Name string `json:"name"`
-	CDN  string `json:"cdn"`
+	Version  string                   `json:"version"`
+	Scaffold map[string]ManifestEntry `json:"scaffold"`
+	Init     map[string]ManifestInit  `json:"init"`
 }
 
 // ManifestEntry describes a scaffold set directory.
 type ManifestEntry struct {
 	Description string `json:"description"`
 	Path        string `json:"path"`
-}
-
-// ManifestFile describes a single template file.
-type ManifestFile struct {
-	Description string `json:"description"`
-	File        string `json:"file"`
 }
 
 // ManifestInit describes an init config file and its output destination.
