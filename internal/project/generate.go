@@ -35,7 +35,7 @@ func AddPage(name, root string) error {
 		Year:       fmt.Sprintf("%d", time.Now().Year()),
 	}
 
-	content, err := RenderTpl("page.html.tpl", data)
+	content, err := RenderTpl(root, "page", "page.html.tpl", data)
 	if err != nil {
 		return err
 	}
@@ -62,7 +62,7 @@ func AddIsland(name, root string) error {
 	}
 
 	data := TplData{Name: safeName}
-	content, err := RenderTpl("island.js.tpl", data)
+	content, err := RenderTpl(root, "island", "island.js.tpl", data)
 	if err != nil {
 		return err
 	}

@@ -16,6 +16,7 @@ type Config struct {
 	CDN              string   // WL_CDN — if set, importmaps point here instead of /lib/weblisk/
 	License          string   // WL_LICENSE — pro license key for downloading pro modules
 	BlueprintSources []string // WL_BLUEPRINT_SOURCES — additional blueprint repo URLs
+	TemplateSources  []string // WL_TEMPLATE_SOURCES — additional template repo URLs
 }
 
 // Vars stores loaded WL_* environment variables.
@@ -91,5 +92,15 @@ func Resolve() Config {
 		}
 	}
 
-	return Config{Origin: origin, Dist: dist, Port: port, CDN: cdn, License: license, BlueprintSources: blueprintSources}
+	var templateSources []string
+	if src := os.Getenv("WL_TEMPLATE_SOURCES"); src != "" {
+		for _, s := range strings.Split(src, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				templateSources = append(templateSources, s)
+			}
+		}
+	}
+
+	return Config{Origin: origin, Dist: dist, Port: port, CDN: cdn, License: license, BlueprintSources: blueprintSources, TemplateSources: templateSources}
 }

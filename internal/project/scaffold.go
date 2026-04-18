@@ -2,13 +2,12 @@ package project
 
 // Project Scaffold
 //
-// Creates new Weblisk projects from embedded templates.
-// Renders .tpl files with project-specific data. Framework
-// files are fetched from the weblisk repo when --local is used.
+// Creates new Weblisk projects from templates resolved via
+// multi-source template resolution. Templates are fetched from
+// weblisk-templates or overridden via local/custom sources.
 
 import (
 	"bytes"
-	"embed"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,9 +16,6 @@ import (
 	"text/template"
 	"time"
 )
-
-//go:embed all:templates
-var templateFS embed.FS
 
 const clientRepo = "https://github.com/avaropoint/weblisk.git"
 
@@ -33,14 +29,15 @@ type TplData struct {
 	Port       string
 }
 
-// RenderTpl renders a named template with the given data.
-func RenderTpl(name string, data TplData) (string, error) {
-	content, err := templateFS.ReadFile("templates/" + name)
+// RenderTpl renders a template from the resolved sources with the given data.
+// The category/name is resolved via multi-source template resolution.
+func RenderTpl(root, category, name string, data TplData) (string, error) {
+	content, err := ResolveTemplate(root, category, name)
 	if err != nil {
-		return "", fmt.Errorf("template %q not found: %w", name, err)
+		return "", err
 	}
 
-	tmpl, err := template.New(name).Parse(string(content))
+	tmpl, err := template.New(name).Parse(content)
 	if err != nil {
 		return "", fmt.Errorf("parsing template %q: %w", name, err)
 	}
@@ -54,12 +51,8 @@ func RenderTpl(name string, data TplData) (string, error) {
 }
 
 // ReadTpl reads a raw template without rendering.
-func ReadTpl(name string) (string, error) {
-	content, err := templateFS.ReadFile("templates/" + name)
-	if err != nil {
-		return "", fmt.Errorf("template %q not found: %w", name, err)
-	}
-	return string(content), nil
+func ReadTpl(root, category, name string) (string, error) {
+	return ResolveTemplate(root, category, name)
 }
 
 // Scaffold creates a new Weblisk project directory.
@@ -91,34 +84,28 @@ func Scaffold(name, cwd, tmpl string, local bool) error {
 
 	fmt.Printf("\n  Creating %s\n\n", name)
 
-	// Render templates based on chosen template set
-	pages := templateSet(tmpl)
+	// Resolve scaffold templates from multi-source resolution
+	pages, err := ResolveTemplateSet(cwd, tmpl)
+	if err != nil {
+		return err
+	}
 	for _, page := range pages {
 		outPath := templateOutputPath(page, projectDir)
-		if err := writeRenderedTpl(page, outPath, data); err != nil {
+		if err := writeRenderedTpl(cwd, "scaffold", page, outPath, data); err != nil {
 			return err
 		}
 		rel, _ := filepath.Rel(projectDir, outPath)
 		fmt.Printf("    %s\n", rel)
 	}
 
-	// Always render core files
-	coreFiles := []struct {
-		tpl  string
-		dest string
-	}{
-		{"styles.css.tpl", filepath.Join(projectDir, "app", "css", "styles.css")},
-		{"sw.js.tpl", filepath.Join(projectDir, "app", "sw.js")},
-		{"shell.js.tpl", filepath.Join(projectDir, "app", "js", "islands", "shell.js")},
-		{"env.tpl", filepath.Join(projectDir, ".env")},
-		{"gitignore.tpl", filepath.Join(projectDir, ".gitignore")},
-	}
-
-	for _, cf := range coreFiles {
-		if err := writeRenderedTpl(cf.tpl, cf.dest, data); err != nil {
+	// Render core files from resolved sources
+	coreTemplates := ResolveCoreTemplates(cwd)
+	for _, ct := range coreTemplates {
+		dest := coreOutputPath(ct, projectDir)
+		if err := writeRenderedTpl(cwd, "core", ct, dest, data); err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(projectDir, cf.dest)
+		rel, _ := filepath.Rel(projectDir, dest)
 		fmt.Printf("    %s\n", rel)
 	}
 
@@ -151,23 +138,6 @@ func Scaffold(name, cwd, tmpl string, local bool) error {
 	return nil
 }
 
-// Template Sets
-
-func templateSet(tmpl string) []string {
-	base := []string{"home.html.tpl", "404.html.tpl"}
-
-	switch tmpl {
-	case "blog":
-		return append(base, "blog.html.tpl", "about.html.tpl")
-	case "dashboard":
-		return append(base, "dashboard.html.tpl", "settings.html.tpl")
-	case "docs":
-		return append(base, "docs.html.tpl")
-	default:
-		return base
-	}
-}
-
 func templateOutputPath(tpl, projectDir string) string {
 	name := strings.TrimSuffix(tpl, ".tpl")
 	if name == "home.html" {
@@ -176,10 +146,29 @@ func templateOutputPath(tpl, projectDir string) string {
 	return filepath.Join(projectDir, "app", name)
 }
 
+// coreOutputPath maps a core template name to its output destination.
+func coreOutputPath(tpl, projectDir string) string {
+	switch tpl {
+	case "styles.css.tpl":
+		return filepath.Join(projectDir, "app", "css", "styles.css")
+	case "sw.js.tpl":
+		return filepath.Join(projectDir, "app", "sw.js")
+	case "shell.js.tpl":
+		return filepath.Join(projectDir, "app", "js", "islands", "shell.js")
+	case "env.tpl":
+		return filepath.Join(projectDir, ".env")
+	case "gitignore.tpl":
+		return filepath.Join(projectDir, ".gitignore")
+	default:
+		name := strings.TrimSuffix(tpl, ".tpl")
+		return filepath.Join(projectDir, name)
+	}
+}
+
 // File Writers
 
-func writeRenderedTpl(tpl, dest string, data TplData) error {
-	content, err := RenderTpl(tpl, data)
+func writeRenderedTpl(root, category, tpl, dest string, data TplData) error {
+	content, err := RenderTpl(root, category, tpl, data)
 	if err != nil {
 		return err
 	}
