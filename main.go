@@ -120,6 +120,22 @@ func main() {
 			fatal("update failed: %v", err)
 		}
 
+	case "vendor":
+		dest := "lib/weblisk"
+		for i := 0; i < len(rest); i++ {
+			a := rest[i]
+			if a == "--dest" && i+1 < len(rest) {
+				i++
+				dest = rest[i]
+			} else if strings.HasPrefix(a, "--dest=") {
+				dest = strings.SplitN(a, "=", 2)[1]
+			}
+		}
+		cwd, _ := os.Getwd()
+		if err := project.Vendor(cwd, dest); err != nil {
+			fatal("vendor failed: %v", err)
+		}
+
 	case "help", "--help", "-h":
 		printHelp()
 
@@ -244,6 +260,8 @@ func printHelp() {
       --key <key>       License key (or set WL_LICENSE in .env)
       --domain <d>      Register domain for CDN-mode pro module serving
     update              Re-download framework + pro modules (--local projects)
+    vendor              Download framework files into any existing project
+      --dest <path>     Destination directory (default: lib/weblisk)
     version             Print version
     help                Show this help message
 
