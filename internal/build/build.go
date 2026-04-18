@@ -56,20 +56,20 @@ func Build(root string, opts Options) error {
 	os.MkdirAll(distDir, 0755)
 
 	// Copy assets
-	if err := copyAssets(root, distDir, root); err != nil {
+	if err := copyAssets(root, distDir); err != nil {
 		return fmt.Errorf("copy assets: %w", err)
 	}
 
 	// Rewrite importmaps to CDN origin if configured
 	if cfg.CDN != "" {
-		count := rewriteImportMaps(distDir, cfg.CDN)
+		count := rewriteImportMaps(distDir, cfg.CDN, cfg.Lib)
 		if count > 0 {
 		fmt.Printf("  [ok] %d pages rewritten to %s\n", count, cfg.CDN)
 		}
 	}
 
 	// Always minify framework modules
-	fwDir := filepath.Join(distDir, "lib", "weblisk")
+	fwDir := filepath.Join(distDir, cfg.Lib)
 	fwCount, err := minifyDir(fwDir)
 	if err == nil && fwCount > 0 {
 		fmt.Printf("  [ok] %d framework modules minified\n", fwCount)
@@ -108,14 +108,14 @@ func Build(root string, opts Options) error {
 	fmt.Println("  [ok] robots.txt")
 
 	if cfg.CDN != "" {
-		fmt.Printf("\n  Done. Deploy %s/lib/weblisk/ → CDN, everything else → site host.\n\n", cfg.Dist)
+		fmt.Printf("\n  Done. Deploy %s/%s/ → CDN, everything else → site host.\n\n", cfg.Dist, cfg.Lib)
 	} else {
 		fmt.Printf("\n  Done. Deploy %s/ to any static host.\n\n", cfg.Dist)
 	}
 	return nil
 }
 
-func copyAssets(src, dest, projectRoot string) error {
+func copyAssets(src, dest string) error {
 	entries, err := os.ReadDir(src)
 	if err != nil {
 		return err
@@ -129,20 +129,11 @@ func copyAssets(src, dest, projectRoot string) error {
 		srcPath := filepath.Join(src, name)
 		destPath := filepath.Join(dest, name)
 
-		// Flatten app/ contents into dist root
-		rel, _ := filepath.Rel(projectRoot, srcPath)
-		if rel == "app" && entry.IsDir() {
-			if err := copyAssets(srcPath, dest, projectRoot); err != nil {
-				return err
-			}
-			continue
-		}
-
 		if entry.IsDir() {
 			if err := os.MkdirAll(destPath, 0755); err != nil {
 				return err
 			}
-			if err := copyAssets(srcPath, destPath, projectRoot); err != nil {
+			if err := copyAssets(srcPath, destPath); err != nil {
 				return err
 			}
 		} else {
@@ -169,8 +160,9 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-func rewriteImportMaps(dir, cdn string) int {
+func rewriteImportMaps(dir, cdn, lib string) int {
 	count := 0
+	localBase := "/" + lib + "/"
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || filepath.Ext(path) != ".html" {
 			return err
@@ -183,8 +175,8 @@ func rewriteImportMaps(dir, cdn string) int {
 		if !strings.Contains(src, `"importmap"`) {
 			return nil
 		}
-		updated := strings.Replace(src, `"/lib/weblisk/weblisk.js"`, `"`+cdn+`/weblisk.js"`, -1)
-		updated = strings.Replace(updated, `"/lib/weblisk/"`, `"`+cdn+`/"`, -1)
+		updated := strings.Replace(src, localBase+"weblisk.js\"", `"`+cdn+`/weblisk.js"`, -1)
+		updated = strings.Replace(updated, `"`+localBase, `"`+cdn+`/`, -1)
 		if updated != src {
 			os.WriteFile(path, []byte(updated), 0644)
 			count++

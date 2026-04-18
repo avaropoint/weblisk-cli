@@ -33,12 +33,12 @@ func main() {
 
 	switch cmd {
 	case "new":
-		name, template, local := parseNewArgs(rest)
+		name, template, local, lib := parseNewArgs(rest)
 		if name == "" {
-			fatal("Usage: weblisk new <project-name> [--template blog|dashboard|docs] [--local]")
+			fatal("Usage: weblisk new <project-name> [--template blog|dashboard|docs] [--local] [--lib path]")
 		}
 		cwd, _ := os.Getwd()
-		if err := project.Scaffold(name, cwd, template, local); err != nil {
+		if err := project.Scaffold(name, cwd, template, local, lib); err != nil {
 			fatal("scaffold failed: %v", err)
 		}
 
@@ -116,7 +116,9 @@ func main() {
 		}
 
 	case "vendor":
-		dest := "lib/weblisk"
+		cwd, _ := os.Getwd()
+		config.Load(cwd)
+		dest := ""
 		for i := 0; i < len(rest); i++ {
 			a := rest[i]
 			if a == "--dest" && i+1 < len(rest) {
@@ -126,7 +128,6 @@ func main() {
 				dest = strings.SplitN(a, "=", 2)[1]
 			}
 		}
-		cwd, _ := os.Getwd()
 		if err := project.Vendor(cwd, dest); err != nil {
 			fatal("vendor failed: %v", err)
 		}
@@ -143,8 +144,8 @@ func main() {
 
 // Arg parsers
 
-func parseNewArgs(args []string) (string, string, bool) {
-	var name, template string
+func parseNewArgs(args []string) (string, string, bool, string) {
+	var name, template, lib string
 	template = "default"
 	local := false
 	for i := 0; i < len(args); i++ {
@@ -158,11 +159,18 @@ func parseNewArgs(args []string) (string, string, bool) {
 				i++
 				template = args[i]
 			}
+		} else if strings.HasPrefix(a, "--lib") {
+			if strings.Contains(a, "=") {
+				lib = strings.SplitN(a, "=", 2)[1]
+			} else if i+1 < len(args) {
+				i++
+				lib = args[i]
+			}
 		} else if !strings.HasPrefix(a, "-") {
 			name = a
 		}
 	}
-	return name, template, local
+	return name, template, local, lib
 }
 
 func parseBuildArgs(args []string) (string, build.Options) {
@@ -225,6 +233,7 @@ func printHelp() {
     new <name>          Scaffold a new Weblisk project
       --template <t>    Starter template: blog, dashboard, docs (default: basic)
       --local           Include framework files locally instead of CDN
+      --lib <path>      Local framework path (default: lib/weblisk)
     dev [root]          Start a local dev server
       --port <n>        Port number (default: 3000)
     add page <name>     Add a new HTML page
@@ -256,7 +265,7 @@ func printHelp() {
       --domain <d>      Register domain for CDN-mode pro module serving
     update              Re-download framework + pro modules (--local projects)
     vendor              Download framework files into any existing project
-      --dest <path>     Destination directory (default: lib/weblisk)
+      --dest <path>     Destination directory (default: from WL_LIB or lib/weblisk)
     version             Print version
     help                Show this help message
 
@@ -265,6 +274,7 @@ func printHelp() {
     WL_PORT         Dev server port (default: 3000)
     WL_DIST         Output directory (default: dist)
     WL_CDN          CDN base URL (rewrites importmaps on build)
+    WL_LIB          Local framework path (default: lib/weblisk)
     WL_LICENSE      Pro license key (optional)
     WL_AI_PROVIDER  AI backend: openai, ollama, anthropic, cloudflare
     WL_AI_MODEL     Model name (provider-specific default)

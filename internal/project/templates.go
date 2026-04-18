@@ -184,7 +184,7 @@ func ResolveFile(root, relPath string) (string, error) {
 
 // ApplyReplacements performs project-specific string substitutions on content.
 // Replaces the default placeholder name and optionally swaps CDN for local path.
-func ApplyReplacements(content, projectName string, local bool) string {
+func ApplyReplacements(content, projectName string, local bool, lib string) string {
 	title := toScaffoldTitle(projectName)
 	slug := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(projectName, " ", "-"), "_", "-"))
 
@@ -192,7 +192,7 @@ func ApplyReplacements(content, projectName string, local bool) string {
 	content = strings.ReplaceAll(content, "my-app", slug)
 
 	if local {
-		content = strings.ReplaceAll(content, defaultCDN, "/lib/weblisk/")
+		content = strings.ReplaceAll(content, defaultCDN, "/"+lib+"/")
 	}
 
 	return content
@@ -200,19 +200,18 @@ func ApplyReplacements(content, projectName string, local bool) string {
 
 // CopyScaffoldDir copies a scaffold set into the project directory,
 // applying string replacements to all text files.
-func CopyScaffoldDir(scaffoldDir, projectDir, projectName string, local bool) (int, error) {
+func CopyScaffoldDir(scaffoldDir, projectDir, projectName string, local bool, lib string) (int, error) {
 	count := 0
-	appDir := filepath.Join(scaffoldDir, "app")
 
-	err := filepath.WalkDir(appDir, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(scaffoldDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(appDir, path)
+		rel, _ := filepath.Rel(scaffoldDir, path)
 		if rel == "." {
 			return nil
 		}
-		dest := filepath.Join(projectDir, "app", rel)
+		dest := filepath.Join(projectDir, rel)
 		if d.IsDir() {
 			return os.MkdirAll(dest, 0755)
 		}
@@ -223,7 +222,7 @@ func CopyScaffoldDir(scaffoldDir, projectDir, projectName string, local bool) (i
 		}
 
 		// Apply replacements to text files.
-		content := ApplyReplacements(string(data), projectName, local)
+		content := ApplyReplacements(string(data), projectName, local, lib)
 
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
@@ -248,7 +247,7 @@ func CopyInitFiles(root, projectDir, projectName string) error {
 			fmt.Fprintf(os.Stderr, "  [warn] Init file %s: %v\n", entry.File, err)
 			continue
 		}
-		content = ApplyReplacements(content, projectName, false)
+		content = ApplyReplacements(content, projectName, false, "")
 		dest := filepath.Join(projectDir, entry.Dest)
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/avaropoint/weblisk-cli/internal/config"
 )
 
 const proValidateURL = "https://cdn.weblisk.dev/pro/validate"
@@ -44,7 +46,8 @@ func Activate(root, key, domain, version string) error {
 	fmt.Printf("  [ok] License valid -- %d pro modules available\n\n", len(modules))
 
 	// Download pro modules
-	proDir := filepath.Join(root, "lib", "weblisk", "pro")
+	cfg := config.Resolve()
+	proDir := filepath.Join(root, cfg.Lib, "pro")
 	if err := os.MkdirAll(proDir, 0755); err != nil {
 		return fmt.Errorf("create pro directory: %w", err)
 	}
@@ -80,7 +83,7 @@ func Activate(root, key, domain, version string) error {
 		}
 	}
 
-	fmt.Printf("\n  Done. %d pro modules installed to lib/weblisk/pro/\n", downloaded)
+	fmt.Printf("\n  Done. %d pro modules installed to %s/pro/\n", downloaded, cfg.Lib)
 	fmt.Println()
 	fmt.Println("  Pro modules are plain ES modules — import directly:")
 	fmt.Println()

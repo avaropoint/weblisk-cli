@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avaropoint/weblisk-cli/internal/config"
 	"github.com/avaropoint/weblisk-cli/internal/pro"
 )
 
@@ -18,7 +19,8 @@ const vendorCDNBase = "https://cdn.weblisk.dev/"
 // This enables adding Weblisk to any existing project without scaffolding.
 func Vendor(root, dest string) error {
 	if dest == "" {
-		dest = "lib/weblisk"
+		cfg := config.Resolve()
+		dest = cfg.Lib
 	}
 
 	destDir := dest

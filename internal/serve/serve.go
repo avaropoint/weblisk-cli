@@ -7,24 +7,17 @@ import (
 	"path/filepath"
 )
 
-// Serve starts a local dev server that overlays app/ and lib/ into a single
-// virtual root, so HTML, /css/…, /js/… resolve from app/ while
-// /lib/weblisk/… resolves from lib/. Works on all platforms (no symlinks).
+// Serve starts a local dev server from the project root.
+// All files (HTML, CSS, JS, lib/) are served directly from root.
 func Serve(root string, port int) error {
-	appDir := filepath.Join(root, "app")
-	libDir := filepath.Join(root, "lib")
-
-	if _, err := os.Stat(appDir); err != nil {
-		return fmt.Errorf("app/ directory not found in %s", root)
+	if _, err := os.Stat(filepath.Join(root, "index.html")); err != nil {
+		return fmt.Errorf("index.html not found in %s — run 'weblisk new' first", root)
 	}
 
 	mux := http.NewServeMux()
 
-	// /lib/ serves from <root>/lib/
-	mux.Handle("/lib/", http.StripPrefix("/lib/", http.FileServer(http.Dir(libDir))))
-
-	// Everything else serves from <root>/app/
-	mux.Handle("/", http.FileServer(http.Dir(appDir)))
+	// Serve everything from the project root.
+	mux.Handle("/", http.FileServer(http.Dir(root)))
 
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Println()
@@ -33,7 +26,7 @@ func Serve(root string, port int) error {
 	fmt.Printf("  Local: http://localhost:%d\n", port)
 	fmt.Printf("  Root:  %s\n", root)
 	fmt.Println()
-	fmt.Println("  Serving app/ + lib/ on a single origin.")
+	fmt.Printf("  Serving %s\n", root)
 	fmt.Println("  Press Ctrl+C to stop.")
 	fmt.Println()
 

@@ -21,7 +21,7 @@ func AddPage(name, root string) error {
 	}
 
 	title := toTitle(filepath.Base(safeName))
-	filePath := filepath.Join(root, "app", safeName+".html")
+	filePath := filepath.Join(root, safeName+".html")
 
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return err
@@ -41,7 +41,7 @@ func AddPage(name, root string) error {
 		return err
 	}
 
-	fmt.Printf("  [ok] app/%s.html\n", safeName)
+	fmt.Printf("  [ok] %s.html\n", safeName)
 	fmt.Printf("\n  Page ready: /%s.html\n\n", safeName)
 	return nil
 }
@@ -53,7 +53,7 @@ func AddIsland(name, root string) error {
 		return fmt.Errorf("invalid island name")
 	}
 
-	filePath := filepath.Join(root, "app", "js", "islands", safeName+".js")
+	filePath := filepath.Join(root, "js", "islands", safeName+".js")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func AddIsland(name, root string) error {
 		return err
 	}
 
-	fmt.Printf("  [ok] app/js/islands/%s.js\n", safeName)
+	fmt.Printf("  [ok] js/islands/%s.js\n", safeName)
 	fmt.Println()
 	fmt.Println("  Island ready. Add to your HTML:")
 	fmt.Printf("    <div data-island=\"%s\">\n", safeName)

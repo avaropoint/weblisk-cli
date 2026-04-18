@@ -13,12 +13,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/avaropoint/weblisk-cli/internal/config"
 )
 
 const clientRepo = "https://github.com/avaropoint/weblisk.git"
 
 // Scaffold creates a new Weblisk project directory.
-func Scaffold(name, cwd, tmpl string, local bool) error {
+func Scaffold(name, cwd, tmpl string, local bool, lib string) error {
+	if lib == "" {
+		lib = config.DefaultLib
+	}
+	lib = strings.TrimRight(lib, "/")
+
 	projectDir := filepath.Join(cwd, name)
 
 	if _, err := os.Stat(projectDir); err == nil {
@@ -37,11 +44,11 @@ func Scaffold(name, cwd, tmpl string, local bool) error {
 		return err
 	}
 
-	count, err := CopyScaffoldDir(scaffoldDir, projectDir, name, local)
+	count, err := CopyScaffoldDir(scaffoldDir, projectDir, name, local, lib)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("    app/ (%d files)\n", count)
+	fmt.Printf("    %d files\n", count)
 
 	// Copy init config files (.env, .gitignore).
 	if err := CopyInitFiles(cwd, projectDir, name); err != nil {
@@ -51,24 +58,27 @@ func Scaffold(name, cwd, tmpl string, local bool) error {
 	fmt.Printf("    .gitignore\n")
 
 	// Write weblisk.json
-	configContent := fmt.Sprintf(`{
+	configJSON := fmt.Sprintf(`{
   "name": "%s",
-  "version": "1.0.0"
-}
-`, name)
+  "version": "1.0.0"`, name)
+	if lib != config.DefaultLib {
+		configJSON += fmt.Sprintf(`,
+  "lib": "%s"`, lib)
+	}
+	configJSON += "\n}\n"
 	configPath := filepath.Join(projectDir, "weblisk.json")
-	if err := writeFile(configPath, configContent); err != nil {
+	if err := writeFile(configPath, configJSON); err != nil {
 		return err
 	}
 	fmt.Printf("    weblisk.json\n")
 
 	// Extract local framework if requested (git clone + cache)
 	if local {
-		count, err := extractFramework(projectDir)
+		count, err := extractFramework(projectDir, lib)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("    lib/weblisk/ (%d files)\n", count)
+		fmt.Printf("    %s/ (%d files)\n", lib, count)
 	}
 
 	fmt.Println()
@@ -87,9 +97,9 @@ func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
-// extractFramework clones the weblisk repo and copies lib/weblisk/ into the project.
-// The clone is cached at .weblisk/client/ so subsequent scaffolds don't re-download.
-func extractFramework(projectDir string) (int, error) {
+// extractFramework clones the weblisk repo and copies lib/weblisk/ into the
+// user-specified lib directory. The clone is cached at .weblisk/client/.
+func extractFramework(projectDir, lib string) (int, error) {
 	cacheDir := filepath.Join(projectDir, ".weblisk", "client")
 
 	if _, err := os.Stat(filepath.Join(cacheDir, "lib", "weblisk", "weblisk.js")); err != nil {
@@ -107,7 +117,7 @@ func extractFramework(projectDir string) (int, error) {
 	}
 
 	srcDir := filepath.Join(cacheDir, "lib", "weblisk")
-	destDir := filepath.Join(projectDir, "lib", "weblisk")
+	destDir := filepath.Join(projectDir, lib)
 	count := 0
 
 	err := filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {

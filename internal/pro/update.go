@@ -64,9 +64,10 @@ func Update(root, version string) error {
 	fmt.Println("  Weblisk Update")
 	fmt.Println()
 
-	libDir := filepath.Join(root, "lib", "weblisk")
+	cfg := config.Resolve()
+	libDir := filepath.Join(root, cfg.Lib)
 	if _, err := os.Stat(libDir); os.IsNotExist(err) {
-		return fmt.Errorf("no lib/weblisk/ found -- are you in a --local project?")
+		return fmt.Errorf("no %s/ found -- are you in a --local project?", cfg.Lib)
 	}
 
 	fmt.Println("  Downloading latest framework modules...")
@@ -96,7 +97,6 @@ func Update(root, version string) error {
 		updated++
 	}
 
-	cfg := config.Resolve()
 	if cfg.License != "" {
 		fmt.Println()
 		fmt.Println("  Updating pro modules...")

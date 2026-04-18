@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,18 +14,36 @@ type Config struct {
 	Origin           string
 	Dist             string
 	Port             int      // WL_PORT — dev server port (default: 3000)
-	CDN              string   // WL_CDN — if set, importmaps point here instead of /lib/weblisk/
+	CDN              string   // WL_CDN — if set, importmaps point here instead of local lib path
+	Lib              string   // WL_LIB — local framework path relative to project root (default: lib/weblisk)
 	License          string   // WL_LICENSE — pro license key for downloading pro modules
 	BlueprintSources []string // WL_BLUEPRINT_SOURCES — additional blueprint repo URLs
 	TemplateSources  []string // WL_TEMPLATE_SOURCES — additional template repo URLs
 }
 
+// DefaultLib is the default local framework directory.
+const DefaultLib = "lib/weblisk"
+
 // Vars stores loaded WL_* environment variables.
 var Vars = map[string]string{}
 
+// projectLib caches the "lib" value read from weblisk.json (empty if not set).
+var projectLib string
+
 // Load reads a .env file from root and merges into os environment.
+// It also reads the "lib" field from weblisk.json if present.
 // Existing env vars take precedence (12-factor).
 func Load(root string) error {
+	// Read weblisk.json for project-level config
+	if data, err := os.ReadFile(filepath.Join(root, "weblisk.json")); err == nil {
+		var pj struct {
+			Lib string `json:"lib"`
+		}
+		if json.Unmarshal(data, &pj) == nil && pj.Lib != "" {
+			projectLib = pj.Lib
+		}
+	}
+
 	path := filepath.Join(root, ".env")
 	f, err := os.Open(path)
 	if err != nil {
@@ -82,6 +101,15 @@ func Resolve() Config {
 	cdn = strings.TrimRight(cdn, "/")
 	license := os.Getenv("WL_LICENSE")
 
+	lib := os.Getenv("WL_LIB")
+	if lib == "" {
+		lib = projectLib
+	}
+	if lib == "" {
+		lib = DefaultLib
+	}
+	lib = strings.TrimRight(lib, "/")
+
 	var blueprintSources []string
 	if src := os.Getenv("WL_BLUEPRINT_SOURCES"); src != "" {
 		for _, s := range strings.Split(src, ",") {
@@ -102,5 +130,5 @@ func Resolve() Config {
 		}
 	}
 
-	return Config{Origin: origin, Dist: dist, Port: port, CDN: cdn, License: license, BlueprintSources: blueprintSources, TemplateSources: templateSources}
+	return Config{Origin: origin, Dist: dist, Port: port, CDN: cdn, Lib: lib, License: license, BlueprintSources: blueprintSources, TemplateSources: templateSources}
 }
