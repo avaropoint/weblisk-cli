@@ -3,9 +3,16 @@
 Zero-dependency static site builder + AI agent dispatcher.
 
 A standalone Go binary. No runtime, no package manager, no dependencies.
-The CLI is a blueprint carrier — it describes how agents and servers should
-work, dispatches to the user's AI model to generate implementations, and
-verifies they comply with the protocol specification.
+The CLI scaffolds projects, serves them locally, builds for production,
+and dispatches to the user's AI model to generate agent implementations.
+
+## Related Projects
+
+| Repository | Description |
+|---|---|
+| [weblisk](https://github.com/avaropoint/weblisk) | Core framework — the client-side JS runtime |
+| [weblisk-templates](https://github.com/avaropoint/weblisk-templates) | Project templates used by `weblisk new` |
+| [weblisk-blueprints](https://github.com/avaropoint/weblisk-blueprints) | Agent and server blueprints used by `weblisk server init` / `weblisk agent create` |
 
 ## Install
 
@@ -49,13 +56,19 @@ make build
 
 ```bash
 # Create a new project
-weblisk new my-site --template blog
+weblisk new my-site
+weblisk new my-blog --template blog
+weblisk new my-app --template dashboard --local
 
 # Start dev server
 cd my-site && weblisk dev
 
 # Build for production
 weblisk build --minify --fingerprint
+
+# Add framework files to an existing project
+weblisk vendor
+weblisk vendor --dest js/vendor
 
 # Code generation (requires AI provider)
 export WL_AI_PROVIDER=ollama WL_AI_MODEL=llama3
@@ -67,68 +80,34 @@ weblisk server start
 weblisk agent start seo --orch http://localhost:9800
 ```
 
-## Architecture
+## Templates
 
-```
-weblisk-cli/
-├── main.go                    Entry point — command dispatch
-├── internal/
-│   ├── config/                .env loader + WL_* resolution
-│   ├── build/                 Build pipeline (copy, minify, fingerprint, sitemap)
-│   ├── serve/                 Local dev server (overlays app/ + lib/)
-│   ├── project/               Scaffold new projects from templates
-│   │   └── templates/         Embedded HTML/CSS/JS templates
-│   ├── dispatch/              AI dispatch pipeline
-│   │   ├── blueprints.go      Multi-source blueprint loader
-│   │   ├── dispatch.go        Prompt construction + response parsing
-│   │   └── provider.go        LLM provider abstraction
-│   ├── server/                Server subcommands (init, start, verify)
-│   │   └── agent/             Agent subcommands (create, start, verify, list)
-│   ├── protocol/              Protocol types, crypto, verification
-│   ├── workspace/             Sandboxed file operations
-│   └── pro/                   License activation + module downloads
-└── go.mod
-```
+Project templates are sourced from [weblisk-templates](https://github.com/avaropoint/weblisk-templates). The CLI resolves templates from multiple sources in priority order:
 
-## Blueprint System
+1. **Local** — `./templates/` in your project directory
+2. **Custom** — repos listed in `WL_TEMPLATE_SOURCES`
+3. **Core** — [weblisk-templates](https://github.com/avaropoint/weblisk-templates) (always present)
 
-Blueprints are implementation-agnostic Markdown specifications that describe
-what agents and orchestrators must do. The CLI loads blueprints from multiple
-sources, resolving in priority order:
-
-1. **Local project** — `./blueprints/` in your project directory (highest priority)
-2. **Custom sources** — additional repos listed in `WL_BLUEPRINT_SOURCES`
-3. **Core** — [weblisk-blueprints](https://github.com/avaropoint/weblisk-blueprints) (always present as fallback)
-
-Each remote source is shallow-cloned and cached in `.weblisk/blueprints/`.
-The first source that contains a requested blueprint wins, so custom and
-local blueprints can override or extend the core set.
-
-### Multiple Blueprint Sources
-
-Add additional blueprint repositories via `.env`:
+Add custom template sources via `.env`:
 
 ```bash
-# Comma-separated list of Git repo URLs
-WL_BLUEPRINT_SOURCES=https://github.com/acme-corp/acme-blueprints.git,https://github.com/avaropoint/weblisk-blueprints-ecommerce.git
+WL_TEMPLATE_SOURCES=https://github.com/your-org/your-templates.git
 ```
 
-This supports several distribution models:
+## Blueprints
 
-| Source Type | Example | Typical Access |
-|---|---|---|
-| Core (open source) | `avaropoint/weblisk-blueprints` | Public, always available |
-| Vertical/partner | `avaropoint/weblisk-blueprints-ecommerce` | Granted per-customer |
-| Customer-owned | `acme-corp/acme-blueprints` | Customer's own repo |
-| Local project | `./blueprints/` | Project-scoped, checked in |
+Agent and server blueprints are sourced from [weblisk-blueprints](https://github.com/avaropoint/weblisk-blueprints). See that repository for the full specification and available blueprints.
 
-Access control is handled by Git — private repos require the user's existing
-Git credentials (SSH key or GitHub CLI auth). No additional auth layer needed.
+The CLI resolves blueprints from multiple sources in priority order:
 
-### Refreshing Blueprints
+1. **Local** — `./blueprints/` in your project directory
+2. **Custom** — repos listed in `WL_BLUEPRINT_SOURCES`
+3. **Core** — [weblisk-blueprints](https://github.com/avaropoint/weblisk-blueprints) (always present)
+
+Add custom blueprint sources via `.env`:
 
 ```bash
-weblisk blueprints update   # Clears cache and re-fetches all sources
+WL_BLUEPRINT_SOURCES=https://github.com/your-org/your-blueprints.git
 ```
 
 ## Environment Variables
@@ -138,24 +117,24 @@ weblisk blueprints update   # Clears cache and re-fetches all sources
 | `WL_ORIGIN` | Production origin URL | `http://localhost:3000` |
 | `WL_PORT` | Dev server port | `3000` |
 | `WL_DIST` | Output directory | `dist` |
-| `WL_CDN` | CDN base URL | — |
+| `WL_CDN` | CDN base URL (rewrites importmaps on build) | — |
+| `WL_LIB` | Local framework path | `lib/weblisk` |
 | `WL_LICENSE` | Pro license key | — |
+| `WL_TEMPLATE_SOURCES` | Additional template repo URLs (comma-separated) | — |
 | `WL_BLUEPRINT_SOURCES` | Additional blueprint repo URLs (comma-separated) | — |
-| `WL_AI_PROVIDER` | AI backend | `openai` |
+| `WL_AI_PROVIDER` | AI backend: `openai`, `ollama`, `anthropic`, `cloudflare` | `openai` |
 | `WL_AI_MODEL` | Model name | provider default |
 | `WL_AI_BASE_URL` | Endpoint override | — |
 | `WL_AI_KEY` | API key | — |
 
 ## Releasing
 
-To publish a new version:
-
 ```bash
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
-The [release workflow](.github/workflows/release.yml) will cross-compile for all platforms and create a GitHub Release automatically.
+The [release workflow](.github/workflows/release.yml) cross-compiles for all platforms and creates a GitHub Release.
 
 ## License
 
