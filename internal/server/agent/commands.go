@@ -21,7 +21,7 @@ func Handle(args []string, root string) error {
 	switch args[0] {
 	case "create":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: weblisk agent create <name> [--platform local-go|cloudflare]")
+			return fmt.Errorf("usage: weblisk agent create <name> [--platform go|cloudflare]")
 		}
 		return handleCreate(args[1], args[2:], root)
 	case "start":
@@ -42,7 +42,7 @@ func Handle(args []string, root string) error {
 }
 
 func handleCreate(name string, args []string, root string) error {
-	platform := "local-go"
+	platform := "go"
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--platform" && i+1 < len(args):
@@ -177,7 +177,7 @@ func handleList(root string) error {
 	}
 	fmt.Println()
 
-	fmt.Println("  Create an agent:  weblisk agent create <name> [--platform local-go|cloudflare]")
+	fmt.Println("  Create an agent:  weblisk agent create <name> [--platform go|cloudflare]")
 	fmt.Println("  Start an agent:   weblisk agent start <name> [--orch URL]")
 	fmt.Println("  Custom agents:    Any program implementing the Weblisk Agent Protocol")
 	fmt.Println()
@@ -237,7 +237,7 @@ func PrintHelp() {
   Weblisk Agent
 
   Usage:
-    weblisk agent create <name> [--platform local-go|cloudflare]
+    weblisk agent create <name> [--platform go|cloudflare]
       Generate agent code using your AI model.
       Uses domain blueprint if available (seo, a11y, perf, security).
       Custom agents get the universal agent blueprint.
@@ -252,7 +252,7 @@ func PrintHelp() {
       List generated agents and available domain blueprints.
 
   Platforms:
-    local-go     Go binary, runs locally (default)
+    go           Go binary, runs locally (default)
     cloudflare   Cloudflare Worker, edge deployment
 
   Workflow:

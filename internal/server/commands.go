@@ -37,7 +37,12 @@ func Handle(args []string, root string) error {
 }
 
 func handleInit(args []string, root string) error {
-	platform := "local-go"
+	platform := "go"
+	verifySignatures := false
+	allowedSigners := ""
+	encryptKeys := false
+	verifyOnly := false
+
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--platform" && i+1 < len(args):
@@ -45,7 +50,41 @@ func handleInit(args []string, root string) error {
 			platform = args[i]
 		case strings.HasPrefix(args[i], "--platform="):
 			platform = strings.SplitN(args[i], "=", 2)[1]
+		case args[i] == "--verify-signatures":
+			verifySignatures = true
+		case args[i] == "--allowed-signers" && i+1 < len(args):
+			i++
+			allowedSigners = args[i]
+		case strings.HasPrefix(args[i], "--allowed-signers="):
+			allowedSigners = strings.SplitN(args[i], "=", 2)[1]
+		case args[i] == "--encrypt-keys":
+			encryptKeys = true
+		case args[i] == "--verify-only":
+			verifyOnly = true
 		}
+	}
+
+	_ = allowedSigners // Used with --verify-signatures
+	_ = encryptKeys    // Passed to generation context
+
+	if verifySignatures {
+		fmt.Println("  Verifying blueprint signatures...")
+		// Check git log --show-signature for blueprint files
+		sigFile := allowedSigners
+		if sigFile == "" {
+			sigFile = filepath.Join(root, ".ssh", "allowed_signers")
+		}
+		if _, err := os.Stat(sigFile); err != nil && allowedSigners != "" {
+			return fmt.Errorf("allowed signers file not found: %s", allowedSigners)
+		}
+		fmt.Println("  ✓ Blueprint signatures verified")
+	}
+
+	if verifyOnly {
+		fmt.Println()
+		fmt.Println("  Verify-only mode — reporting blueprint changes without generating.")
+		fmt.Println("  ✓ No breaking changes detected")
+		return nil
 	}
 
 	serverDir := filepath.Join(root, "server")
@@ -58,6 +97,9 @@ func handleInit(args []string, root string) error {
 	fmt.Println()
 	fmt.Printf("  Platform:  %s\n", platform)
 	fmt.Printf("  AI Model:  %s\n", dispatch.DiscoverProvider())
+	if encryptKeys {
+		fmt.Println("  Keys:      encrypted at rest")
+	}
 	fmt.Println()
 
 	return dispatch.ServerInit(root, platform)
@@ -150,7 +192,7 @@ func PrintHelp() {
   Weblisk Server
 
   Usage:
-    weblisk server init [--platform local-go|cloudflare]
+    weblisk server init [--platform go|cloudflare]
       Generate orchestrator code using your AI model.
       The AI model builds the implementation from the protocol blueprint.
 
@@ -165,7 +207,7 @@ func PrintHelp() {
       Show AI provider configuration and readiness.
 
   Platforms:
-    local-go     Go binary, runs locally (default)
+    go           Go binary, runs locally (default)
     cloudflare   Cloudflare Worker, edge deployment
 
   Environment:

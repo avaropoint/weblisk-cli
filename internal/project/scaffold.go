@@ -19,7 +19,9 @@ import (
 const clientRepo = "https://github.com/avaropoint/weblisk.git"
 
 // Scaffold creates a new Weblisk project directory.
-func Scaffold(name, cwd, tmpl string, local bool, lib string) error {
+// Multiple templates can be specified; files from each template are merged
+// in order with later templates overwriting earlier ones on conflict.
+func Scaffold(name, cwd string, templates []string, local bool, lib string) error {
 	if lib == "" {
 		lib = config.DefaultLib
 	}
@@ -37,17 +39,28 @@ func Scaffold(name, cwd, tmpl string, local bool, lib string) error {
 
 	fmt.Printf("\n  Creating %s\n\n", name)
 
-	// Resolve and copy the scaffold set directory.
-	scaffoldDir, err := ResolveScaffoldDir(cwd, tmpl)
-	if err != nil {
-		return err
-	}
+	// Copy scaffold files from each template in order (merge)
+	totalCount := 0
+	for _, tmpl := range templates {
+		scaffoldDir, err := ResolveScaffoldDir(cwd, tmpl)
+		if err != nil {
+			return err
+		}
 
-	count, err := CopyScaffoldDir(scaffoldDir, projectDir)
-	if err != nil {
-		return err
+		count, err := CopyScaffoldDir(scaffoldDir, projectDir)
+		if err != nil {
+			return err
+		}
+		totalCount += count
+		if len(templates) > 1 {
+			fmt.Printf("    %d files from %s\n", count, tmpl)
+		}
 	}
-	fmt.Printf("    %d files\n", count)
+	if len(templates) == 1 {
+		fmt.Printf("    %d files\n", totalCount)
+	} else {
+		fmt.Printf("    %d files total (merged from %d templates)\n", totalCount, len(templates))
+	}
 
 	// Copy init config files (.env, .gitignore).
 	if err := CopyInitFiles(cwd, projectDir); err != nil {

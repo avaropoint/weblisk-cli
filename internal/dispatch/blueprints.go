@@ -22,6 +22,8 @@ const coreRepo = "https://github.com/avaropoint/weblisk-blueprints.git"
 var BlueprintSets = map[string][]string{
 	"orchestrator": {"protocol/spec.md", "architecture/orchestrator.md", "protocol/identity.md"},
 	"agent":        {"protocol/spec.md", "architecture/agent.md", "protocol/identity.md"},
+	"domain":       {"protocol/spec.md", "architecture/domain.md", "architecture/orchestrator.md", "protocol/identity.md"},
+	"gateway":      {"protocol/spec.md", "architecture/gateway.md", "architecture/orchestrator.md", "protocol/identity.md"},
 }
 
 // sourceDir returns a deterministic cache directory name for a repo URL.
@@ -37,6 +39,15 @@ func sourceDir(repoURL string) string {
 	return fmt.Sprintf("%s-%x", name, h[:4])
 }
 
+// blueprintCacheBase returns the user-global blueprint cache directory.
+func blueprintCacheBase() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	return filepath.Join(home, ".weblisk", "blueprints")
+}
+
 // resolvedSources returns the ordered list of blueprint directories to search.
 // Order: local project → custom sources → core.
 func resolvedSources(root string) []string {
@@ -48,10 +59,12 @@ func resolvedSources(root string) []string {
 		dirs = append(dirs, localDir)
 	}
 
+	cacheBase := blueprintCacheBase()
+
 	// 2. Custom sources from WL_BLUEPRINT_SOURCES.
 	cfg := config.Resolve()
 	for _, repo := range cfg.BlueprintSources {
-		cacheDir := filepath.Join(root, ".weblisk", "blueprints", sourceDir(repo))
+		cacheDir := filepath.Join(cacheBase, sourceDir(repo))
 		if err := ensureCloned(repo, cacheDir); err != nil {
 			fmt.Fprintf(os.Stderr, "  [warn] Blueprint source %s: %v\n", repo, err)
 			continue
@@ -60,7 +73,7 @@ func resolvedSources(root string) []string {
 	}
 
 	// 3. Core blueprints (always present as fallback).
-	coreDir := filepath.Join(root, ".weblisk", "blueprints", sourceDir(coreRepo))
+	coreDir := filepath.Join(cacheBase, sourceDir(coreRepo))
 	if err := ensureCloned(coreRepo, coreDir); err != nil {
 		fmt.Fprintf(os.Stderr, "  [warn] Core blueprints: %v\n", err)
 	} else {
@@ -134,7 +147,7 @@ func LoadBlueprints(root string, names ...string) (string, error) {
 
 // UpdateBlueprints removes all cached blueprint sources, forcing a re-fetch.
 func UpdateBlueprints(root string) error {
-	cacheBase := filepath.Join(root, ".weblisk", "blueprints")
+	cacheBase := blueprintCacheBase()
 	if err := os.RemoveAll(cacheBase); err != nil {
 		return fmt.Errorf("clearing blueprint cache: %w", err)
 	}
@@ -154,12 +167,27 @@ func PlatformBlueprint(platform string) string {
 	switch platform {
 	case "cloudflare":
 		return "platforms/cloudflare.md"
+	case "node":
+		return "platforms/node.md"
+	case "rust":
+		return "platforms/rust.md"
 	default:
 		return "platforms/go.md"
 	}
 }
 
-// DomainBlueprint returns the blueprint path for an agent domain.
+// DomainBlueprint returns the blueprint path for an agent's domain.
 func DomainBlueprint(name string) string {
-	return "domains/" + name + ".md"
+	// Check agents/ first, then domains/ for backwards compatibility
+	return "agents/" + name + ".md"
+}
+
+// DomainControllerBlueprint returns the blueprint path for a domain controller.
+func DomainControllerBlueprint(name string) string {
+	return "architecture/domain.md"
+}
+
+// PatternBlueprint returns the blueprint path for a pattern.
+func PatternBlueprint(name string) string {
+	return "patterns/" + name + ".md"
 }

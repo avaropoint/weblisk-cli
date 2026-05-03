@@ -16,7 +16,7 @@ type Config struct {
 	Port             int      // WL_PORT — dev server port (default: 3000)
 	CDN              string   // WL_CDN — if set, importmaps point here instead of local lib path
 	Lib              string   // WL_LIB — local framework path relative to project root (default: lib/weblisk)
-	License          string   // WL_LICENSE — pro license key for downloading pro modules
+	Orch             string   // WL_ORCH — orchestrator URL (default: http://localhost:9800)
 	BlueprintSources []string // WL_BLUEPRINT_SOURCES — additional blueprint repo URLs
 	TemplateSources  []string // WL_TEMPLATE_SOURCES — additional template repo URLs
 }
@@ -99,7 +99,10 @@ func Resolve() Config {
 	cdn := os.Getenv("WL_CDN")
 	// Strip trailing slash for consistent concatenation
 	cdn = strings.TrimRight(cdn, "/")
-	license := os.Getenv("WL_LICENSE")
+	orch := os.Getenv("WL_ORCH")
+	if orch == "" {
+		orch = "http://localhost:9800"
+	}
 
 	lib := os.Getenv("WL_LIB")
 	if lib == "" {
@@ -130,5 +133,5 @@ func Resolve() Config {
 		}
 	}
 
-	return Config{Origin: origin, Dist: dist, Port: port, CDN: cdn, Lib: lib, License: license, BlueprintSources: blueprintSources, TemplateSources: templateSources}
+	return Config{Origin: origin, Dist: dist, Port: port, CDN: cdn, Lib: lib, Orch: orch, BlueprintSources: blueprintSources, TemplateSources: templateSources}
 }
