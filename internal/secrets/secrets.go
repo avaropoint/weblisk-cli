@@ -2,11 +2,13 @@ package secrets
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const secretsBaseDir = ".weblisk/secrets"
@@ -42,6 +44,11 @@ func Handle(args []string, root string) error {
 			}
 		}
 		return handleGet(root, args[1], args[2], confirm)
+	case "exists":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: weblisk secrets exists <agent> <key>")
+		}
+		return handleExists(root, args[1], args[2])
 	case "delete":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: weblisk secrets delete <agent> <key>")
@@ -56,7 +63,7 @@ func Handle(args []string, root string) error {
 		PrintHelp()
 		return nil
 	default:
-		return fmt.Errorf("unknown secrets command: %s\n  Try: weblisk secrets list|set|get|delete|rotate", args[0])
+		return fmt.Errorf("unknown secrets command: %s\n  Try: weblisk secrets list|set|get|exists|delete|rotate", args[0])
 	}
 }
 
@@ -135,13 +142,16 @@ func handleSet(root, agent, key string, useStdin bool) error {
 		return fmt.Errorf("writing secret: %w", err)
 	}
 
+	// Update metadata
+	updateMetadata(root, agent, key, "set")
+
 	fmt.Printf("  [ok] Secret %s/%s stored.\n", agent, key)
 	return nil
 }
 
 func handleGet(root, agent, key string, confirm bool) error {
 	if !confirm {
-		fmt.Println("  ⚠  Displaying secret values is a security risk in shared terminals.")
+		fmt.Println("  Warning: Displaying secret values is a security risk in shared terminals.")
 		fmt.Println("  Use --confirm to proceed.")
 		return nil
 	}
@@ -153,6 +163,16 @@ func handleGet(root, agent, key string, confirm bool) error {
 	}
 
 	fmt.Printf("  %s/%s = %s\n", agent, key, string(data))
+	return nil
+}
+
+func handleExists(root, agent, key string) error {
+	secretPath := filepath.Join(root, secretsBaseDir, agent, key)
+	if _, err := os.Stat(secretPath); err != nil {
+		fmt.Printf("  %s/%s: not found\n", agent, key)
+		return fmt.Errorf("secret %s/%s does not exist", agent, key)
+	}
+	fmt.Printf("  %s/%s: exists\n", agent, key)
 	return nil
 }
 
@@ -200,6 +220,9 @@ func handleRotate(root, agent, key string) error {
 		return fmt.Errorf("writing secret: %w", err)
 	}
 
+	// Update metadata
+	updateMetadata(root, agent, key, "rotate")
+
 	fmt.Printf("  [ok] Secret %s/%s rotated.\n", agent, key)
 	return nil
 }
@@ -232,6 +255,48 @@ func enableEcho() {
 	cmd.Run()
 }
 
+// updateMetadata maintains the .weblisk/secrets/_metadata.json file.
+func updateMetadata(root, agent, key, action string) {
+	metaPath := filepath.Join(root, secretsBaseDir, "_metadata.json")
+
+	// Load existing metadata
+	meta := map[string]map[string]string{}
+	if data, err := os.ReadFile(metaPath); err == nil {
+		json.Unmarshal(data, &meta)
+	}
+
+	entryKey := agent + "/" + key
+	now := time.Now().UTC().Format(time.RFC3339)
+	operator := os.Getenv("USER")
+	if operator == "" {
+		operator = "unknown"
+	}
+
+	entry, exists := meta[entryKey]
+	if !exists {
+		entry = map[string]string{}
+	}
+
+	switch action {
+	case "set":
+		if !exists {
+			entry["created_at"] = now
+			entry["created_by"] = "operator:" + operator
+		}
+		entry["description"] = ""
+	case "rotate":
+		entry["last_rotated"] = now
+	}
+
+	meta[entryKey] = entry
+
+	// Write metadata (best-effort, don't fail the operation)
+	os.MkdirAll(filepath.Dir(metaPath), 0700)
+	if data, err := json.MarshalIndent(meta, "", "  "); err == nil {
+		os.WriteFile(metaPath, data, 0600)
+	}
+}
+
 // PrintHelp shows secrets command usage.
 func PrintHelp() {
 	fmt.Print(`
@@ -240,7 +305,9 @@ func PrintHelp() {
   Usage:
     weblisk secrets list                 Show all secrets and status
     weblisk secrets set <agent> <key>    Set a secret (prompts for value)
+      --stdin                            Read value from stdin (for piping)
     weblisk secrets get <agent> <key>    Print secret value (--confirm required)
+    weblisk secrets exists <agent> <key> Check if a secret exists
     weblisk secrets delete <agent> <key> Remove a secret
     weblisk secrets rotate <agent> <key> Rotate a secret (prompts for new value)
 
@@ -248,10 +315,12 @@ func PrintHelp() {
     - Values are NEVER passed as CLI arguments (shell history safe)
     - Files stored with 0600 permissions in .weblisk/secrets/<agent>/<key>
     - Use _shared as the agent name for cross-agent secrets
+    - Metadata tracked in .weblisk/secrets/_metadata.json
 
   Examples:
     weblisk secrets set email-send SMTP_PASSWORD
     weblisk secrets set _shared LLM_API_KEY
+    weblisk secrets exists email-send SMTP_PASSWORD
     weblisk secrets list
     weblisk secrets rotate email-send SMTP_PASSWORD
 `)

@@ -2,17 +2,16 @@ package protocol
 
 // Cryptographic Identity
 //
-// Ed25519 key pairs for agent identity. Every agent generates a
+// ML-DSA-65 key pairs for agent identity. Every agent generates a
 // keypair on first run and stores it. All messages are signed.
 //
-// Token format (simple, secure, no dependencies):
+// Token format (FIPS 204 compliant):
 //   base64url(header).base64url(payload).base64url(signature)
-//   header:    {"alg":"Ed25519","typ":"WLT"}
+//   header:    {"alg":"ML-DSA-65","typ":"WLT"}
 //   payload:   JSON claims
-//   signature: Ed25519 sign(header.payload)
+//   signature: ML-DSA-65 sign(header.payload)
 
 import (
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -21,29 +20,38 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 )
 
 // Key Management
 
-// Identity holds an agent's Ed25519 key pair.
+// Identity holds an agent's ML-DSA-65 key pair.
 type Identity struct {
-	PublicKey  ed25519.PublicKey
-	PrivateKey ed25519.PrivateKey
+	PublicKey  *mldsa65.PublicKey
+	PrivateKey *mldsa65.PrivateKey
 	Name       string
 }
 
-// GenerateIdentity creates a new Ed25519 key pair.
+// GenerateIdentity creates a new ML-DSA-65 key pair.
 func GenerateIdentity(name string) (*Identity, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := mldsa65.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generating key pair: %w", err)
 	}
 	return &Identity{PublicKey: pub, PrivateKey: priv, Name: name}, nil
 }
 
-// PublicKeyHex returns the hex-encoded public key for protocol exchange.
+// PublicKeyB64 returns the base64url-encoded public key for protocol exchange.
+func (id *Identity) PublicKeyB64() string {
+	packed, _ := id.PublicKey.MarshalBinary()
+	return b64.EncodeToString(packed)
+}
+
+// PublicKeyHex returns the hex-encoded public key (legacy compat helper).
 func (id *Identity) PublicKeyHex() string {
-	return hex.EncodeToString(id.PublicKey)
+	packed, _ := id.PublicKey.MarshalBinary()
+	return hex.EncodeToString(packed)
 }
 
 // SaveKeys writes the key pair to disk in a secure directory.
@@ -55,10 +63,13 @@ func (id *Identity) SaveKeys(dir string) error {
 	privPath := filepath.Join(keysDir, id.Name+".key")
 	pubPath := filepath.Join(keysDir, id.Name+".pub")
 
-	if err := os.WriteFile(privPath, []byte(hex.EncodeToString(id.PrivateKey)), 0600); err != nil {
+	privBytes, _ := id.PrivateKey.MarshalBinary()
+	pubBytes, _ := id.PublicKey.MarshalBinary()
+
+	if err := os.WriteFile(privPath, []byte(b64.EncodeToString(privBytes)), 0600); err != nil {
 		return err
 	}
-	return os.WriteFile(pubPath, []byte(hex.EncodeToString(id.PublicKey)), 0644)
+	return os.WriteFile(pubPath, []byte(b64.EncodeToString(pubBytes)), 0644)
 }
 
 // LoadIdentity loads a key pair from disk, or generates a new one if absent.
@@ -81,24 +92,28 @@ func LoadIdentity(name, dir string) (*Identity, error) {
 		return nil, err
 	}
 
-	privBytes, err := hex.DecodeString(string(data))
+	privBytes, err := b64.DecodeString(string(data))
 	if err != nil {
 		return nil, fmt.Errorf("decoding private key: %w", err)
 	}
-	priv := ed25519.PrivateKey(privBytes)
-	pub := priv.Public().(ed25519.PublicKey)
-	return &Identity{PublicKey: pub, PrivateKey: priv, Name: name}, nil
+	var priv mldsa65.PrivateKey
+	if err := priv.UnmarshalBinary(privBytes); err != nil {
+		return nil, fmt.Errorf("parsing private key: %w", err)
+	}
+	pub := priv.Public().(*mldsa65.PublicKey)
+	return &Identity{PublicKey: pub, PrivateKey: &priv, Name: name}, nil
 }
 
 // Message Signing
 
-// Sign produces an Ed25519 signature of the given data.
+// Sign produces an ML-DSA-65 signature of the given data (base64url encoded).
 func (id *Identity) Sign(data []byte) string {
-	sig := ed25519.Sign(id.PrivateKey, data)
-	return hex.EncodeToString(sig)
+	var sig [mldsa65.SignatureSize]byte
+	_ = mldsa65.SignTo(id.PrivateKey, data, nil, false, sig[:])
+	return b64.EncodeToString(sig[:])
 }
 
-// SignJSON signs a JSON-serializable payload and returns the hex signature.
+// SignJSON signs a JSON-serializable payload and returns the base64url signature.
 func (id *Identity) SignJSON(v any) (string, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -107,17 +122,21 @@ func (id *Identity) SignJSON(v any) (string, error) {
 	return id.Sign(data), nil
 }
 
-// VerifySignature checks an Ed25519 signature against a public key.
-func VerifySignature(pubKeyHex, signatureHex string, data []byte) bool {
-	pubKey, err := hex.DecodeString(pubKeyHex)
-	if err != nil || len(pubKey) != ed25519.PublicKeySize {
+// VerifySignature checks an ML-DSA-65 signature against a public key.
+func VerifySignature(pubKeyB64, signatureB64 string, data []byte) bool {
+	pubBytes, err := b64.DecodeString(pubKeyB64)
+	if err != nil || len(pubBytes) != mldsa65.PublicKeySize {
 		return false
 	}
-	sig, err := hex.DecodeString(signatureHex)
-	if err != nil || len(sig) != ed25519.SignatureSize {
+	var pub mldsa65.PublicKey
+	if err := pub.UnmarshalBinary(pubBytes); err != nil {
 		return false
 	}
-	return ed25519.Verify(pubKey, data, sig)
+	sigBytes, err := b64.DecodeString(signatureB64)
+	if err != nil || len(sigBytes) != mldsa65.SignatureSize {
+		return false
+	}
+	return mldsa65.Verify(&pub, data, nil, sigBytes)
 }
 
 // Token System
@@ -141,7 +160,7 @@ type TokenClaims struct {
 
 // CreateToken issues a signed token with the given claims.
 func (id *Identity) CreateToken(claims TokenClaims) (string, error) {
-	header := tokenHeader{Alg: "Ed25519", Typ: "WLT"}
+	header := tokenHeader{Alg: "ML-DSA-65", Typ: "WLT"}
 
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
@@ -156,15 +175,16 @@ func (id *Identity) CreateToken(claims TokenClaims) (string, error) {
 	payloadB64 := b64.EncodeToString(payloadJSON)
 	signingInput := headerB64 + "." + payloadB64
 
-	sig := ed25519.Sign(id.PrivateKey, []byte(signingInput))
-	sigB64 := b64.EncodeToString(sig)
+	var sig [mldsa65.SignatureSize]byte
+	_ = mldsa65.SignTo(id.PrivateKey, []byte(signingInput), nil, false, sig[:])
+	sigB64 := b64.EncodeToString(sig[:])
 
 	return signingInput + "." + sigB64, nil
 }
 
 // VerifyToken validates a token's signature and expiry.
 // Returns the claims if valid, error otherwise.
-func VerifyToken(token, issuerPubKeyHex string) (*TokenClaims, error) {
+func VerifyToken(token, issuerPubKeyB64 string) (*TokenClaims, error) {
 	// Split into 3 parts.
 	parts := splitToken(token)
 	if len(parts) != 3 {
@@ -180,7 +200,7 @@ func VerifyToken(token, issuerPubKeyHex string) (*TokenClaims, error) {
 	if err := json.Unmarshal(headerJSON, &header); err != nil {
 		return nil, fmt.Errorf("parsing header: %w", err)
 	}
-	if header.Alg != "Ed25519" {
+	if header.Alg != "ML-DSA-65" {
 		return nil, fmt.Errorf("unsupported algorithm: %s", header.Alg)
 	}
 
@@ -190,11 +210,15 @@ func VerifyToken(token, issuerPubKeyHex string) (*TokenClaims, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decoding signature: %w", err)
 	}
-	pubKey, err := hex.DecodeString(issuerPubKeyHex)
-	if err != nil || len(pubKey) != ed25519.PublicKeySize {
+	pubBytes, err := b64.DecodeString(issuerPubKeyB64)
+	if err != nil || len(pubBytes) != mldsa65.PublicKeySize {
 		return nil, fmt.Errorf("invalid public key")
 	}
-	if !ed25519.Verify(pubKey, []byte(signingInput), sig) {
+	var pub mldsa65.PublicKey
+	if err := pub.UnmarshalBinary(pubBytes); err != nil {
+		return nil, fmt.Errorf("invalid public key format")
+	}
+	if !mldsa65.Verify(&pub, []byte(signingInput), nil, sig) {
 		return nil, fmt.Errorf("invalid signature")
 	}
 

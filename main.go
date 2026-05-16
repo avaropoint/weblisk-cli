@@ -696,7 +696,7 @@ func printHelp() {
     secret rotate <a> <k>   Rotate a secret value
 
   Identity:
-    operator init           Generate Ed25519 operator key pair
+    operator init           Generate ML-DSA-65 operator key pair
       --name <name>         Operator name (default: system username)
       --force               Regenerate keys
     operator register       Register with an orchestrator

@@ -262,7 +262,7 @@ func PrintHelp() {
 
   Custom agents:
     Any program that implements the Weblisk Agent Protocol can register
-    with the orchestrator. The protocol uses HTTP + JSON with Ed25519
+    with the orchestrator. The protocol uses HTTP + JSON with ML-DSA-65
     authentication. See: weblisk.dev/docs/agents
 
 `)

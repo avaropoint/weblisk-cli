@@ -1,16 +1,14 @@
 package operator
 
-// Operator identity management — Ed25519 key generation, orchestrator
-// registration, and token lifecycle.
+// Operator identity management — ML-DSA-65 (FIPS 204) key generation,
+// Argon2id KDF, and orchestrator registration per identity.md spec.
 
 import (
 	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha512"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +18,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+	"golang.org/x/crypto/argon2"
 )
 
 // Handle dispatches operator subcommands.
@@ -78,7 +79,7 @@ func handleInit(args []string) error {
 		fmt.Println()
 		fmt.Println("  Operator key pair already exists:")
 		fmt.Printf("  Public:  %s\n", pubPath)
-		fmt.Printf("  Key ID:  %s\n", strings.TrimSpace(string(pub)))
+		fmt.Printf("  Key ID:  %s\n", strings.TrimSpace(string(pub))[:24]+"...")
 		fmt.Println()
 		fmt.Println("  Use --force to regenerate (this changes your identity).")
 		fmt.Println()
@@ -87,8 +88,8 @@ func handleInit(args []string) error {
 
 	if force {
 		fmt.Println()
-		fmt.Println("  ⚠  Regenerating keys will change your operator identity.")
-		fmt.Println("     You will need to re-register with the orchestrator.")
+		fmt.Println("  Warning: Regenerating keys will change your operator identity.")
+		fmt.Println("  You will need to re-register with the orchestrator.")
 		fmt.Println()
 	}
 
@@ -115,10 +116,10 @@ func handleInit(args []string) error {
 		return fmt.Errorf("passphrases do not match")
 	}
 
-	// Generate Ed25519 key pair
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	// Generate ML-DSA-65 key pair (FIPS 204)
+	pub, priv, err := mldsa65.GenerateKey(rand.Reader)
 	if err != nil {
-		return fmt.Errorf("generating key pair: %w", err)
+		return fmt.Errorf("generating ML-DSA-65 key pair: %w", err)
 	}
 
 	// Create keys directory with secure permissions
@@ -126,8 +127,18 @@ func handleInit(args []string) error {
 		return fmt.Errorf("creating keys directory: %w", err)
 	}
 
-	// Encrypt private key with passphrase (iterated SHA-512 KDF + AES-256-GCM)
-	encryptedKey, err := encryptKey(priv, pass1)
+	// Serialize keys
+	privBytes, err := priv.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("marshaling private key: %w", err)
+	}
+	pubBytes, err := pub.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("marshaling public key: %w", err)
+	}
+
+	// Encrypt private key with Argon2id KDF + AES-256-GCM
+	encryptedKey, err := encryptKey(privBytes, pass1)
 	if err != nil {
 		return fmt.Errorf("encrypting private key: %w", err)
 	}
@@ -137,9 +148,9 @@ func handleInit(args []string) error {
 		return fmt.Errorf("writing private key: %w", err)
 	}
 
-	// Write public key (0644)
-	pubHex := hex.EncodeToString(pub)
-	if err := os.WriteFile(pubPath, []byte(pubHex), 0644); err != nil {
+	// Write public key as base64url (no padding) per spec
+	pubB64 := base64.RawURLEncoding.EncodeToString(pubBytes)
+	if err := os.WriteFile(pubPath, []byte(pubB64), 0644); err != nil {
 		return fmt.Errorf("writing public key: %w", err)
 	}
 
@@ -147,11 +158,14 @@ func handleInit(args []string) error {
 	namePath := filepath.Join(keysDir, "operator.name")
 	os.WriteFile(namePath, []byte(name), 0644)
 
+	// Key ID is first 16 chars of base64url public key
+	keyID := pubB64[:16]
+
 	fmt.Println()
-	fmt.Println("  Generated operator key pair:")
-	fmt.Printf("  Private: %s (encrypted, AES-256-GCM)\n", privPath)
+	fmt.Println("  Generated operator key pair (ML-DSA-65 / FIPS 204):")
+	fmt.Printf("  Private: %s (encrypted, Argon2id + AES-256-GCM)\n", privPath)
 	fmt.Printf("  Public:  %s\n", pubPath)
-	fmt.Printf("  Key ID:  %s\n", pubHex[:16]+"...")
+	fmt.Printf("  Key ID:  %s...\n", keyID)
 	fmt.Printf("  Name:    %s\n", name)
 	fmt.Println()
 	fmt.Println("  Keep your private key safe. It is your identity.")
@@ -184,21 +198,27 @@ func handleRegister(args []string) error {
 	}
 
 	name := loadOperatorName()
-	pubHex := hex.EncodeToString(privKey.Public().(ed25519.PublicKey))
+
+	pubKey := privKey.Public().(*mldsa65.PublicKey)
+	pubBytes, _ := pubKey.MarshalBinary()
+	pubB64 := base64.RawURLEncoding.EncodeToString(pubBytes)
 
 	// Build registration payload
 	payload := map[string]string{
 		"name":       name,
-		"public_key": pubHex,
+		"public_key": pubB64,
 	}
 	if role != "" {
 		payload["role"] = role
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
-	// Sign the payload
-	sig := ed25519.Sign(privKey, payloadBytes)
-	sigHex := hex.EncodeToString(sig)
+	// Sign the payload with ML-DSA-65
+	sig, err := privKey.Sign(rand.Reader, payloadBytes, nil)
+	if err != nil {
+		return fmt.Errorf("signing registration: %w", err)
+	}
+	sigB64 := base64.RawURLEncoding.EncodeToString(sig)
 
 	fmt.Println()
 	fmt.Printf("  Registering operator '%s' with %s...\n", name, orchURL)
@@ -209,7 +229,8 @@ func handleRegister(args []string) error {
 		return fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Signature", sigHex)
+	req.Header.Set("X-Signature", sigB64)
+	req.Header.Set("X-Algorithm", "ml-dsa-65")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -294,8 +315,9 @@ func handleToken(args []string) error {
 		}
 		req.Header.Set("Authorization", "Bearer "+tokenInfo["token"])
 
-		pubHex := hex.EncodeToString(privKey.Public().(ed25519.PublicKey))
-		req.Header.Set("X-Public-Key", pubHex)
+		pubKey := privKey.Public().(*mldsa65.PublicKey)
+		pubBytes, _ := pubKey.MarshalBinary()
+		req.Header.Set("X-Public-Key", base64.RawURLEncoding.EncodeToString(pubBytes))
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -356,24 +378,17 @@ func handleRotate(args []string) error {
 		return fmt.Errorf("reading private key: %w", err)
 	}
 
-	content := strings.TrimSpace(string(data))
-	var oldKey ed25519.PrivateKey
-	if strings.HasPrefix(content, "weblisk-key-v1:") {
-		privBytes, err := decryptKey(data, oldPass)
-		if err != nil {
-			return fmt.Errorf("decrypting key (wrong passphrase?): %w", err)
-		}
-		oldKey = ed25519.PrivateKey(privBytes)
-	} else {
-		// Legacy unencrypted key
-		privBytes, err := hex.DecodeString(content)
-		if err != nil {
-			return fmt.Errorf("decoding private key: %w", err)
-		}
-		oldKey = ed25519.PrivateKey(privBytes)
+	oldPrivBytes, err := decryptKey(data, oldPass)
+	if err != nil {
+		return fmt.Errorf("decrypting key (wrong passphrase?): %w", err)
 	}
 
-	fmt.Println("  Generating new key pair...")
+	var oldKey mldsa65.PrivateKey
+	if err := oldKey.UnmarshalBinary(oldPrivBytes); err != nil {
+		return fmt.Errorf("parsing existing key: %w", err)
+	}
+
+	fmt.Println("  Generating new ML-DSA-65 key pair...")
 
 	// Prompt for new passphrase
 	fmt.Print("  Enter new passphrase (min 12 characters): ")
@@ -399,31 +414,50 @@ func handleRotate(args []string) error {
 	}
 
 	// Generate new key pair
-	newPub, newPriv, err := ed25519.GenerateKey(rand.Reader)
+	newPub, newPriv, err := mldsa65.GenerateKey(rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generating new key pair: %w", err)
 	}
 
-	// Register new public key with orchestrator (signed by old key for proof of continuity)
+	newPubBytes, _ := newPub.MarshalBinary()
+	newPrivBytes, _ := newPriv.MarshalBinary()
+	newPubB64 := base64.RawURLEncoding.EncodeToString(newPubBytes)
+
+	// Register new public key with orchestrator (dual-signed for proof of continuity)
 	orchURL := resolveOrchURL(args)
 	if orchURL != "" {
-		fmt.Println("  Registering new public key with orchestrator (signed by old key)...")
+		fmt.Println("  Registering new public key with orchestrator (dual-signed)...")
 
-		newPubHex := hex.EncodeToString(newPub)
-		oldPubHex := hex.EncodeToString(oldKey.Public().(ed25519.PublicKey))
-
-		// Sign the new public key with the old key
-		signature := ed25519.Sign(oldKey, newPub)
-		sigHex := hex.EncodeToString(signature)
+		oldPubKey := oldKey.Public().(*mldsa65.PublicKey)
+		oldPubBytes, _ := oldPubKey.MarshalBinary()
+		oldPubB64 := base64.RawURLEncoding.EncodeToString(oldPubBytes)
 
 		payload, _ := json.Marshal(map[string]string{
-			"new_public_key": newPubHex,
-			"old_public_key": oldPubHex,
-			"signature":      sigHex,
+			"new_public_key": newPubB64,
+			"old_public_key": oldPubB64,
+		})
+
+		// Sign with old key (current_signature)
+		currentSig, err := oldKey.Sign(rand.Reader, payload, nil)
+		if err != nil {
+			return fmt.Errorf("signing with old key: %w", err)
+		}
+
+		// Sign with new key (new_signature)
+		newSig, err := newPriv.Sign(rand.Reader, payload, nil)
+		if err != nil {
+			return fmt.Errorf("signing with new key: %w", err)
+		}
+
+		rotatePayload, _ := json.Marshal(map[string]string{
+			"new_public_key":    newPubB64,
+			"old_public_key":    oldPubB64,
+			"current_signature": base64.RawURLEncoding.EncodeToString(currentSig),
+			"new_signature":     base64.RawURLEncoding.EncodeToString(newSig),
 		})
 
 		client := &http.Client{Timeout: 10 * time.Second}
-		req, _ := http.NewRequest("POST", orchURL+"/v1/admin/operators/rotate", strings.NewReader(string(payload)))
+		req, _ := http.NewRequest("POST", orchURL+"/v1/admin/operators/rotate", strings.NewReader(string(rotatePayload)))
 		req.Header.Set("Content-Type", "application/json")
 
 		token, _, _ := LoadToken()
@@ -447,7 +481,7 @@ func handleRotate(args []string) error {
 	os.Rename(privPath, revokedPath)
 
 	// Encrypt and write new private key
-	encryptedKey, err := encryptKey(newPriv, pass1)
+	encryptedKey, err := encryptKey(newPrivBytes, pass1)
 	if err != nil {
 		return fmt.Errorf("encrypting new key: %w", err)
 	}
@@ -456,14 +490,13 @@ func handleRotate(args []string) error {
 	}
 
 	// Write new public key
-	newPubHex := hex.EncodeToString(newPub)
-	if err := os.WriteFile(pubPath, []byte(newPubHex), 0644); err != nil {
+	if err := os.WriteFile(pubPath, []byte(newPubB64), 0644); err != nil {
 		return fmt.Errorf("writing new public key: %w", err)
 	}
 
 	fmt.Println()
-	fmt.Println("✓ Key rotated successfully.")
-	fmt.Printf("  New Key ID: %s\n", newPubHex[:16]+"...")
+	fmt.Printf("  Key rotated successfully (ML-DSA-65).\n")
+	fmt.Printf("  New Key ID: %s...\n", newPubB64[:16])
 	fmt.Printf("  Old key archived: %s\n", revokedPath)
 	fmt.Println()
 
@@ -482,36 +515,32 @@ func tokenFilePath() string {
 	return filepath.Join(home, ".weblisk", "token")
 }
 
-func loadPrivateKey() (ed25519.PrivateKey, error) {
+func loadPrivateKey() (*mldsa65.PrivateKey, error) {
 	privPath := filepath.Join(keysDirectory(), "operator.key")
 	data, err := os.ReadFile(privPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading private key: %w", err)
 	}
 
-	content := strings.TrimSpace(string(data))
-
-	// Check if key is encrypted (weblisk-key-v1 format)
-	if strings.HasPrefix(content, "weblisk-key-v1:") {
-		fmt.Print("  Passphrase: ")
-		pass, err := readPassphrase()
-		if err != nil {
-			return nil, fmt.Errorf("reading passphrase: %w", err)
-		}
-		fmt.Println()
-		privBytes, err := decryptKey(data, pass)
-		if err != nil {
-			return nil, fmt.Errorf("decrypting key (wrong passphrase?): %w", err)
-		}
-		return ed25519.PrivateKey(privBytes), nil
-	}
-
-	// Legacy: unencrypted hex key (pre-passphrase)
-	privBytes, err := hex.DecodeString(content)
+	// Key must be in weblisk-key-v1 format
+	fmt.Print("  Passphrase: ")
+	pass, err := readPassphrase()
 	if err != nil {
-		return nil, fmt.Errorf("decoding private key: %w", err)
+		return nil, fmt.Errorf("reading passphrase: %w", err)
 	}
-	return ed25519.PrivateKey(privBytes), nil
+	fmt.Println()
+
+	privBytes, err := decryptKey(data, pass)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting key (wrong passphrase?): %w", err)
+	}
+
+	var key mldsa65.PrivateKey
+	if err := key.UnmarshalBinary(privBytes); err != nil {
+		return nil, fmt.Errorf("parsing private key: %w", err)
+	}
+
+	return &key, nil
 }
 
 func loadOperatorName() string {
@@ -557,7 +586,6 @@ func TokenExpiry() time.Time {
 }
 
 // RefreshToken attempts to refresh the operator token with the orchestrator.
-// Returns the new token on success.
 func RefreshToken() (string, error) {
 	data, err := os.ReadFile(tokenFilePath())
 	if err != nil {
@@ -584,8 +612,10 @@ func RefreshToken() (string, error) {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+info["token"])
-	pubHex := hex.EncodeToString(privKey.Public().(ed25519.PublicKey))
-	req.Header.Set("X-Public-Key", pubHex)
+
+	pubKey := privKey.Public().(*mldsa65.PublicKey)
+	pubBytes, _ := pubKey.MarshalBinary()
+	req.Header.Set("X-Public-Key", base64.RawURLEncoding.EncodeToString(pubBytes))
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -629,7 +659,13 @@ func resolveOrchURL(args []string) string {
 	if url := os.Getenv("WL_ORCH"); url != "" {
 		return url
 	}
-	// Check project config
+	// Check project config (YAML format — parse orchestrator.url or simple orch key)
+	if data, err := os.ReadFile(".weblisk/config.yaml"); err == nil {
+		if url := extractYAMLValue(string(data), "orchestrator_url"); url != "" {
+			return url
+		}
+	}
+	// Fallback: check legacy JSON config
 	if data, err := os.ReadFile(".weblisk/config.json"); err == nil {
 		var cfg struct {
 			OrchestratorURL string `json:"orchestrator_url"`
@@ -640,6 +676,11 @@ func resolveOrchURL(args []string) string {
 	}
 	// Check user config
 	home, _ := os.UserHomeDir()
+	if data, err := os.ReadFile(filepath.Join(home, ".weblisk", "config.yaml")); err == nil {
+		if url := extractYAMLValue(string(data), "orchestrator_url"); url != "" {
+			return url
+		}
+	}
 	if data, err := os.ReadFile(filepath.Join(home, ".weblisk", "config.json")); err == nil {
 		var cfg struct {
 			OrchestratorURL string `json:"orchestrator_url"`
@@ -651,10 +692,27 @@ func resolveOrchURL(args []string) string {
 	return ""
 }
 
+// extractYAMLValue does minimal YAML parsing for a top-level key: value.
+// No external dependency required.
+func extractYAMLValue(content, key string) string {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, key+":") {
+			val := strings.TrimSpace(strings.TrimPrefix(trimmed, key+":"))
+			// Strip quotes
+			if len(val) >= 2 && ((val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'')) {
+				val = val[1 : len(val)-1]
+			}
+			return val
+		}
+	}
+	return ""
+}
+
 func PrintHelp() {
 	fmt.Print(`
   Operator Commands:
-    weblisk operator init           Generate an Ed25519 operator key pair
+    weblisk operator init           Generate an ML-DSA-65 operator key pair
       --name <name>                 Operator name (default: system username)
       --force                       Regenerate keys (changes identity)
     weblisk operator register       Register with an orchestrator
@@ -662,36 +720,57 @@ func PrintHelp() {
       --role <role>                 Request a specific role
     weblisk operator token          Inspect or refresh operator token
       --refresh                     Force token refresh
-    weblisk operator rotate         Rotate Ed25519 key pair
+    weblisk operator rotate         Rotate ML-DSA-65 key pair
+
+  Key format: weblisk-key-v1 (ML-DSA-65, Argon2id KDF, AES-256-GCM)
+  Encoding:   base64url (RFC 4648 Section 5, no padding)
 
 `)
 }
 
 // ── Key Encryption (weblisk-key-v1 format) ───────────────────
+//
+// Format: JSON structure with fields:
+//   header: "weblisk-key-v1"
+//   algorithm: "ml-dsa-65"
+//   kdf: "argon2id"
+//   kdf_params: {salt, time, memory, parallelism}
+//   ciphertext: base64url-encoded encrypted private key
 
-// deriveKey uses iterated SHA-512 to derive a 32-byte key from passphrase + salt.
-// This is a zero-dependency KDF providing key stretching.
-// Iterations: 100,000 rounds of SHA-512.
-func deriveKey(passphrase string, salt []byte) []byte {
-	iterations := 100000
-	h := sha512.Sum512(append([]byte(passphrase), salt...))
-	for i := 1; i < iterations; i++ {
-		h = sha512.Sum512(h[:])
-	}
-	return h[:32] // AES-256 key
+// Argon2id parameters per RFC 9106 recommendations
+const (
+	argonTime    = 3
+	argonMemory  = 64 * 1024 // 64 MiB
+	argonThreads = 4
+	argonKeyLen  = 32 // AES-256
+)
+
+type keyFile struct {
+	Header    string    `json:"header"`
+	Algorithm string    `json:"algorithm"`
+	KDF       string    `json:"kdf"`
+	KDFParams kdfParams `json:"kdf_params"`
+	Nonce     string    `json:"nonce"`
+	Ciphertext string   `json:"ciphertext"`
 }
 
-// encryptKey encrypts a private key with AES-256-GCM using a passphrase-derived key.
-// Output format: "weblisk-key-v1:<salt-hex>:<nonce-hex>:<ciphertext-hex>\n"
-func encryptKey(privKey ed25519.PrivateKey, passphrase string) ([]byte, error) {
+type kdfParams struct {
+	Salt        string `json:"salt"`
+	Time        uint32 `json:"time"`
+	Memory      uint32 `json:"memory"`
+	Parallelism uint8  `json:"parallelism"`
+}
+
+// encryptKey encrypts a private key with Argon2id + AES-256-GCM.
+func encryptKey(privBytes []byte, passphrase string) ([]byte, error) {
 	// Generate random salt (32 bytes)
 	salt := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return nil, err
 	}
 
-	// Derive encryption key
-	key := deriveKey(passphrase, salt)
+	// Derive encryption key using Argon2id
+	key := argon2.IDKey([]byte(passphrase), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
 
 	// AES-256-GCM encrypt
 	block, err := aes.NewCipher(key)
@@ -708,40 +787,58 @@ func encryptKey(privKey ed25519.PrivateKey, passphrase string) ([]byte, error) {
 		return nil, err
 	}
 
-	ciphertext := gcm.Seal(nil, nonce, []byte(privKey), nil)
+	ciphertext := gcm.Seal(nil, nonce, privBytes, nil)
 
-	// Format: weblisk-key-v1:<salt>:<nonce>:<ciphertext>
-	line := fmt.Sprintf("weblisk-key-v1:%s:%s:%s\n",
-		hex.EncodeToString(salt),
-		hex.EncodeToString(nonce),
-		hex.EncodeToString(ciphertext))
+	// Encode to weblisk-key-v1 JSON format
+	kf := keyFile{
+		Header:    "weblisk-key-v1",
+		Algorithm: "ml-dsa-65",
+		KDF:       "argon2id",
+		KDFParams: kdfParams{
+			Salt:        base64.RawURLEncoding.EncodeToString(salt),
+			Time:        argonTime,
+			Memory:      argonMemory,
+			Parallelism: argonThreads,
+		},
+		Nonce:      base64.RawURLEncoding.EncodeToString(nonce),
+		Ciphertext: base64.RawURLEncoding.EncodeToString(ciphertext),
+	}
 
-	return []byte(line), nil
+	return json.MarshalIndent(kf, "", "  ")
 }
 
 // decryptKey decrypts a weblisk-key-v1 formatted key file using the passphrase.
 func decryptKey(data []byte, passphrase string) ([]byte, error) {
-	content := strings.TrimSpace(string(data))
-	parts := strings.SplitN(content, ":", 4)
-	if len(parts) != 4 || parts[0] != "weblisk-key-v1" {
-		return nil, fmt.Errorf("invalid key format")
+	var kf keyFile
+	if err := json.Unmarshal(data, &kf); err != nil {
+		return nil, fmt.Errorf("invalid key format: %w", err)
 	}
 
-	salt, err := hex.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid salt")
+	if kf.Header != "weblisk-key-v1" {
+		return nil, fmt.Errorf("unsupported key format: %s", kf.Header)
 	}
-	nonce, err := hex.DecodeString(parts[2])
-	if err != nil {
-		return nil, fmt.Errorf("invalid nonce")
+	if kf.Algorithm != "ml-dsa-65" {
+		return nil, fmt.Errorf("unsupported algorithm: %s", kf.Algorithm)
 	}
-	ciphertext, err := hex.DecodeString(parts[3])
-	if err != nil {
-		return nil, fmt.Errorf("invalid ciphertext")
+	if kf.KDF != "argon2id" {
+		return nil, fmt.Errorf("unsupported KDF: %s", kf.KDF)
 	}
 
-	// Derive key from passphrase
-	key := deriveKey(passphrase, salt)
+	salt, err := base64.RawURLEncoding.DecodeString(kf.KDFParams.Salt)
+	if err != nil {
+		return nil, fmt.Errorf("invalid salt encoding")
+	}
+	nonce, err := base64.RawURLEncoding.DecodeString(kf.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("invalid nonce encoding")
+	}
+	ciphertext, err := base64.RawURLEncoding.DecodeString(kf.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ciphertext encoding")
+	}
+
+	// Derive key from passphrase using stored Argon2id parameters
+	key := argon2.IDKey([]byte(passphrase), salt, kf.KDFParams.Time, kf.KDFParams.Memory, kf.KDFParams.Parallelism, argonKeyLen)
 
 	// Decrypt
 	block, err := aes.NewCipher(key)
@@ -755,7 +852,7 @@ func decryptKey(data []byte, passphrase string) ([]byte, error) {
 
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("decryption failed")
+		return nil, fmt.Errorf("decryption failed (wrong passphrase?)")
 	}
 
 	return plaintext, nil

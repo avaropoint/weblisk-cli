@@ -56,14 +56,37 @@ func Run(root string) error {
 
 	// ── Config validation ──────────────────────────────────────
 
-	configPath := filepath.Join(root, ".weblisk", "config.json")
-	if _, err := os.Stat(configPath); err == nil {
-		data, readErr := os.ReadFile(configPath)
+	// Primary: .weblisk/config.yaml (per spec)
+	configYAML := filepath.Join(root, ".weblisk", "config.yaml")
+	configJSON := filepath.Join(root, ".weblisk", "config.json")
+	if _, err := os.Stat(configYAML); err == nil {
+		data, readErr := os.ReadFile(configYAML)
+		if readErr != nil {
+			fmt.Println("  [error] .weblisk/config.yaml unreadable")
+			errors++
+		} else if len(data) > 0 {
+			// Basic YAML validation: should have content and not be binary
+			content := string(data)
+			if strings.Contains(content, "hub:") || strings.Contains(content, "orchestrator:") || strings.Contains(content, "gateway:") {
+				fmt.Println("  [ok]    .weblisk/config.yaml valid")
+			} else {
+				fmt.Println("  [warn]  .weblisk/config.yaml missing expected sections (hub, orchestrator, gateway)")
+				warnings++
+			}
+		} else {
+			fmt.Println("  [error] .weblisk/config.yaml is empty")
+			errors++
+		}
+	} else if _, err := os.Stat(configJSON); err == nil {
+		// Legacy JSON config support
+		data, readErr := os.ReadFile(configJSON)
 		if readErr != nil {
 			fmt.Println("  [error] .weblisk/config.json unreadable")
 			errors++
 		} else if len(data) > 0 && data[0] == '{' {
-			fmt.Println("  [ok]    .weblisk/config.json valid JSON")
+			fmt.Println("  [ok]    .weblisk/config.json valid (legacy format)")
+			fmt.Println("  [warn]  Consider migrating to .weblisk/config.yaml")
+			warnings++
 		} else {
 			fmt.Println("  [error] .weblisk/config.json invalid format")
 			errors++
@@ -74,7 +97,7 @@ func Run(root string) error {
 		if _, err := os.Stat(rootConfig); err == nil {
 			fmt.Println("  [ok]    weblisk.json found")
 		} else {
-			fmt.Println("  [warn]  No project config found (.weblisk/config.json or weblisk.json)")
+			fmt.Println("  [warn]  No project config found (.weblisk/config.yaml)")
 			warnings++
 		}
 	}

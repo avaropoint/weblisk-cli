@@ -421,7 +421,7 @@ func buildOrchestratorPrompt(specs, platformBP, platform string) string {
 Generate all files needed for a working orchestrator. Include:
 - Entry point (main.go or index.js depending on platform)
 - Protocol types
-- Identity/crypto (Ed25519 keys, tokens, signing)
+- Identity/crypto (ML-DSA-65 keys, tokens, signing)
 - Orchestrator server (all endpoints from the spec)
 - Helper utilities
 - Build configuration (go.mod or package.json)
@@ -539,7 +539,7 @@ func buildDomainPrompt(specs, platformBP, domainBP, name, platform string) strin
 Generate all files needed for a working domain controller. Include:
 - Entry point
 - Protocol types
-- Identity/crypto (Ed25519 keys, tokens, signing)
+- Identity/crypto (ML-DSA-65 keys, tokens, signing)
 - Domain controller (workflow execution, agent dispatch, aggregation)
 - Scoring and feedback logic
 - Registration with orchestrator

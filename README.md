@@ -150,7 +150,7 @@ WL_BLUEPRINT_SOURCES=https://github.com/your-org/your-blueprints.git
 
 ## Operator Identity
 
-The `operator` command manages Ed25519 key-based identity for authenticating
+The `operator` command manages ML-DSA-65 key-based identity for authenticating
 with a running orchestrator's admin API:
 
 ```bash

@@ -1,7 +1,7 @@
 package admin
 
 // Admin client for operations commands — communicates with the
-// orchestrator's admin API using operator Ed25519 authentication.
+// orchestrator's admin API using operator ML-DSA-65 authentication.
 
 import (
 	"bufio"

@@ -7,19 +7,28 @@ import (
 	"strings"
 )
 
-// Validate checks blueprint compliance of the current project.
+// Validate checks blueprint compliance of the current project or a single file.
 // It verifies: project structure, required files, frontmatter in blueprints,
 // section markers, type declarations, and dependency references.
 func Validate(root string, args []string) error {
 	checkDeps := false
 	checkSecOverrides := false
+	var targetFile string
+
 	for _, a := range args {
-		switch a {
-		case "--deps":
+		switch {
+		case a == "--deps":
 			checkDeps = true
-		case "--security-overrides":
+		case a == "--security-overrides":
 			checkSecOverrides = true
+		case !strings.HasPrefix(a, "--") && targetFile == "":
+			targetFile = a
 		}
+	}
+
+	// Single file validation mode
+	if targetFile != "" {
+		return validateSingleFile(root, targetFile)
 	}
 
 	fmt.Println()
@@ -248,4 +257,86 @@ func containsProtocolMarkers(dir string) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// validateSingleFile validates a specific blueprint YAML file.
+func validateSingleFile(root, file string) error {
+	path := filepath.Join(root, file)
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("file not found: %s", file)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", file, err)
+	}
+
+	content := string(data)
+	issues := 0
+
+	fmt.Println()
+	fmt.Printf("  Validating: %s\n\n", file)
+
+	// Check YAML is non-empty
+	if len(strings.TrimSpace(content)) == 0 {
+		fmt.Println("  [error] File is empty")
+		issues++
+	}
+
+	// Check frontmatter (YAML should start with key: or ---)
+	ext := strings.ToLower(filepath.Ext(file))
+	if ext == ".yaml" || ext == ".yml" {
+		lines := strings.Split(content, "\n")
+		hasContent := false
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			hasContent = true
+			break
+		}
+		if hasContent {
+			fmt.Println("  [ok] YAML content present")
+		} else {
+			fmt.Println("  [error] No YAML content found")
+			issues++
+		}
+
+		// Check required fields based on file location
+		if strings.Contains(file, "agents/") || strings.Contains(file, "agent") {
+			if strings.Contains(content, "name:") {
+				fmt.Println("  [ok] Has 'name' field")
+			} else {
+				fmt.Println("  [error] Missing required 'name' field")
+				issues++
+			}
+			if strings.Contains(content, "type:") || strings.Contains(content, "capabilities:") {
+				fmt.Println("  [ok] Has type/capabilities declaration")
+			} else {
+				fmt.Println("  [warn] Missing 'type' or 'capabilities' field")
+			}
+		}
+		if strings.Contains(file, "domains/") || strings.Contains(file, "domain") {
+			if strings.Contains(content, "name:") {
+				fmt.Println("  [ok] Has 'name' field")
+			} else {
+				fmt.Println("  [error] Missing required 'name' field")
+				issues++
+			}
+		}
+	}
+
+	fmt.Println()
+	if issues == 0 {
+		fmt.Println("  Validation passed.")
+	} else {
+		fmt.Printf("  %d issue(s) found.\n", issues)
+	}
+	fmt.Println()
+
+	if issues > 0 {
+		return fmt.Errorf("%d validation error(s)", issues)
+	}
+	return nil
 }
