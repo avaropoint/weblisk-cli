@@ -145,6 +145,25 @@ func LoadBlueprints(root string, names ...string) (string, error) {
 	return strings.Join(parts, "\n\n---\n\n"), nil
 }
 
+// LoadBlueprintMap loads blueprints keyed by name, so a caller can send only
+// the ones a given file needs rather than the whole corpus every time.
+//
+// LoadBlueprints joins them into one string, which is right for a single request
+// about everything and wrong for ten requests about one file each.
+func LoadBlueprintMap(root string, names ...string) (map[string]string, []string, error) {
+	out := map[string]string{}
+	var order []string
+	for _, name := range names {
+		content, err := LoadBlueprint(root, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		out[name] = content
+		order = append(order, name)
+	}
+	return out, order, nil
+}
+
 // UpdateBlueprints removes all cached blueprint sources, forcing a re-fetch.
 func UpdateBlueprints(root string) error {
 	cacheBase := blueprintCacheBase()

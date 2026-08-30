@@ -201,8 +201,9 @@ var reGoPackage = regexp.MustCompile(`(?m)^package\s+[A-Za-z_][A-Za-z0-9_]*\s*$`
 // proved: naming which files exist tells a model nothing about what is in them,
 // and 36 of that run's 73 errors were symbols declared twice or called and never
 // written.
-func filePrompt(f PlannedFile, plan *Plan, platform string, specs, platBP string,
-	written []string, decls map[string][]Declaration, checklist []ChecklistItem) string {
+func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[string]string,
+	bpOrder []string, platBP string, written []string, decls map[string][]Declaration,
+	checklist []ChecklistItem) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Generate exactly one file: %s\n\n", f.Path)
 	fmt.Fprintf(&b, "Purpose: %s\n", f.Purpose)
@@ -236,8 +237,9 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, specs, platBP string
 	}
 	b.WriteString("\n\n--- PLATFORM BLUEPRINT ---\n")
 	b.WriteString(platBP)
-	b.WriteString("\n\n--- PROTOCOL AND ARCHITECTURE BLUEPRINTS ---\n")
-	b.WriteString(specs)
+	// Only the blueprints this file needs. go.mod does not need the ML-DSA
+	// specification, and sending it ten times is most of the run's cost.
+	b.WriteString(joinBlueprints(relevantBlueprints(f, blueprints), bpOrder))
 	return b.String()
 }
 
@@ -247,7 +249,10 @@ Output rules, which are absolute:
 - Output ONLY the contents of the requested file.
 - No explanation, no commentary, no preamble, no summary.
 - No markdown code fences.
+- No YAML frontmatter. Do NOT begin with --- or any metadata block.
+- No document ABOUT the file. The response IS the file.
 - The first character of your response is the first character of the file.
+  For a Go file that is a comment or the word "package".
 - Use ONLY the target language's standard library unless the blueprint names a dependency.
 - Follow the blueprints exactly. Where they specify a name, shape or status code, use it.
 
@@ -265,8 +270,9 @@ Scope, which is a prohibition and not a preference:
 // Files are written only after ALL of them generate successfully. A half-written
 // target is worse than none: it looks like a build to fix rather than a run to
 // repeat.
-func GenerateTarget(provider Provider, plan *Plan, platform, specs, platBP, root string,
-	onProgress ProgressFunc, checklist []ChecklistItem) ([]GeneratedFile, error) {
+func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints map[string]string,
+	bpOrder []string, platBP, root string, onProgress ProgressFunc,
+	checklist []ChecklistItem) ([]GeneratedFile, error) {
 	if onProgress == nil {
 		onProgress = func(Progress) {}
 	}
@@ -287,7 +293,7 @@ func GenerateTarget(provider Provider, plan *Plan, platform, specs, platBP, root
 			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path,
 				Status: status, Attempt: attempt, Detail: lastViolation})
 
-			prompt := filePrompt(f, plan, platform, specs, platBP, written, decls, checklist)
+			prompt := filePrompt(f, plan, platform, blueprints, bpOrder, platBP, written, decls, checklist)
 			if lastViolation != "" {
 				prompt = "Your previous response was rejected: " + lastViolation +
 					"\nProduce the file again, correctly.\n\n" + prompt

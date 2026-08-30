@@ -55,7 +55,12 @@ func ServerInit(root, platform string) error {
 		}
 		fmt.Println()
 
-		files, gerr := GenerateTarget(provider, plan, platform, specs, platBP, root, printProgress, req.Checklist)
+		bpMap, bpOrder, bperr := LoadBlueprintMap(root, BlueprintSets["orchestrator"]...)
+		if bperr != nil {
+			return bperr
+		}
+		files, gerr := GenerateTarget(provider, plan, platform, bpMap, bpOrder, platBP, root,
+			printProgress, req.Checklist)
 		if gerr != nil {
 			return gerr
 		}

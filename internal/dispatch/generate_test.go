@@ -52,7 +52,7 @@ func TestProseIsRejectedAndRetried(t *testing.T) {
 	}}
 	root := t.TempDir()
 	var retried string
-	_, err := GenerateTarget(p, oneFilePlan(), "go", "specs", "platform", root, func(pr Progress) {
+	_, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", root, func(pr Progress) {
 		if pr.Status == "retrying" {
 			retried = pr.Detail
 		}
@@ -81,7 +81,7 @@ func TestMissingRequiredSymbolIsRejected(t *testing.T) {
 		"package main\n// still wrong\n",
 		"package main\n// wrong a third time\n",
 	}}
-	_, err := GenerateTarget(p, oneFilePlan(), "go", "s", "p", t.TempDir(), nil, nil)
+	_, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", t.TempDir(), nil, nil)
 	if err == nil {
 		t.Fatal("a file missing its required symbol was accepted")
 	}
@@ -99,7 +99,7 @@ func TestFencedOutputIsAccepted(t *testing.T) {
 	body := "package main\n\nfunc main() { _ = \"/v1/health\" }\n"
 	p := &fakeProvider{responses: []string{"```go\n" + body + "```"}}
 	root := t.TempDir()
-	if _, err := GenerateTarget(p, oneFilePlan(), "go", "s", "p", root, nil, nil); err != nil {
+	if _, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", root, nil, nil); err != nil {
 		t.Fatalf("fenced output was rejected: %v", err)
 	}
 	got, _ := os.ReadFile(filepath.Join(root, "server", "main.go"))
@@ -123,7 +123,7 @@ func TestNothingIsWrittenUntilEveryFileSucceeds(t *testing.T) {
 		"package main\n// wrong\n", "package main\n// wrong\n", "package main\n// wrong\n",
 	}}
 	root := t.TempDir()
-	if _, err := GenerateTarget(p, target, "go", "s", "p", root, nil, nil); err == nil {
+	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", root, nil, nil); err == nil {
 		t.Fatal("generation reported success despite a failed file")
 	}
 	if _, err := os.Stat(filepath.Join(root, "server", "a.go")); err == nil {
@@ -141,7 +141,7 @@ func TestEachFileIsToldWhatAlreadyExists(t *testing.T) {
 		},
 	}
 	p := &fakeProvider{responses: []string{"package main\n", "package main\n"}}
-	if _, err := GenerateTarget(p, target, "go", "s", "p", t.TempDir(), nil, nil); err != nil {
+	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", t.TempDir(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(p.prompts) != 2 {
@@ -158,7 +158,7 @@ func TestEachFileIsToldWhatAlreadyExists(t *testing.T) {
 func TestProgressReportsEveryFile(t *testing.T) {
 	p := &fakeProvider{responses: []string{"package main\n\nfunc main() { _ = \"/v1/health\" }\n"}}
 	var steps []string
-	if _, err := GenerateTarget(p, oneFilePlan(), "go", "s", "p", t.TempDir(), func(pr Progress) {
+	if _, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", t.TempDir(), func(pr Progress) {
 		steps = append(steps, pr.Status)
 	}, nil); err != nil {
 		t.Fatal(err)
@@ -182,7 +182,7 @@ func TestFrontmatterIsRejectedAsNotSource(t *testing.T) {
 	}}}
 	var retried string
 	root := t.TempDir()
-	if _, err := GenerateTarget(p, plan, "go", "s", "p", root, func(pr Progress) {
+	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", root, func(pr Progress) {
 		if pr.Status == "retrying" {
 			retried = pr.Detail
 		}
@@ -204,7 +204,7 @@ func TestNonGoContentIsRejectedForAGoPath(t *testing.T) {
 		"package main\n\nfunc main() {}\n",
 	}}
 	plan := &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
-	if _, err := GenerateTarget(p, plan, "go", "s", "p", t.TempDir(), nil, nil); err != nil {
+	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil); err != nil {
 		t.Fatalf("valid Go on retry was rejected: %v", err)
 	}
 	if p.calls != 2 {
@@ -218,7 +218,7 @@ func TestAGoFileMayOpenWithADocComment(t *testing.T) {
 	body := "// Package main implements the orchestrator.\n//\n// Long notes.\npackage main\n\nfunc main() {}\n"
 	p := &fakeProvider{responses: []string{body}}
 	plan := &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
-	if _, err := GenerateTarget(p, plan, "go", "s", "p", t.TempDir(), nil, nil); err != nil {
+	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil); err != nil {
 		t.Fatalf("a doc-commented file was rejected: %v", err)
 	}
 	if p.calls != 1 {
