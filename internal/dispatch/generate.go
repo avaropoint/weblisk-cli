@@ -97,7 +97,14 @@ func contractViolation(content string, f ManifestFile) string {
 }
 
 // filePrompt asks for exactly one file.
-func filePrompt(f ManifestFile, target *ManifestTarget, platform string, specs, platBP string, written []string) string {
+//
+// Carries the eight elements architecture/generation.md requires. Element 3 —
+// accumulated DECLARATIONS rather than filenames — is the one the first real run
+// proved: naming which files exist tells a model nothing about what is in them,
+// and 36 of that run's 73 errors were symbols declared twice or called and never
+// written.
+func filePrompt(f ManifestFile, target *ManifestTarget, platform string, specs, platBP string,
+	written []string, decls map[string][]Declaration, checklist []ChecklistItem) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Generate exactly one file: %s\n\n", f.Path)
 	fmt.Fprintf(&b, "Purpose: %s\n", f.Purpose)
@@ -109,9 +116,14 @@ func filePrompt(f ManifestFile, target *ManifestTarget, platform string, specs, 
 	}
 	fmt.Fprintf(&b, "\nPlatform: %s\nTarget directory: %s\n", platform, target.Root)
 	if len(written) > 0 {
-		// Files already generated, so the model does not redefine what exists.
-		fmt.Fprintf(&b, "\nAlready generated in this package (do NOT redeclare their symbols): %s\n",
-			strings.Join(written, ", "))
+		fmt.Fprintf(&b, "\nAlready generated in this package: %s\n", strings.Join(written, ", "))
+		if d := FormatDeclarations(decls, written); d != "" {
+			b.WriteString("\nThese symbols ALREADY EXIST. Do not redeclare them, and call them " +
+				"exactly as declared:\n")
+			b.WriteString(d)
+			b.WriteString("\nIf this file needs a helper that is not listed above, declare it HERE " +
+				"rather than assuming it exists elsewhere.\n")
+		}
 	}
 	fmt.Fprintf(&b, "\nThe complete file set for this target is: ")
 	for i, mf := range target.Files {
@@ -119,6 +131,10 @@ func filePrompt(f ManifestFile, target *ManifestTarget, platform string, specs, 
 			b.WriteString(", ")
 		}
 		b.WriteString(mf.Path)
+	}
+	if c := FormatChecklist(checklist); c != "" {
+		b.WriteString("\n--- ACCEPTANCE CRITERIA ---\n")
+		b.WriteString(c)
 	}
 	b.WriteString("\n\n--- PLATFORM BLUEPRINT ---\n")
 	b.WriteString(platBP)
@@ -135,19 +151,30 @@ Output rules, which are absolute:
 - No markdown code fences.
 - The first character of your response is the first character of the file.
 - Use ONLY the target language's standard library unless the blueprint names a dependency.
-- Follow the blueprints exactly. Where they specify a name, shape or status code, use it.`
+- Follow the blueprints exactly. Where they specify a name, shape or status code, use it.
+
+Scope, which is a prohibition and not a preference:
+- Implement ONLY what this file was asked for. Nothing else.
+- Do NOT add endpoints, routes or handlers beyond those named for this file.
+- Do NOT add configuration, metrics, dashboards, health pages or admin surfaces
+  that no blueprint specifies.
+- Do NOT add dependencies beyond the stated policy.
+- A helpful addition nobody asked for is a defect: it is unspecified, unreviewed,
+  and in a hub holding a tenant's keys it enlarges the attack surface.`
 
 // GenerateTarget generates every file in a manifest target.
 //
 // Files are written only after ALL of them generate successfully. A half-written
 // target is worse than none: it looks like a build to fix rather than a run to
 // repeat.
-func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, platBP, root string, onProgress ProgressFunc) error {
+func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, platBP, root string,
+	onProgress ProgressFunc, checklist []ChecklistItem) ([]GeneratedFile, error) {
 	if onProgress == nil {
 		onProgress = func(Progress) {}
 	}
 	generated := make([]GeneratedFile, 0, len(target.Files))
 	written := make([]string, 0, len(target.Files))
+	decls := map[string][]Declaration{}
 
 	for i, f := range target.Files {
 		var content string
@@ -161,7 +188,7 @@ func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, 
 			onProgress(Progress{Step: i + 1, Total: len(target.Files), Path: f.Path,
 				Status: status, Attempt: attempt, Detail: lastViolation})
 
-			prompt := filePrompt(f, target, platform, specs, platBP, written)
+			prompt := filePrompt(f, target, platform, specs, platBP, written, decls, checklist)
 			if lastViolation != "" {
 				prompt = "Your previous response was rejected: " + lastViolation +
 					"\nProduce the file again, correctly.\n\n" + prompt
@@ -173,7 +200,7 @@ func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, 
 			if err != nil {
 				onProgress(Progress{Step: i + 1, Total: len(target.Files), Path: f.Path,
 					Status: "failed", Attempt: attempt, Detail: err.Error()})
-				return fmt.Errorf("generating %s: %w", f.Path, err)
+				return nil, fmt.Errorf("generating %s: %w", f.Path, err)
 			}
 			candidate := stripFence(raw)
 			if v := contractViolation(candidate, f); v != "" {
@@ -187,19 +214,33 @@ func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, 
 		if content == "" {
 			onProgress(Progress{Step: i + 1, Total: len(target.Files), Path: f.Path,
 				Status: "failed", Attempt: maxFileAttempts, Detail: lastViolation})
-			return fmt.Errorf("%s could not be generated in %d attempts: %s",
+			return nil, fmt.Errorf("%s could not be generated in %d attempts: %s",
 				f.Path, maxFileAttempts, lastViolation)
 		}
 
 		generated = append(generated, GeneratedFile{Path: f.Path, Content: content, Lang: inferLang(f.Path)})
 		written = append(written, f.Path)
+		decls[f.Path] = ExtractDeclarations(f.Path, content)
 		onProgress(Progress{Step: i + 1, Total: len(target.Files), Path: f.Path, Status: "written"})
+	}
+
+	// Layer 2, first half: a symbol declared in two files will not compile, and
+	// naming it here is far clearer than the compiler's report.
+	if dupes := DuplicateDeclarations(decls); len(dupes) > 0 {
+		var b strings.Builder
+		b.WriteString("coherence: the same symbol is declared in more than one file\n")
+		for name, files := range dupes {
+			fmt.Fprintf(&b, "  %s — %s\n", name, strings.Join(files, ", "))
+		}
+		return generated, fmt.Errorf("%s", b.String())
 	}
 
 	targetDir := filepath.Join(root, target.Root)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return err
+		return generated, err
 	}
-	_, err := writeGeneratedFiles(targetDir, generated)
-	return err
+	if _, err := writeGeneratedFiles(targetDir, generated); err != nil {
+		return generated, err
+	}
+	return generated, nil
 }

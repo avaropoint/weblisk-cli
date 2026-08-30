@@ -52,11 +52,11 @@ func TestProseIsRejectedAndRetried(t *testing.T) {
 	}}
 	root := t.TempDir()
 	var retried string
-	err := GenerateTarget(p, oneFileTarget(), "go", "specs", "platform", root, func(pr Progress) {
+	_, err := GenerateTarget(p, oneFileTarget(), "go", "specs", "platform", root, func(pr Progress) {
 		if pr.Status == "retrying" {
 			retried = pr.Detail
 		}
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("generation failed: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestMissingRequiredSymbolIsRejected(t *testing.T) {
 		"package main\n// still wrong\n",
 		"package main\n// wrong a third time\n",
 	}}
-	err := GenerateTarget(p, oneFileTarget(), "go", "s", "p", t.TempDir(), nil)
+	_, err := GenerateTarget(p, oneFileTarget(), "go", "s", "p", t.TempDir(), nil, nil)
 	if err == nil {
 		t.Fatal("a file missing its required symbol was accepted")
 	}
@@ -99,7 +99,7 @@ func TestFencedOutputIsAccepted(t *testing.T) {
 	body := "package main\n\nfunc main() { _ = \"/v1/health\" }\n"
 	p := &fakeProvider{responses: []string{"```go\n" + body + "```"}}
 	root := t.TempDir()
-	if err := GenerateTarget(p, oneFileTarget(), "go", "s", "p", root, nil); err != nil {
+	if _, err := GenerateTarget(p, oneFileTarget(), "go", "s", "p", root, nil, nil); err != nil {
 		t.Fatalf("fenced output was rejected: %v", err)
 	}
 	got, _ := os.ReadFile(filepath.Join(root, "server", "main.go"))
@@ -123,7 +123,7 @@ func TestNothingIsWrittenUntilEveryFileSucceeds(t *testing.T) {
 		"package main\n// wrong\n", "package main\n// wrong\n", "package main\n// wrong\n",
 	}}
 	root := t.TempDir()
-	if err := GenerateTarget(p, target, "go", "s", "p", root, nil); err == nil {
+	if _, err := GenerateTarget(p, target, "go", "s", "p", root, nil, nil); err == nil {
 		t.Fatal("generation reported success despite a failed file")
 	}
 	if _, err := os.Stat(filepath.Join(root, "server", "a.go")); err == nil {
@@ -141,7 +141,7 @@ func TestEachFileIsToldWhatAlreadyExists(t *testing.T) {
 		},
 	}
 	p := &fakeProvider{responses: []string{"package main\n", "package main\n"}}
-	if err := GenerateTarget(p, target, "go", "s", "p", t.TempDir(), nil); err != nil {
+	if _, err := GenerateTarget(p, target, "go", "s", "p", t.TempDir(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(p.prompts) != 2 {
@@ -158,9 +158,9 @@ func TestEachFileIsToldWhatAlreadyExists(t *testing.T) {
 func TestProgressReportsEveryFile(t *testing.T) {
 	p := &fakeProvider{responses: []string{"package main\n\nfunc main() { _ = \"/v1/health\" }\n"}}
 	var steps []string
-	if err := GenerateTarget(p, oneFileTarget(), "go", "s", "p", t.TempDir(), func(pr Progress) {
+	if _, err := GenerateTarget(p, oneFileTarget(), "go", "s", "p", t.TempDir(), func(pr Progress) {
 		steps = append(steps, pr.Status)
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(steps) < 2 || steps[len(steps)-1] != "written" {

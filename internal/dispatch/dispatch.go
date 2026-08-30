@@ -44,10 +44,19 @@ func ServerInit(root, platform string) error {
 			fmt.Printf("  Platform: %s\n", platform)
 			fmt.Printf("  Target:   %s/%s/\n", root, target.Root)
 			fmt.Printf("  Files:    %d, from the platform manifest\n\n", len(target.Files))
-			if gerr := GenerateTarget(provider, target, platform, specs, platBP, root, printProgress); gerr != nil {
+			// Layer 3 input: the blueprints' own acceptance criteria, carried into
+			// the prompt and evaluated after. See architecture/generation.md.
+			checklist := gatherChecklists(root, platform)
+			if len(checklist) > 0 {
+				fmt.Printf("  Criteria: %d checklist assertions from the blueprints\n\n", len(checklist))
+			}
+
+			files, gerr := GenerateTarget(provider, target, platform, specs, platBP, root, printProgress, checklist)
+			if gerr != nil {
 				return gerr
 			}
-			fmt.Printf("\n  [ok] Generated %d files in %s/\n", len(target.Files), target.Root)
+			fmt.Printf("\n  [ok] Generated %d files in %s/\n\n", len(target.Files), target.Root)
+			reportChecklist(EvaluateChecklist(checklist, files))
 			fmt.Printf("  Next: build with %q, then run conformance %v\n\n", target.Build, target.Conformance)
 			return nil
 		}
@@ -760,4 +769,46 @@ func printProgress(p Progress) {
 	case "failed":
 		fmt.Printf("  [%d/%d] %s [failed] %s\n", p.Step, p.Total, p.Path, p.Detail)
 	}
+}
+
+// gatherChecklists collects the Verification Checklist of every blueprint this
+// generation reads.
+//
+// They are the blueprints' own statement of what a correct implementation looks
+// like, and until architecture/generation.md they were passed to the model as
+// undifferentiated prose and never checked.
+func gatherChecklists(root, platform string) []ChecklistItem {
+	sources := append([]string{}, BlueprintSets["orchestrator"]...)
+	sources = append(sources, PlatformBlueprint(platform))
+	var out []ChecklistItem
+	for _, src := range sources {
+		bp, err := LoadBlueprint(root, src)
+		if err != nil {
+			continue
+		}
+		out = append(out, ExtractChecklist(src, bp)...)
+	}
+	return out
+}
+
+// reportChecklist prints Layer 3.
+//
+// Unchecked is reported separately from passed, always. Folding the two would
+// turn "nobody looked" into "it is fine", which is the failure this layer was
+// added to prevent.
+func reportChecklist(results []ChecklistResult) {
+	passed, failed, unchecked := ChecklistSummary(results)
+	if len(results) == 0 {
+		return
+	}
+	fmt.Printf("  Checklist: %d passed, %d failed, %d not mechanically checkable\n", passed, failed, unchecked)
+	for _, r := range results {
+		if r.Checked && !r.Passed {
+			fmt.Printf("    [fail] %s\n           %s\n", r.Item.Text, r.Detail)
+		}
+	}
+	if unchecked > 0 {
+		fmt.Printf("    %d assertions need review by hand — they are NOT passes\n", unchecked)
+	}
+	fmt.Println()
 }
