@@ -36,24 +36,38 @@ func Scaffold(name, cwd string, templates []string, local bool, lib string) erro
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		return fmt.Errorf("creating project directory: %w", err)
 	}
+	// A failed scaffold left an empty directory named after the project, which
+	// then blocks the retry that would have worked.
+	created := false
+	defer func() {
+		if !created {
+			if entries, rerr := os.ReadDir(projectDir); rerr == nil && len(entries) == 0 {
+				os.Remove(projectDir)
+			}
+		}
+	}()
 
 	fmt.Printf("\n  Creating %s\n\n", name)
 
-	// Copy scaffold files from each template in order (merge)
+	// Copy scaffold files from each template in order (merge).
+	//
+	// Each template resolves to a CHAIN, because a template may extend another:
+	// server/starter declares `extends: client/starter` and contains only its
+	// additions — a domain, an agent, the hub config. Applied alone it produced a
+	// project with no pages, no theme and no components, which looks like a
+	// broken template rather than a missing base.
 	totalCount := 0
 	for _, tmpl := range templates {
-		scaffoldDir, err := ResolveScaffoldDir(cwd, tmpl)
+		chain, err := ResolveScaffoldChain(cwd, tmpl)
 		if err != nil {
 			return err
 		}
-
-		count, err := CopyScaffoldDir(scaffoldDir, projectDir)
-		if err != nil {
-			return err
-		}
-		totalCount += count
-		if len(templates) > 1 {
-			fmt.Printf("    %d files from %s\n", count, tmpl)
+		for _, scaffoldDir := range chain {
+			count, cerr := CopyScaffoldDirWith(scaffoldDir, projectDir, scaffoldVars(name))
+			if cerr != nil {
+				return cerr
+			}
+			totalCount += count
 		}
 	}
 	if len(templates) == 1 {
@@ -94,6 +108,7 @@ func Scaffold(name, cwd string, templates []string, local bool, lib string) erro
 	}
 
 	fmt.Println()
+	created = true
 	fmt.Printf("  Done! Next steps:\n")
 	fmt.Printf("    cd %s\n", name)
 	fmt.Printf("    weblisk dev\n\n")
@@ -164,4 +179,16 @@ func sanitizeJSON(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return s
+}
+
+// scaffoldVars are the values substituted into a scaffolded project.
+//
+// `domain` defaults to a hostname derived from the project name rather than
+// being left blank: a placeholder is visible and fixable, and an empty domain
+// produces config that looks complete and is not.
+func scaffoldVars(name string) map[string]string {
+	return map[string]string{
+		"name":   name,
+		"domain": name + ".local",
+	}
 }

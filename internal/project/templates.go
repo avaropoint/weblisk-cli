@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/avaropoint/weblisk-cli/internal/config"
@@ -23,16 +24,55 @@ import (
 const coreTemplateRepo = "https://github.com/avaropoint/weblisk-templates.git"
 
 // Manifest represents the manifest.json structure.
+//
+// Two key names are read for the template map. The templates repository moved
+// to "templates" at manifest v3; this CLI only read "scaffold", so the map
+// unmarshalled empty, resolution fell through to a literal "scaffold/default/"
+// path, and `weblisk new` failed with "scaffold set \"default\" not found in
+// any source" against a repository that contained perfectly good templates.
+//
+// Both are accepted rather than one being migrated, because a template source
+// is a SEPARATE repository that may be pinned, forked or vendored — a CLI that
+// only understands the current shape cannot read a source it shipped alongside
+// six months ago.
 type Manifest struct {
-	Version  string                   `json:"version"`
-	Scaffold map[string]ManifestEntry `json:"scaffold"`
-	Init     map[string]ManifestInit  `json:"init"`
+	Version   string                   `json:"version"`
+	Templates map[string]ManifestEntry `json:"templates"`
+	Scaffold  map[string]ManifestEntry `json:"scaffold"`
+	Init      map[string]ManifestInit  `json:"init"`
+}
+
+// sets returns the template map, whichever key the source used.
+func (m *Manifest) sets() map[string]ManifestEntry {
+	if len(m.Templates) > 0 {
+		return m.Templates
+	}
+	return m.Scaffold
+}
+
+// defaultSet returns the name of the set marked default, or "" if none is.
+//
+// The manifest marks its default with a flag rather than by naming a set
+// "default" — client/starter is the default, and there is no set called
+// "default" anywhere. Looking one up by that literal name finds nothing.
+func (m *Manifest) defaultSet() string {
+	for name, e := range m.sets() {
+		if e.Default {
+			return name
+		}
+	}
+	return ""
 }
 
 // ManifestEntry describes a scaffold set directory.
 type ManifestEntry struct {
 	Description string `json:"description"`
 	Path        string `json:"path"`
+	// Default marks the set used when the caller names none.
+	Default bool `json:"default"`
+	// Extends names a set applied first, so this one layers over it. The server
+	// template extends the client template rather than duplicating it.
+	Extends string `json:"extends"`
 }
 
 // ManifestInit describes an init config file and its output destination.
@@ -136,10 +176,11 @@ func ResolveScaffoldDir(root, setName string) (string, error) {
 	manifest, _ := LoadManifest(root)
 	path := "scaffold/" + setName + "/"
 	if manifest != nil {
-		if entry, ok := manifest.Scaffold[setName]; ok {
+		sets := manifest.sets()
+		if entry, ok := sets[setName]; ok {
 			path = entry.Path
-		} else if entry, ok := manifest.Scaffold["default"]; ok {
-			path = entry.Path
+		} else if def := manifest.defaultSet(); def != "" {
+			path = sets[def].Path
 		}
 	}
 
@@ -147,6 +188,14 @@ func ResolveScaffoldDir(root, setName string) (string, error) {
 		scaffoldDir := filepath.Join(dir, path)
 		if info, err := os.Stat(scaffoldDir); err == nil && info.IsDir() {
 			return scaffoldDir, nil
+		}
+	}
+	// Name what IS available. "not found" against a source holding three usable
+	// templates sends somebody looking for a network problem.
+	if manifest != nil {
+		if available := setNames(manifest.sets()); len(available) > 0 {
+			return "", fmt.Errorf("template %q not found. This source offers: %s",
+				setName, strings.Join(available, ", "))
 		}
 	}
 	return "", fmt.Errorf("scaffold set %q not found in any source", setName)
@@ -166,6 +215,40 @@ func ResolveFile(root, relPath string) (string, error) {
 
 // CopyScaffoldDir copies a scaffold set into the project directory.
 func CopyScaffoldDir(scaffoldDir, projectDir string) (int, error) {
+	return CopyScaffoldDirWith(scaffoldDir, projectDir, nil)
+}
+
+// isBinaryContent reports whether data should be copied verbatim.
+//
+// Substitution is a text operation. Running it over a PNG or a font would
+// corrupt bytes that happen to spell a placeholder, so binary files are copied
+// untouched. A NUL byte in the first 8 KB is the usual, cheap signal.
+func isBinaryContent(data []byte) bool {
+	n := len(data)
+	if n > 8192 {
+		n = 8192
+	}
+	for i := 0; i < n; i++ {
+		if data[i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// CopyScaffoldDirWith copies a scaffold set, substituting {{placeholder}} values.
+//
+// Without this a scaffolded project ships with literal {{name}} and {{domain}}
+// in its content — 37 occurrences across five files in the server template,
+// including .weblisk/config.yaml, which is the hub's own configuration. A
+// project that cannot start because its config names a placeholder is not a
+// scaffold, it is a puzzle.
+//
+// An UNKNOWN placeholder is left exactly as it is rather than blanked. A
+// template may legitimately contain syntax this CLI does not know about, and
+// silently emptying it would corrupt content in a way nobody could trace back
+// to here.
+func CopyScaffoldDirWith(scaffoldDir, projectDir string, vars map[string]string) (int, error) {
 	count := 0
 
 	err := filepath.WalkDir(scaffoldDir, func(path string, d os.DirEntry, err error) error {
@@ -188,6 +271,13 @@ func CopyScaffoldDir(scaffoldDir, projectDir string) (int, error) {
 
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
+		}
+		if len(vars) > 0 && !isBinaryContent(data) {
+			text := string(data)
+			for k, v := range vars {
+				text = strings.ReplaceAll(text, "{{"+k+"}}", v)
+			}
+			data = []byte(text)
 		}
 		count++
 		return os.WriteFile(dest, data, 0644)
@@ -235,4 +325,51 @@ func UpdateTemplates(root string) error {
 	}
 	fmt.Printf("  [ok] %d template source(s) ready\n", len(dirs))
 	return nil
+}
+
+// setNames lists template names, sorted so the message is stable.
+func setNames(sets map[string]ManifestEntry) []string {
+	out := make([]string, 0, len(sets))
+	for name := range sets {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ResolveScaffoldChain returns the scaffold directories to apply in order,
+// following `extends` so a layered template lands on top of its base.
+//
+// server/starter extends client/starter and contains only the additions. Applied
+// alone it produces a project missing everything the client template provides.
+func ResolveScaffoldChain(root, setName string) ([]string, error) {
+	manifest, _ := LoadManifest(root)
+	if manifest == nil {
+		dir, err := ResolveScaffoldDir(root, setName)
+		if err != nil {
+			return nil, err
+		}
+		return []string{dir}, nil
+	}
+	sets := manifest.sets()
+	if setName == "" {
+		setName = manifest.defaultSet()
+	}
+
+	var chain []string
+	seen := map[string]bool{}
+	for name := setName; name != ""; {
+		if seen[name] {
+			return nil, fmt.Errorf("template %q extends itself", name)
+		}
+		seen[name] = true
+		dir, err := ResolveScaffoldDir(root, name)
+		if err != nil {
+			return nil, err
+		}
+		// Base first: prepend, so the extending template is applied last.
+		chain = append([]string{dir}, chain...)
+		name = sets[name].Extends
+	}
+	return chain, nil
 }
