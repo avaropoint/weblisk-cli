@@ -225,3 +225,50 @@ func TestAGoFileMayOpenWithADocComment(t *testing.T) {
 		t.Errorf("made %d calls; a valid file should be accepted first time", p.calls)
 	}
 }
+
+// TestMethodNotationIsMatchedByParsing reproduces the run that failed three
+// times on correct code: a plan declares "(ScopeLevel).Valid" and Go source
+// writes "func (s ScopeLevel) Valid() bool", which shares no substring with it.
+func TestMethodNotationIsMatchedByParsing(t *testing.T) {
+	src := `package main
+
+type ScopeLevel int
+
+func (s ScopeLevel) Valid() bool { return true }
+
+func NewThing() *ScopeLevel { return nil }
+`
+	f := PlannedFile{Path: "protocol.go", Declares: []string{"(ScopeLevel).Valid", "ScopeLevel", "NewThing"}}
+	if v := contractViolation(src, f); v != "" {
+		t.Errorf("correct source was rejected: %s", v)
+	}
+}
+
+func TestAMethodOnTheWrongTypeIsNotAccepted(t *testing.T) {
+	// A bare-name match would accept this, and it is a different promise.
+	src := "package main\n\ntype Other int\n\nfunc (o Other) Valid() bool { return true }\n"
+	f := PlannedFile{Path: "protocol.go", Declares: []string{"(ScopeLevel).Valid"}}
+	if v := contractViolation(src, f); v == "" {
+		t.Error("a method declared on the wrong type satisfied the contract")
+	}
+}
+
+func TestAGenuinelyMissingSymbolIsStillCaught(t *testing.T) {
+	src := "package main\n\ntype ScopeLevel int\n"
+	f := PlannedFile{Path: "protocol.go", Declares: []string{"(ScopeLevel).Valid"}}
+	v := contractViolation(src, f)
+	if v == "" {
+		t.Fatal("a missing method was accepted")
+	}
+	if !strings.Contains(v, "ScopeLevel") {
+		t.Errorf("the complaint does not name the symbol: %s", v)
+	}
+}
+
+func TestFuncPrefixNotationIsTolerated(t *testing.T) {
+	// Plans sometimes write "func main" rather than "main".
+	src := "package main\n\nfunc main() {}\n"
+	if v := contractViolation(src, PlannedFile{Path: "main.go", Declares: []string{"func main"}}); v != "" {
+		t.Errorf("correct source was rejected: %s", v)
+	}
+}

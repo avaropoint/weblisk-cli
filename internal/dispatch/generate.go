@@ -88,9 +88,19 @@ func contractViolation(content string, f PlannedFile) string {
 	if why := notSourceIn(f.Path, trimmed); why != "" {
 		return why
 	}
-	for _, sym := range f.Declares {
-		if !strings.Contains(content, sym) {
-			return fmt.Sprintf("%q must define %s, which does not appear", f.Path, sym)
+	// Verify declarations by PARSING where a language extractor exists, not by
+	// substring. A plan writes a method as "(ScopeLevel).Valid"; Go source writes
+	// "func (s ScopeLevel) Valid() bool". Substring matching rejected correct code
+	// three times over that notation gap, and the failure looked like the model's.
+	if declared := ExtractDeclarations(f.Path, content); len(declared) > 0 {
+		if missing := missingFrom(declared, f.Declares); missing != "" {
+			return fmt.Sprintf("%q must define %s, which does not appear", f.Path, missing)
+		}
+	} else {
+		for _, sym := range f.Declares {
+			if !strings.Contains(content, bareSymbol(sym)) {
+				return fmt.Sprintf("%q must define %s, which does not appear", f.Path, sym)
+			}
 		}
 	}
 	for _, ep := range f.Serves {
@@ -99,6 +109,56 @@ func contractViolation(content string, f PlannedFile) string {
 		route := parts[len(parts)-1]
 		if !strings.Contains(content, route) {
 			return fmt.Sprintf("%q must serve %s, and %s does not appear", f.Path, ep, route)
+		}
+	}
+	return ""
+}
+
+// reMethodNotation matches how a plan names a method: "(Type).Method".
+var reMethodNotation = regexp.MustCompile(`^\(?\*?([A-Za-z_][\w]*)\)?\.([A-Za-z_][\w]*)$`)
+
+// bareSymbol reduces a plan's symbol to the identifier a language would write.
+//
+// Plans name methods "(ScopeLevel).Valid" and sometimes functions "func main".
+// Neither appears literally in source.
+func bareSymbol(sym string) string {
+	sym = strings.TrimSpace(sym)
+	if m := reMethodNotation.FindStringSubmatch(sym); m != nil {
+		return m[2]
+	}
+	return strings.TrimPrefix(sym, "func ")
+}
+
+// missingFrom returns the first required symbol absent from the parsed
+// declarations, or "" when all are present.
+//
+// A method is satisfied when some declaration mentions BOTH its receiver type
+// and its name — a bare name match would accept Valid() declared on the wrong
+// type, which is a different promise.
+func missingFrom(declared []Declaration, required []string) string {
+	names := map[string]bool{}
+	var signatures []string
+	for _, d := range declared {
+		names[d.Name] = true
+		signatures = append(signatures, d.Signature)
+	}
+	for _, sym := range required {
+		if m := reMethodNotation.FindStringSubmatch(strings.TrimSpace(sym)); m != nil {
+			recv, method := m[1], m[2]
+			found := false
+			for _, sig := range signatures {
+				if strings.Contains(sig, recv) && strings.Contains(sig, method) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return sym
+			}
+			continue
+		}
+		if !names[bareSymbol(sym)] {
+			return sym
 		}
 	}
 	return ""
