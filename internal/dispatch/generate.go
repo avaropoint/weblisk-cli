@@ -80,6 +80,14 @@ func contractViolation(content string, f PlannedFile) string {
 			return "the response began with prose (" + firstLine + ") instead of file content"
 		}
 	}
+	// The response must LOOK like source in the target language. A real run
+	// returned YAML frontmatter for one file — "---\nname: ...\ndescription: ..."
+	// — and passed the symbol checks below, because the required names appeared
+	// in its prose. Checking the shape first stops a document masquerading as
+	// code.
+	if why := notSourceIn(f.Path, trimmed); why != "" {
+		return why
+	}
 	for _, sym := range f.Declares {
 		if !strings.Contains(content, sym) {
 			return fmt.Sprintf("%q must define %s, which does not appear", f.Path, sym)
@@ -95,6 +103,36 @@ func contractViolation(content string, f PlannedFile) string {
 	}
 	return ""
 }
+
+// notSourceIn reports why content is not plausibly source for a path's language.
+//
+// Deliberately shallow: it looks for the one construct the language cannot omit,
+// and says nothing about anything else. A deep check would reject valid code for
+// stylistic reasons, which is worse than the failure it prevents.
+func notSourceIn(path, content string) string {
+	if strings.HasPrefix(content, "---") {
+		return "the response began with a YAML frontmatter block, not source"
+	}
+	switch strings.ToLower(pathExt(path)) {
+	case ".go":
+		if !reGoPackage.MatchString(content) {
+			return "the response is not Go source — it has no package clause"
+		}
+	case ".mod":
+		if !strings.Contains(content, "module ") {
+			return "the response is not a go.mod — it has no module directive"
+		}
+	case ".json":
+		if !strings.HasPrefix(content, "{") && !strings.HasPrefix(content, "[") {
+			return "the response is not JSON"
+		}
+	}
+	return ""
+}
+
+// reGoPackage matches a package clause, allowing leading comments and blank
+// lines — a generated file legitimately opens with a doc comment.
+var reGoPackage = regexp.MustCompile(`(?m)^package\s+[A-Za-z_][A-Za-z0-9_]*\s*$`)
 
 // filePrompt asks for exactly one file.
 //

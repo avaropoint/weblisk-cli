@@ -167,3 +167,61 @@ func TestProgressReportsEveryFile(t *testing.T) {
 		t.Errorf("progress did not report generating then written: %v", steps)
 	}
 }
+
+// TestFrontmatterIsRejectedAsNotSource reproduces a real failure: one file came
+// back as a YAML document whose prose happened to contain the required symbol
+// names, so every other check passed and the file was written.
+func TestFrontmatterIsRejectedAsNotSource(t *testing.T) {
+	frontmatter := "---\nname: weblisk-events-file\ndescription: Notes on generating events. " +
+		"It declares PublishSystemEvent and BroadcastDirectory.\n---\n"
+	good := "package main\n\nfunc PublishSystemEvent() {}\nfunc BroadcastDirectory() {}\n"
+	p := &fakeProvider{responses: []string{frontmatter, good}}
+	plan := &Plan{Root: "server", Files: []PlannedFile{{
+		Path: "events.go", Purpose: "events",
+		Declares: []string{"PublishSystemEvent", "BroadcastDirectory"},
+	}}}
+	var retried string
+	root := t.TempDir()
+	if _, err := GenerateTarget(p, plan, "go", "s", "p", root, func(pr Progress) {
+		if pr.Status == "retrying" {
+			retried = pr.Detail
+		}
+	}, nil); err != nil {
+		t.Fatalf("generation failed: %v", err)
+	}
+	if !strings.Contains(retried, "frontmatter") {
+		t.Errorf("the rejection did not name the reason: %q", retried)
+	}
+	got, _ := os.ReadFile(filepath.Join(root, "server", "events.go"))
+	if strings.HasPrefix(string(got), "---") {
+		t.Error("a YAML document was written as Go source")
+	}
+}
+
+func TestNonGoContentIsRejectedForAGoPath(t *testing.T) {
+	p := &fakeProvider{responses: []string{
+		"// just a comment, no package clause\nfunc main() {}\n",
+		"package main\n\nfunc main() {}\n",
+	}}
+	plan := &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
+	if _, err := GenerateTarget(p, plan, "go", "s", "p", t.TempDir(), nil, nil); err != nil {
+		t.Fatalf("valid Go on retry was rejected: %v", err)
+	}
+	if p.calls != 2 {
+		t.Errorf("made %d calls, want 2 — the packageless response should be rejected", p.calls)
+	}
+}
+
+func TestAGoFileMayOpenWithADocComment(t *testing.T) {
+	// The shape check must not reject a file that legitimately opens with a
+	// comment block, which generated files routinely do.
+	body := "// Package main implements the orchestrator.\n//\n// Long notes.\npackage main\n\nfunc main() {}\n"
+	p := &fakeProvider{responses: []string{body}}
+	plan := &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
+	if _, err := GenerateTarget(p, plan, "go", "s", "p", t.TempDir(), nil, nil); err != nil {
+		t.Fatalf("a doc-commented file was rejected: %v", err)
+	}
+	if p.calls != 1 {
+		t.Errorf("made %d calls; a valid file should be accepted first time", p.calls)
+	}
+}

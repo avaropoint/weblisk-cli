@@ -60,10 +60,27 @@ func ServerInit(root, platform string) error {
 			return gerr
 		}
 		fmt.Printf("\n  [ok] Generated %d files in %s/\n\n", len(files), plan.Root)
-		reportChecklist(EvaluateChecklist(req.Checklist, files))
+
+		// Layer 2: build, and feed failures back. Generating blind and reporting
+		// success is how eleven files that do not compile get called finished.
 		if plan.Build != "" {
-			fmt.Printf("  Next: build with %q\n\n", plan.Build)
+			dir := filepath.Join(root, plan.Root)
+			result, repaired, rerr := BuildAndRepair(provider, plan, dir, platBP, files, printProgress)
+			if rerr != nil {
+				return rerr
+			}
+			files = repaired
+			if !result.OK {
+				reportChecklist(EvaluateChecklist(req.Checklist, files))
+				fmt.Printf("  [failed] the implementation does not build after %d repair rounds\n\n",
+					maxRepairRounds)
+				fmt.Println(indentBlock(result.Output, "    "))
+				return fmt.Errorf("build failed: %s", plan.Build)
+			}
+			fmt.Printf("  [ok] builds with %q\n\n", plan.Build)
 		}
+
+		reportChecklist(EvaluateChecklist(req.Checklist, files))
 		return nil
 	}
 
@@ -770,7 +787,21 @@ func printProgress(p Progress) {
 	case "written":
 		fmt.Printf("  [%d/%d] %s [ok]\n", p.Step, p.Total, p.Path)
 	case "failed":
+		if p.Step == 0 {
+			fmt.Printf("  %s [failed] %s\n", p.Path, p.Detail)
+			return
+		}
 		fmt.Printf("  [%d/%d] %s [failed] %s\n", p.Step, p.Total, p.Path, p.Detail)
+	case "planning":
+		fmt.Println("  Asking the model to plan the implementation...")
+	case "replanning":
+		fmt.Printf("  Re-planning — %s\n", p.Detail)
+	case "building":
+		fmt.Printf("  Building (round %d)...\n", p.Attempt)
+	case "built":
+		fmt.Println("  Build succeeded")
+	case "repairing":
+		fmt.Printf("    repairing %s — %s\n", p.Path, p.Detail)
 	}
 }
 
@@ -794,4 +825,14 @@ func reportChecklist(results []ChecklistResult) {
 		fmt.Printf("    %d assertions need review by hand — they are NOT passes\n", unchecked)
 	}
 	fmt.Println()
+}
+
+// indentBlock indents every line, so build output is visibly subordinate to the
+// message that introduced it.
+func indentBlock(s, prefix string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n")
 }
