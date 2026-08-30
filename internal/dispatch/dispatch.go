@@ -36,9 +36,28 @@ func ServerInit(root, platform string) error {
 		return fmt.Errorf("loading platform blueprint: %w", err)
 	}
 
+	// Manifest-driven generation when the platform blueprint declares one.
+	// One file per call, against a file set the blueprint fixes — see
+	// generate.go for why the single-call path is not adequate.
+	if man, merr := ExtractManifest(platBP); merr == nil && man != nil {
+		if target, terr := man.Target("orchestrator"); terr == nil {
+			fmt.Printf("  Platform: %s\n", platform)
+			fmt.Printf("  Target:   %s/%s/\n", root, target.Root)
+			fmt.Printf("  Files:    %d, from the platform manifest\n\n", len(target.Files))
+			if gerr := GenerateTarget(provider, target, platform, specs, platBP, root, printProgress); gerr != nil {
+				return gerr
+			}
+			fmt.Printf("\n  [ok] Generated %d files in %s/\n", len(target.Files), target.Root)
+			fmt.Printf("  Next: build with %q, then run conformance %v\n\n", target.Build, target.Conformance)
+			return nil
+		}
+	} else if merr != nil {
+		return fmt.Errorf("platform manifest is malformed: %w", merr)
+	}
+
 	prompt := buildOrchestratorPrompt(specs, platBP, platform)
 
-	fmt.Println("  Generating orchestrator code...")
+	fmt.Println("  Generating orchestrator code (no manifest for this platform)...")
 	fmt.Printf("  Platform: %s\n", platform)
 	fmt.Printf("  Target:   %s/server/\n", root)
 	fmt.Println()
@@ -724,4 +743,21 @@ func writeGeneratedFiles(targetDir string, files []GeneratedFile) (int, error) {
 		written++
 	}
 	return written, nil
+}
+
+// printProgress renders generation progress on a terminal.
+//
+// A retry names the reason. "Retrying main.go" tells somebody nothing; "retrying
+// main.go — the response began with prose" tells them whether to change model.
+func printProgress(p Progress) {
+	switch p.Status {
+	case "generating":
+		fmt.Printf("  [%d/%d] %s\n", p.Step, p.Total, p.Path)
+	case "retrying":
+		fmt.Printf("  [%d/%d] %s — retry %d: %s\n", p.Step, p.Total, p.Path, p.Attempt, p.Detail)
+	case "written":
+		fmt.Printf("  [%d/%d] %s [ok]\n", p.Step, p.Total, p.Path)
+	case "failed":
+		fmt.Printf("  [%d/%d] %s [failed] %s\n", p.Step, p.Total, p.Path, p.Detail)
+	}
 }

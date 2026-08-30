@@ -10,7 +10,68 @@ import (
 // Validate checks blueprint compliance of the current project or a single file.
 // It verifies: project structure, required files, frontmatter in blueprints,
 // section markers, type declarations, and dependency references.
+// ValidateManifests checks every platform blueprint's generation manifest
+// against schemas/platform.md, using protocol/spec.md as the source of truth for
+// which endpoints exist.
+//
+// Exists because the schema stated seven rules and nothing enforced them, which
+// is the same shape of fault as a permission flag that is stored and never read.
+// It found a real one on its first run: a manifest that appeared complete was
+// silently one file short.
+func ValidateManifests(root string) error {
+	spec, err := LoadBlueprint(root, "protocol/spec.md")
+	if err != nil {
+		fmt.Println("  [warn] protocol/spec.md unavailable — endpoint rules 3 and 4 will not be checked")
+		spec = ""
+	}
+	platforms := []string{"go", "rust", "node", "cloudflare"}
+	total, bad := 0, 0
+	for _, p := range platforms {
+		bp, berr := LoadBlueprint(root, "platforms/"+p+".md")
+		if berr != nil {
+			continue
+		}
+		man, merr := ExtractManifest(bp)
+		if merr != nil {
+			fmt.Printf("  [error] platforms/%s.md: manifest does not parse: %v\n", p, merr)
+			bad++
+			continue
+		}
+		if man == nil {
+			fmt.Printf("  [ok]    platforms/%s.md: no manifest (permitted)\n", p)
+			continue
+		}
+		total++
+		issues, rule4 := ValidateManifest(man, spec)
+		if len(issues) == 0 {
+			note := ""
+			if !rule4 {
+				note = " (rules 3-4 not checked — no protocol spec)"
+			}
+			fmt.Printf("  [ok]    platforms/%s.md%s\n", p, note)
+			continue
+		}
+		bad++
+		fmt.Printf("  [error] platforms/%s.md\n", p)
+		for _, i := range issues {
+			fmt.Printf("            %s\n", i)
+		}
+	}
+	fmt.Printf("\n  %d manifest(s) checked, %d with issues\n\n", total, bad)
+	if bad > 0 {
+		return fmt.Errorf("%d manifest(s) failed validation", bad)
+	}
+	return nil
+}
+
 func Validate(root string, args []string) error {
+	for _, a := range args {
+		if a == "--manifest" || a == "--manifests" {
+			fmt.Print("\n  Generation manifests (schemas/platform.md)\n\n")
+			return ValidateManifests(root)
+		}
+	}
+
 	checkDeps := false
 	checkSecOverrides := false
 	var targetFile string
