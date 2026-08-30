@@ -1,0 +1,146 @@
+package dispatch
+
+// What the blueprints require, extracted rather than authored.
+//
+// # Why nothing is hand-written here
+//
+// A previous version of this pipeline carried a manifest: a checked-in file
+// listing which files an implementation must contain and which symbols each must
+// define. It was removed, and this replaced it, for two reasons.
+//
+// It NARROWED the specification while appearing to sharpen it. Its
+// `must_define` for protocol.go named four types. protocol/types.md enumerates
+// fifty-five. A generator reading the manifest learned about four.
+//
+// And it fixed a structure the specification has no business fixing. What a
+// caller observes — endpoints, types, properties — is the contract. How that is
+// divided into files is an implementation decision, and a hand-authored list
+// prevented a model from making a better one.
+//
+// So requirements are read from the blueprints that already state them, and the
+// FILE STRUCTURE is proposed by the model and validated against these. See
+// architecture/generation.md.
+
+import (
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// Requirements is what any conformant implementation must contain.
+type Requirements struct {
+	Types     []string        // from protocol/types.md
+	Endpoints []string        // from protocol/spec.md, for this target
+	Checklist []ChecklistItem // from every blueprint being read
+}
+
+var (
+	reTypeHeading     = regexp.MustCompile(`(?m)^###\s+([A-Z][A-Za-z0-9]*)\s*$`)
+	reEndpointHeading = regexp.MustCompile(`(?m)^###\s+((?:GET|POST|PUT|DELETE|PATCH)\s+/v1/[^\s]+)\s*$`)
+)
+
+// ExtractTypes reads every type protocol/types.md enumerates.
+func ExtractTypes(typesBlueprint string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range reTypeHeading.FindAllStringSubmatch(typesBlueprint, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ExtractEndpoints reads the endpoints defined under a named section of
+// protocol/spec.md — "Orchestrator Endpoints" or "Agent Endpoints".
+//
+// Scoped to a section because the spec defines both, and an orchestrator that
+// implemented the agent endpoints would be a different component.
+func ExtractEndpoints(spec, section string) []string {
+	i := strings.Index(spec, "## "+section)
+	if i < 0 {
+		return nil
+	}
+	rest := spec[i+len(section)+3:]
+	if end := strings.Index(rest, "\n## "); end >= 0 {
+		rest = rest[:end]
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range reEndpointHeading.FindAllStringSubmatch(rest, -1) {
+		ep := strings.Join(strings.Fields(m[1]), " ")
+		if !seen[ep] {
+			seen[ep] = true
+			out = append(out, ep)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// GatherRequirements assembles what an implementation of one target must satisfy.
+func GatherRequirements(root, platform, target string) (*Requirements, error) {
+	req := &Requirements{}
+
+	if types, err := LoadBlueprint(root, "protocol/types.md"); err == nil {
+		req.Types = ExtractTypes(types)
+	}
+	if spec, err := LoadBlueprint(root, "protocol/spec.md"); err == nil {
+		section := "Orchestrator Endpoints"
+		if target == "agent" {
+			section = "Agent Endpoints"
+		}
+		req.Endpoints = ExtractEndpoints(spec, section)
+	}
+
+	sources := append([]string{}, BlueprintSets[target]...)
+	sources = append(sources, PlatformBlueprint(platform), "protocol/types.md")
+	seen := map[string]bool{}
+	for _, src := range sources {
+		if seen[src] {
+			continue
+		}
+		seen[src] = true
+		if bp, err := LoadBlueprint(root, src); err == nil {
+			req.Checklist = append(req.Checklist, ExtractChecklist(src, bp)...)
+		}
+	}
+	return req, nil
+}
+
+// Summary is a one-line description for progress output.
+func (r *Requirements) Summary() string {
+	var parts []string
+	if n := len(r.Types); n > 0 {
+		parts = append(parts, plural(n, "type"))
+	}
+	if n := len(r.Endpoints); n > 0 {
+		parts = append(parts, plural(n, "endpoint"))
+	}
+	if n := len(r.Checklist); n > 0 {
+		parts = append(parts, plural(n, "checklist assertion"))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func plural(n int, word string) string {
+	s := ""
+	if n != 1 {
+		s = "s"
+	}
+	return itoa(n) + " " + word + s
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}

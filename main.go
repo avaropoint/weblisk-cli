@@ -684,7 +684,6 @@ func printHelp() {
   Blueprints:
     blueprint update        Re-fetch all blueprint sources
     validate                Validate blueprint compliance
-    validate --manifest     Validate platform generation manifests
     pattern apply <name>    Apply a cross-cutting pattern via AI
       --resource <target>   Target resource
     doctor                  Validate project health and configuration

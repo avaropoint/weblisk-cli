@@ -67,7 +67,7 @@ func stripFence(s string) string {
 
 // contractViolation returns the reason a response is not an acceptable file, or
 // "" when it is.
-func contractViolation(content string, f ManifestFile) string {
+func contractViolation(content string, f PlannedFile) string {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
 		return "the response was empty"
@@ -80,12 +80,12 @@ func contractViolation(content string, f ManifestFile) string {
 			return "the response began with prose (" + firstLine + ") instead of file content"
 		}
 	}
-	for _, sym := range f.MustDefine {
+	for _, sym := range f.Declares {
 		if !strings.Contains(content, sym) {
 			return fmt.Sprintf("%q must define %s, which does not appear", f.Path, sym)
 		}
 	}
-	for _, ep := range f.MustServe {
+	for _, ep := range f.Serves {
 		// Match on the path; the method may be expressed many ways in a router.
 		parts := strings.Fields(ep)
 		route := parts[len(parts)-1]
@@ -103,18 +103,18 @@ func contractViolation(content string, f ManifestFile) string {
 // proved: naming which files exist tells a model nothing about what is in them,
 // and 36 of that run's 73 errors were symbols declared twice or called and never
 // written.
-func filePrompt(f ManifestFile, target *ManifestTarget, platform string, specs, platBP string,
+func filePrompt(f PlannedFile, plan *Plan, platform string, specs, platBP string,
 	written []string, decls map[string][]Declaration, checklist []ChecklistItem) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Generate exactly one file: %s\n\n", f.Path)
 	fmt.Fprintf(&b, "Purpose: %s\n", f.Purpose)
-	if len(f.MustDefine) > 0 {
-		fmt.Fprintf(&b, "It MUST define: %s\n", strings.Join(f.MustDefine, ", "))
+	if len(f.Declares) > 0 {
+		fmt.Fprintf(&b, "It MUST define: %s\n", strings.Join(f.Declares, ", "))
 	}
-	if len(f.MustServe) > 0 {
-		fmt.Fprintf(&b, "It MUST serve these endpoints: %s\n", strings.Join(f.MustServe, ", "))
+	if len(f.Serves) > 0 {
+		fmt.Fprintf(&b, "It MUST serve these endpoints: %s\n", strings.Join(f.Serves, ", "))
 	}
-	fmt.Fprintf(&b, "\nPlatform: %s\nTarget directory: %s\n", platform, target.Root)
+	fmt.Fprintf(&b, "\nPlatform: %s\nTarget directory: %s\n", platform, plan.Root)
 	if len(written) > 0 {
 		fmt.Fprintf(&b, "\nAlready generated in this package: %s\n", strings.Join(written, ", "))
 		if d := FormatDeclarations(decls, written); d != "" {
@@ -126,7 +126,7 @@ func filePrompt(f ManifestFile, target *ManifestTarget, platform string, specs, 
 		}
 	}
 	fmt.Fprintf(&b, "\nThe complete file set for this target is: ")
-	for i, mf := range target.Files {
+	for i, mf := range plan.Files {
 		if i > 0 {
 			b.WriteString(", ")
 		}
@@ -167,16 +167,17 @@ Scope, which is a prohibition and not a preference:
 // Files are written only after ALL of them generate successfully. A half-written
 // target is worse than none: it looks like a build to fix rather than a run to
 // repeat.
-func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, platBP, root string,
+func GenerateTarget(provider Provider, plan *Plan, platform, specs, platBP, root string,
 	onProgress ProgressFunc, checklist []ChecklistItem) ([]GeneratedFile, error) {
 	if onProgress == nil {
 		onProgress = func(Progress) {}
 	}
-	generated := make([]GeneratedFile, 0, len(target.Files))
-	written := make([]string, 0, len(target.Files))
+	ordered := plan.Order()
+	generated := make([]GeneratedFile, 0, len(ordered))
+	written := make([]string, 0, len(ordered))
 	decls := map[string][]Declaration{}
 
-	for i, f := range target.Files {
+	for i, f := range ordered {
 		var content string
 		var lastViolation string
 
@@ -185,10 +186,10 @@ func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, 
 			if attempt > 1 {
 				status = "retrying"
 			}
-			onProgress(Progress{Step: i + 1, Total: len(target.Files), Path: f.Path,
+			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path,
 				Status: status, Attempt: attempt, Detail: lastViolation})
 
-			prompt := filePrompt(f, target, platform, specs, platBP, written, decls, checklist)
+			prompt := filePrompt(f, plan, platform, specs, platBP, written, decls, checklist)
 			if lastViolation != "" {
 				prompt = "Your previous response was rejected: " + lastViolation +
 					"\nProduce the file again, correctly.\n\n" + prompt
@@ -198,7 +199,7 @@ func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, 
 				{Role: "user", Content: prompt},
 			})
 			if err != nil {
-				onProgress(Progress{Step: i + 1, Total: len(target.Files), Path: f.Path,
+				onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path,
 					Status: "failed", Attempt: attempt, Detail: err.Error()})
 				return nil, fmt.Errorf("generating %s: %w", f.Path, err)
 			}
@@ -212,7 +213,7 @@ func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, 
 		}
 
 		if content == "" {
-			onProgress(Progress{Step: i + 1, Total: len(target.Files), Path: f.Path,
+			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path,
 				Status: "failed", Attempt: maxFileAttempts, Detail: lastViolation})
 			return nil, fmt.Errorf("%s could not be generated in %d attempts: %s",
 				f.Path, maxFileAttempts, lastViolation)
@@ -221,7 +222,7 @@ func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, 
 		generated = append(generated, GeneratedFile{Path: f.Path, Content: content, Lang: inferLang(f.Path)})
 		written = append(written, f.Path)
 		decls[f.Path] = ExtractDeclarations(f.Path, content)
-		onProgress(Progress{Step: i + 1, Total: len(target.Files), Path: f.Path, Status: "written"})
+		onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path, Status: "written"})
 	}
 
 	// Layer 2, first half: a symbol declared in two files will not compile, and
@@ -235,7 +236,7 @@ func GenerateTarget(provider Provider, target *ManifestTarget, platform, specs, 
 		return generated, fmt.Errorf("%s", b.String())
 	}
 
-	targetDir := filepath.Join(root, target.Root)
+	targetDir := filepath.Join(root, plan.Root)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return generated, err
 	}

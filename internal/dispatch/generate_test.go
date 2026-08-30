@@ -31,13 +31,13 @@ func (f *fakeProvider) Chat(msgs []Message) (string, error) {
 	return r, nil
 }
 
-func oneFileTarget() *ManifestTarget {
-	return &ManifestTarget{
-		Root: "server", Build: "go build ./...", Conformance: []string{"L1"},
-		Files: []ManifestFile{{
+func oneFilePlan() *Plan {
+	return &Plan{
+		Target: "orchestrator", Root: "server", Build: "go build ./...",
+		Files: []PlannedFile{{
 			Path: "main.go", Purpose: "Entry point",
-			MustDefine: []string{"func main"},
-			MustServe:  []string{"GET /v1/health"},
+			Declares: []string{"func main"},
+			Serves:   []string{"GET /v1/health"},
 		}},
 	}
 }
@@ -52,7 +52,7 @@ func TestProseIsRejectedAndRetried(t *testing.T) {
 	}}
 	root := t.TempDir()
 	var retried string
-	_, err := GenerateTarget(p, oneFileTarget(), "go", "specs", "platform", root, func(pr Progress) {
+	_, err := GenerateTarget(p, oneFilePlan(), "go", "specs", "platform", root, func(pr Progress) {
 		if pr.Status == "retrying" {
 			retried = pr.Detail
 		}
@@ -81,7 +81,7 @@ func TestMissingRequiredSymbolIsRejected(t *testing.T) {
 		"package main\n// still wrong\n",
 		"package main\n// wrong a third time\n",
 	}}
-	_, err := GenerateTarget(p, oneFileTarget(), "go", "s", "p", t.TempDir(), nil, nil)
+	_, err := GenerateTarget(p, oneFilePlan(), "go", "s", "p", t.TempDir(), nil, nil)
 	if err == nil {
 		t.Fatal("a file missing its required symbol was accepted")
 	}
@@ -99,7 +99,7 @@ func TestFencedOutputIsAccepted(t *testing.T) {
 	body := "package main\n\nfunc main() { _ = \"/v1/health\" }\n"
 	p := &fakeProvider{responses: []string{"```go\n" + body + "```"}}
 	root := t.TempDir()
-	if _, err := GenerateTarget(p, oneFileTarget(), "go", "s", "p", root, nil, nil); err != nil {
+	if _, err := GenerateTarget(p, oneFilePlan(), "go", "s", "p", root, nil, nil); err != nil {
 		t.Fatalf("fenced output was rejected: %v", err)
 	}
 	got, _ := os.ReadFile(filepath.Join(root, "server", "main.go"))
@@ -111,11 +111,11 @@ func TestFencedOutputIsAccepted(t *testing.T) {
 func TestNothingIsWrittenUntilEveryFileSucceeds(t *testing.T) {
 	// A half-written target looks like a build to fix rather than a run to
 	// repeat.
-	target := &ManifestTarget{
-		Root: "server", Build: "go build", Conformance: []string{"L1"},
-		Files: []ManifestFile{
-			{Path: "a.go", Purpose: "first", MustDefine: []string{"AAA"}},
-			{Path: "b.go", Purpose: "second", MustDefine: []string{"BBB"}},
+	target := &Plan{
+		Target: "orchestrator", Root: "server", Build: "go build",
+		Files: []PlannedFile{
+			{Path: "a.go", Purpose: "first", Declares: []string{"AAA"}},
+			{Path: "b.go", Purpose: "second", Declares: []string{"BBB"}},
 		},
 	}
 	p := &fakeProvider{responses: []string{
@@ -133,11 +133,11 @@ func TestNothingIsWrittenUntilEveryFileSucceeds(t *testing.T) {
 
 func TestEachFileIsToldWhatAlreadyExists(t *testing.T) {
 	// Without this, every file redeclares the shared types and nothing compiles.
-	target := &ManifestTarget{
-		Root: "server", Build: "go build", Conformance: []string{"L1"},
-		Files: []ManifestFile{
+	target := &Plan{
+		Target: "orchestrator", Root: "server", Build: "go build",
+		Files: []PlannedFile{
 			{Path: "protocol.go", Purpose: "types"},
-			{Path: "main.go", Purpose: "entry"},
+			{Path: "main.go", Purpose: "entry", DependsOn: []string{"protocol.go"}},
 		},
 	}
 	p := &fakeProvider{responses: []string{"package main\n", "package main\n"}}
@@ -158,7 +158,7 @@ func TestEachFileIsToldWhatAlreadyExists(t *testing.T) {
 func TestProgressReportsEveryFile(t *testing.T) {
 	p := &fakeProvider{responses: []string{"package main\n\nfunc main() { _ = \"/v1/health\" }\n"}}
 	var steps []string
-	if _, err := GenerateTarget(p, oneFileTarget(), "go", "s", "p", t.TempDir(), func(pr Progress) {
+	if _, err := GenerateTarget(p, oneFilePlan(), "go", "s", "p", t.TempDir(), func(pr Progress) {
 		steps = append(steps, pr.Status)
 	}, nil); err != nil {
 		t.Fatal(err)

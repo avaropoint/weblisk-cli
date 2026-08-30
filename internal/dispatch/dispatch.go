@@ -36,32 +36,35 @@ func ServerInit(root, platform string) error {
 		return fmt.Errorf("loading platform blueprint: %w", err)
 	}
 
-	// Manifest-driven generation when the platform blueprint declares one.
-	// One file per call, against a file set the blueprint fixes — see
-	// generate.go for why the single-call path is not adequate.
-	if man, merr := ExtractManifest(platBP); merr == nil && man != nil {
-		if target, terr := man.Target("orchestrator"); terr == nil {
-			fmt.Printf("  Platform: %s\n", platform)
-			fmt.Printf("  Target:   %s/%s/\n", root, target.Root)
-			fmt.Printf("  Files:    %d, from the platform manifest\n\n", len(target.Files))
-			// Layer 3 input: the blueprints' own acceptance criteria, carried into
-			// the prompt and evaluated after. See architecture/generation.md.
-			checklist := gatherChecklists(root, platform)
-			if len(checklist) > 0 {
-				fmt.Printf("  Criteria: %d checklist assertions from the blueprints\n\n", len(checklist))
-			}
+	// Plan-driven generation. The blueprints state what must exist; the MODEL
+	// decides how to arrange it, and the plan is validated against the
+	// requirements before a single file is generated. See
+	// architecture/generation.md.
+	req, rerr := GatherRequirements(root, platform, "orchestrator")
+	if rerr == nil && (len(req.Types) > 0 || len(req.Endpoints) > 0) {
+		fmt.Printf("  Platform: %s\n", platform)
+		fmt.Printf("  Required: %s\n\n", req.Summary())
 
-			files, gerr := GenerateTarget(provider, target, platform, specs, platBP, root, printProgress, checklist)
-			if gerr != nil {
-				return gerr
-			}
-			fmt.Printf("\n  [ok] Generated %d files in %s/\n\n", len(target.Files), target.Root)
-			reportChecklist(EvaluateChecklist(checklist, files))
-			fmt.Printf("  Next: build with %q, then run conformance %v\n\n", target.Build, target.Conformance)
-			return nil
+		plan, perr := MakePlan(provider, req, "orchestrator", platform, specs, platBP, printProgress)
+		if perr != nil {
+			return perr
 		}
-	} else if merr != nil {
-		return fmt.Errorf("platform manifest is malformed: %w", merr)
+		fmt.Printf("\n  Plan accepted: %d files in %s/\n", len(plan.Files), plan.Root)
+		for _, f := range plan.Order() {
+			fmt.Printf("    %s — %s\n", f.Path, f.Purpose)
+		}
+		fmt.Println()
+
+		files, gerr := GenerateTarget(provider, plan, platform, specs, platBP, root, printProgress, req.Checklist)
+		if gerr != nil {
+			return gerr
+		}
+		fmt.Printf("\n  [ok] Generated %d files in %s/\n\n", len(files), plan.Root)
+		reportChecklist(EvaluateChecklist(req.Checklist, files))
+		if plan.Build != "" {
+			fmt.Printf("  Next: build with %q\n\n", plan.Build)
+		}
+		return nil
 	}
 
 	prompt := buildOrchestratorPrompt(specs, platBP, platform)
@@ -769,26 +772,6 @@ func printProgress(p Progress) {
 	case "failed":
 		fmt.Printf("  [%d/%d] %s [failed] %s\n", p.Step, p.Total, p.Path, p.Detail)
 	}
-}
-
-// gatherChecklists collects the Verification Checklist of every blueprint this
-// generation reads.
-//
-// They are the blueprints' own statement of what a correct implementation looks
-// like, and until architecture/generation.md they were passed to the model as
-// undifferentiated prose and never checked.
-func gatherChecklists(root, platform string) []ChecklistItem {
-	sources := append([]string{}, BlueprintSets["orchestrator"]...)
-	sources = append(sources, PlatformBlueprint(platform))
-	var out []ChecklistItem
-	for _, src := range sources {
-		bp, err := LoadBlueprint(root, src)
-		if err != nil {
-			continue
-		}
-		out = append(out, ExtractChecklist(src, bp)...)
-	}
-	return out
 }
 
 // reportChecklist prints Layer 3.
