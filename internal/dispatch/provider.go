@@ -191,6 +191,13 @@ func NewProvider() (Provider, error) {
 	baseURL := os.Getenv("WL_AI_BASE_URL")
 	apiKey := os.Getenv("WL_AI_KEY")
 
+	// Local coding-agent CLIs are a subprocess, not an HTTP endpoint: no base URL,
+	// no key, and the credential is whatever the tool is already logged in with.
+	switch api {
+	case "claude-code", "claude-local", "local-cli":
+		return newLocalCLIProvider(api, model)
+	}
+
 	switch api {
 	case "openai":
 		if baseURL == "" {

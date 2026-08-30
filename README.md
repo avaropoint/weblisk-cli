@@ -71,8 +71,8 @@ weblisk build --minify --fingerprint
 weblisk vendor
 weblisk vendor --dest js/vendor
 
-# Code generation (requires AI provider)
-export WL_AI_PROVIDER=ollama WL_AI_MODEL=llama3
+# Code generation (requires an AI provider — local is fine)
+export WL_AI_PROVIDER=claude-code          # or: ollama, local-cli, openai, anthropic
 weblisk server init             # Generate orchestrator
 weblisk agent create seo        # Generate SEO agent
 weblisk domain create billing   # Generate domain controller
@@ -143,10 +143,52 @@ WL_BLUEPRINT_SOURCES=https://github.com/your-org/your-blueprints.git
 | `WL_ORCH` | Orchestrator URL | `http://localhost:9800` |
 | `WL_TEMPLATE_SOURCES` | Additional template repo URLs (comma-separated) | — |
 | `WL_BLUEPRINT_SOURCES` | Additional blueprint repo URLs (comma-separated) | — |
-| `WL_AI_PROVIDER` | AI backend: `openai`, `ollama`, `anthropic`, `cloudflare` | `openai` |
+| `WL_AI_PROVIDER` | AI backend — see below | `openai` |
 | `WL_AI_MODEL` | Model name | provider default |
-| `WL_AI_BASE_URL` | Endpoint override | — |
-| `WL_AI_KEY` | API key | — |
+| `WL_AI_BASE_URL` | Endpoint override (HTTP providers) | — |
+| `WL_AI_KEY` | API key (hosted providers only) | — |
+| `WL_AI_COMMAND` | Path to a local CLI (`claude-code`, `local-cli`) | auto-detected |
+| `WL_AI_ARGS` | Extra flags for `local-cli`, quotes honoured | — |
+| `WL_AI_JSON` | `1` if the `local-cli` tool prints a JSON result envelope | — |
+| `WL_AI_TIMEOUT` | Per-call limit for local CLIs, e.g. `20m` | `10m` |
+
+### AI providers
+
+Generating a hub from blueprints needs a model. It does **not** need a paid
+account — three of the five backends run entirely on the machine.
+
+**Local — no key, nothing to configure:**
+
+| `WL_AI_PROVIDER` | Requires | Notes |
+|---|---|---|
+| `claude-code` | Claude Code installed | Uses the CLI's own login. Auto-detected on PATH and in `~/.local/bin`, `~/.claude/local`, Homebrew and npm prefixes |
+| `ollama` | Ollama running | Defaults to `http://localhost:11434/v1`; set `WL_AI_MODEL` |
+| `local-cli` | any local tool | Set `WL_AI_COMMAND`; pass flags with `WL_AI_ARGS` |
+
+**Hosted — requires `WL_AI_KEY`:** `openai`, `anthropic`, `cloudflare`, or any
+OpenAI-compatible endpoint via `WL_AI_BASE_URL`.
+
+```bash
+# Generate a hub with a locally installed Claude Code — no API key
+export WL_AI_PROVIDER=claude-code
+weblisk server init --platform go
+
+# Or entirely offline with Ollama
+export WL_AI_PROVIDER=ollama WL_AI_MODEL=deepseek-coder-v2
+weblisk server init --platform go
+
+# Or any other local tool
+export WL_AI_PROVIDER=local-cli
+export WL_AI_COMMAND=/usr/local/bin/mytool
+export WL_AI_ARGS='--print --format json'
+```
+
+**If a local CLI is installed and still reports as missing**, it is almost
+certainly `$PATH`. A process started by launchd, systemd, an editor or a
+double-click does not inherit a login shell's PATH, and these tools install to
+directories that are only on PATH because a shell profile puts them there. The
+resolver searches the usual install locations for exactly this reason; set
+`WL_AI_COMMAND` to the full path if it still cannot find yours.
 
 ## Operator Identity
 

@@ -19,7 +19,6 @@ type GeneratedFile struct {
 	Lang    string // language (go, js, toml, etc.)
 }
 
-
 // ServerInit generates orchestrator code using the AI model.
 func ServerInit(root, platform string) error {
 	provider, err := RequireProvider()
@@ -284,16 +283,19 @@ func PatternApply(root, pattern, resource string) error {
 	return nil
 }
 
-
 // RequireProvider creates and validates an AI provider.
 func RequireProvider() (Provider, error) {
 	provider, err := NewProvider()
 	if err != nil {
 		return nil, fmt.Errorf("AI provider required for code generation\n\n"+
 			"  Configure an AI provider:\n"+
-			"    WL_AI_PROVIDER=ollama     (local Ollama)\n"+
-			"    WL_AI_PROVIDER=openai     (requires WL_AI_KEY)\n"+
-			"    WL_AI_PROVIDER=anthropic  (requires WL_AI_KEY)\n\n"+
+			"  No account needed — runs on this machine:\n"+
+			"    WL_AI_PROVIDER=claude-code  (Claude Code CLI, uses its own login)\n"+
+			"    WL_AI_PROVIDER=ollama       (local Ollama, default http://localhost:11434)\n"+
+			"    WL_AI_PROVIDER=local-cli    (any local tool; set WL_AI_COMMAND)\n\n"+
+			"  Hosted, requires a key:\n"+
+			"    WL_AI_PROVIDER=openai       (requires WL_AI_KEY)\n"+
+			"    WL_AI_PROVIDER=anthropic    (requires WL_AI_KEY)\n\n"+
 			"  Set in .env or environment: %w", err)
 	}
 
@@ -685,11 +687,32 @@ func writeGeneratedFiles(targetDir string, files []GeneratedFile) (int, error) {
 		return 0, fmt.Errorf("creating target directory: %w", err)
 	}
 
-	written := 0
-	for _, f := range files {
-		fullPath := filepath.Join(targetDir, f.Path)
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		return 0, err
+	}
 
-		if dir := filepath.Dir(fullPath); dir != targetDir {
+	// Validate EVERY path before writing ANY file. A generation that tried to
+	// escape is not a generation to half-apply — leaving some files written and
+	// some refused would present as a partially-generated hub nobody can reason
+	// about.
+	fullPaths := make([]string, len(files))
+	for i, f := range files {
+		full, perr := safeGeneratedPath(absTarget, f.Path)
+		if perr != nil {
+			return 0, perr
+		}
+		fullPaths[i] = full
+	}
+
+	written := 0
+	for i, f := range files {
+		fullPath := fullPaths[i]
+		if serr := withinAfterSymlinks(absTarget, fullPath); serr != nil {
+			return written, serr
+		}
+
+		if dir := filepath.Dir(fullPath); dir != absTarget {
 			if err := os.MkdirAll(dir, 0755); err != nil {
 				return written, fmt.Errorf("creating directory for %s: %w", f.Path, err)
 			}
