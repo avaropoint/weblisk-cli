@@ -805,6 +805,10 @@ func printProgress(p Progress) {
 		fmt.Printf("  Building (round %d)...\n", p.Attempt)
 	case "built":
 		fmt.Println("  Build succeeded")
+	case "reused":
+		fmt.Printf("  [%d/%d] %s [reused]\n", p.Step, p.Total, p.Path)
+	case "summary":
+		fmt.Printf("\n  %s\n", p.Detail)
 	case "repairing":
 		fmt.Printf("    repairing %s — %s\n", p.Path, p.Detail)
 	}

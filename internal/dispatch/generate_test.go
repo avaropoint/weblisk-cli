@@ -163,7 +163,18 @@ func TestProgressReportsEveryFile(t *testing.T) {
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(steps) < 2 || steps[len(steps)-1] != "written" {
+	// Order matters between generating and written; what follows them does not —
+	// a cache summary is emitted after the last file.
+	var gen, wrote int = -1, -1
+	for i, s := range steps {
+		if s == "generating" && gen < 0 {
+			gen = i
+		}
+		if s == "written" {
+			wrote = i
+		}
+	}
+	if gen < 0 || wrote < 0 || wrote < gen {
 		t.Errorf("progress did not report generating then written: %v", steps)
 	}
 }

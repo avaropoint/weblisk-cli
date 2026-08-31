@@ -273,6 +273,7 @@ Scope, which is a prohibition and not a preference:
 func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints map[string]string,
 	bpOrder []string, platBP, root string, onProgress ProgressFunc,
 	checklist []ChecklistItem) ([]GeneratedFile, error) {
+	cache := NewGenerationCache(root)
 	if onProgress == nil {
 		onProgress = func(Progress) {}
 	}
@@ -284,6 +285,19 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 	for i, f := range ordered {
 		var content string
 		var lastViolation string
+
+		// Reuse when every input that produced this file is unchanged: the plan
+		// entry, the blueprints it was sent, and the instructions. Regenerating
+		// an identical file costs two minutes and produces the same bytes.
+		sent := relevantBlueprints(f, blueprints)
+		key := cacheKey(f, sent, platBP, fileSystemPrompt)
+		if cached := cache.Get(key); cached != "" {
+			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path, Status: "reused"})
+			generated = append(generated, GeneratedFile{Path: f.Path, Content: cached, Lang: inferLang(f.Path)})
+			written = append(written, f.Path)
+			decls[f.Path] = ExtractDeclarations(f.Path, cached)
+			continue
+		}
 
 		for attempt := 1; attempt <= maxFileAttempts; attempt++ {
 			status := "generating"
@@ -323,10 +337,15 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 				f.Path, maxFileAttempts, lastViolation)
 		}
 
+		cache.Put(key, content)
 		generated = append(generated, GeneratedFile{Path: f.Path, Content: content, Lang: inferLang(f.Path)})
 		written = append(written, f.Path)
 		decls[f.Path] = ExtractDeclarations(f.Path, content)
 		onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path, Status: "written"})
+	}
+
+	if sum := cache.Summary(); sum != "" {
+		onProgress(Progress{Path: "cache", Status: "summary", Detail: sum})
 	}
 
 	// Layer 2, first half: a symbol declared in two files will not compile, and
