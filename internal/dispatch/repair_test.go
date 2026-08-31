@@ -53,7 +53,7 @@ func TestASucceedingBuildIsNotRepaired(t *testing.T) {
 	dir := t.TempDir()
 	p := &fakeProvider{}
 	plan := &Plan{Root: ".", Build: "true", Files: []PlannedFile{{Path: "a.go", Purpose: "x"}}}
-	result, _, err := BuildAndRepair(p, plan, dir, "platform", []GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil)
+	result, _, err := BuildAndRepair(p, plan, dir, "platform", []GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestABuildErrorIsFedBackAndFixed(t *testing.T) {
 			if pr.Status == "repairing" {
 				repaired, errSeen = pr.Path, pr.Detail
 			}
-		})
+		}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestRepairIsBoundedAndReportsHonestly(t *testing.T) {
 	p := &fakeProvider{responses: []string{broken, broken, broken, broken}}
 	plan := &Plan{Root: ".", Build: "go build ./...", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
 	result, _, err := BuildAndRepair(p, plan, dir, "platform",
-		[]GeneratedFile{{Path: "main.go", Content: broken}}, nil)
+		[]GeneratedFile{{Path: "main.go", Content: broken}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestTheBuildRunsFromTheProjectRoot(t *testing.T) {
 		Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
 	p := &fakeProvider{}
 	result, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "main.go", Content: "package main\n\nfunc main() {}\n"}}, nil)
+		[]GeneratedFile{{Path: "main.go", Content: "package main\n\nfunc main() {}\n"}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestPrepareRunsBeforeEveryBuild(t *testing.T) {
 		"package main\n", "package main\n", "package main\n", "package main\n",
 	}}
 	if _, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil); err != nil {
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(counter)
@@ -216,7 +216,7 @@ func TestAFailingPrepareStopsImmediately(t *testing.T) {
 		Files: []PlannedFile{{Path: "a.go", Purpose: "x"}}}
 	p := &fakeProvider{}
 	_, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil)
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil)
 	if err == nil {
 		t.Fatal("a failing prepare was not reported")
 	}
@@ -247,7 +247,7 @@ func TestRepairRetriesAContractViolation(t *testing.T) {
 	plan := &Plan{Root: ".", Build: "go build ./...",
 		Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
 	result, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "main.go", Content: broken}}, nil)
+		[]GeneratedFile{{Path: "main.go", Content: broken}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestRepairStopsWhenProgressStalls(t *testing.T) {
 			if pr.Status == "failed" {
 				stallDetail = pr.Detail
 			}
-		})
+		}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,11 +310,112 @@ func TestRepairKeepsGoingWhileErrorsFall(t *testing.T) {
 	}
 	p := &fakeProvider{responses: replies}
 	result, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil)
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !result.OK {
 		t.Errorf("a converging repair was abandoned before it finished: %s", result.Output)
+	}
+}
+
+// TestCompilingIsNotConforming is the loop's exit condition, corrected.
+//
+// The loop used to end the moment `go build` succeeded, and the caller then
+// evaluated the checklist and printed it. So a hub that compiled and violated
+// assertions from the very blueprints it was generated from reported success:
+// the verification checklist was a report, and the compiler was the contract.
+func TestCompilingIsNotConforming(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compiles, and the type is missing a JSON key the blueprint requires.
+	before := "package main\n\ntype ErrorResponse struct {\n\tError string `json:\"error\"`\n}\n\nfunc main() {}\n"
+	after := "package main\n\ntype ErrorResponse struct {\n\tError string `json:\"error\"`\n\tCode  string `json:\"code,omitempty\"`\n}\n\nfunc main() {}\n"
+
+	plan := &Plan{Root: ".", Build: "go build ./...",
+		Files: []PlannedFile{{Path: "main.go", Purpose: "protocol types"}}}
+	checklist := []ChecklistItem{{Source: "protocol/types.md",
+		Text: "ErrorResponse includes `error` and `code` fields with exact JSON keys"}}
+
+	p := &fakeProvider{responses: []string{after}}
+	var conformed []string
+	result, files, err := BuildAndRepair(p, plan, dir, "", []GeneratedFile{{Path: "main.go", Content: before}},
+		func(pr Progress) {
+			if pr.Status == "repairing" {
+				conformed = append(conformed, pr.Path)
+			}
+		}, checklist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK {
+		t.Fatalf("build failed: %s", result.Output)
+	}
+	if len(conformed) == 0 {
+		t.Fatal("the build passed and a failing assertion did not start a repair round")
+	}
+	if !strings.Contains(files[0].Content, `json:"code`) {
+		t.Errorf("the conformance repair was not applied:\n%s", files[0].Content)
+	}
+	// And it stops: a second evaluation finds nothing failing, so no further call.
+	if p.calls != 1 {
+		t.Errorf("provider called %d times, want 1 — the loop did not stop when the assertion held", p.calls)
+	}
+}
+
+func TestConformanceRepairStopsWhenItIsNotConverging(t *testing.T) {
+	// A model that returns the same non-conforming file forever must not spend
+	// twelve rounds proving it.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stuck := "package main\n\ntype ErrorResponse struct {\n\tError string `json:\"error\"`\n}\n\nfunc main() {}\n"
+	plan := &Plan{Root: ".", Build: "go build ./...",
+		Files: []PlannedFile{{Path: "main.go", Purpose: "protocol types"}}}
+	checklist := []ChecklistItem{{Source: "protocol/types.md",
+		Text: "ErrorResponse includes `error` and `code` fields with exact JSON keys"}}
+
+	p := &fakeProvider{responses: []string{stuck, stuck, stuck, stuck, stuck, stuck, stuck, stuck}}
+	result, _, err := BuildAndRepair(p, plan, dir, "", []GeneratedFile{{Path: "main.go", Content: stuck}},
+		nil, checklist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK {
+		t.Fatalf("build failed: %s", result.Output)
+	}
+	// Rounds 1 and 2 see the same count, so the stall trips on round 3 at the
+	// latest. Three calls, not twelve.
+	if p.calls > 3 {
+		t.Errorf("provider called %d times — the stall detector did not trip", p.calls)
+	}
+}
+
+func TestAnAssertionNamingNoPlannedFileIsNotRepairedBlindly(t *testing.T) {
+	// A conformance repair aimed at the wrong file edits correct code to satisfy
+	// something it does not control. Reporting the failure is better.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := "package main\n\nfunc main() {}\n"
+	plan := &Plan{Root: ".", Build: "go build ./...", Files: []PlannedFile{{Path: "main.go"}}}
+	// Behavioural: nothing structural applies, so it is unchecked, not failed.
+	checklist := []ChecklistItem{{Source: "architecture/storage.md", Text: "All stores survive process restart"}}
+
+	p := &fakeProvider{}
+	result, _, err := BuildAndRepair(p, plan, dir, "", []GeneratedFile{{Path: "main.go", Content: src}}, nil, checklist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK {
+		t.Fatalf("build failed: %s", result.Output)
+	}
+	if p.calls != 0 {
+		t.Errorf("provider called %d times for an unchecked assertion — the loop repaired against nothing", p.calls)
 	}
 }

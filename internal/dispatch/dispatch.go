@@ -88,7 +88,7 @@ func ServerInit(root, platform string) error {
 		// Layer 2: build, and feed failures back. Generating blind and reporting
 		// success is how eleven files that do not compile get called finished.
 		if plan.Build != "" {
-			result, repaired, rerr := BuildAndRepair(provider, plan, root, platBP, files, printProgress)
+			result, repaired, rerr := BuildAndRepair(provider, plan, root, platBP, files, printProgress, req.Checklist)
 			if rerr != nil {
 				return rerr
 			}
@@ -840,19 +840,24 @@ func printProgress(p Progress) {
 
 // reportChecklist prints Layer 3.
 //
-// Unchecked is reported separately from passed, always. Folding the two would
-// turn "nobody looked" into "it is fine", which is the failure this layer was
-// added to prevent.
+// Four counts, printed as four counts. "Necessary conditions hold" is the honest
+// description of a route existing when the assertion was about what the route
+// enforces — reporting it as a pass would turn "part of this was looked at" into
+// "it is fine", and reporting it as unchecked would throw away a real result.
 func reportChecklist(results []ChecklistResult) {
-	passed, failed, unchecked := ChecklistSummary(results)
 	if len(results) == 0 {
 		return
 	}
-	fmt.Printf("  Checklist: %d passed, %d failed, %d not mechanically checkable\n", passed, failed, unchecked)
+	verified, failed, necessary, unchecked := ChecklistSummary(results)
+	fmt.Printf("  Checklist: %d verified, %d failed, %d necessary-conditions-hold, %d unchecked\n",
+		verified, failed, necessary, unchecked)
 	for _, r := range results {
-		if r.Checked && !r.Passed {
+		if r.Outcome == OutcomeFailed {
 			fmt.Printf("    [fail] %s\n           %s\n", r.Item.Text, r.Detail)
 		}
+	}
+	if necessary > 0 {
+		fmt.Printf("    %d assertions had their necessary conditions met — that is NOT a pass\n", necessary)
 	}
 	if unchecked > 0 {
 		fmt.Printf("    %d assertions need review by hand — they are NOT passes\n", unchecked)

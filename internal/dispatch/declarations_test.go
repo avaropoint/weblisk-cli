@@ -117,14 +117,21 @@ func TestUncheckedIsNeverReportedAsPassed(t *testing.T) {
 		{Source: "x", Text: "io.LimitReader is applied on all request body reads"},
 		{Source: "x", Text: "Something no mechanical check can evaluate at all"},
 	}
-	results := EvaluateChecklist(items, []GeneratedFile{{Content: "io.LimitReader(r.Body, 1024)"}})
-	passed, failed, unchecked := ChecklistSummary(results)
-	if passed != 1 || failed != 0 || unchecked != 1 {
-		t.Errorf("summary = %d passed, %d failed, %d unchecked; want 1/0/1", passed, failed, unchecked)
+	results := EvaluateChecklist(items, []GeneratedFile{{Path: "a.go", Content: "package main\n\nvar _ = io.LimitReader(r.Body, 1024)\n"}})
+	verified, failed, necessary, unchecked := ChecklistSummary(results)
+	// The io.LimitReader assertion is a TEXT check: the string appearing in the
+	// source is a necessary condition, not proof it is applied on all reads. It
+	// counts as `necessary`, and never as verified.
+	if verified != 0 || failed != 0 || necessary != 1 || unchecked != 1 {
+		t.Errorf("summary = %d verified, %d failed, %d necessary, %d unchecked; want 0/0/1/1",
+			verified, failed, necessary, unchecked)
 	}
 	for _, r := range results {
-		if !r.Checked && r.Passed {
+		if !r.Checked() && r.Passed() {
 			t.Error("an unchecked assertion was marked passed")
+		}
+		if r.Outcome == OutcomeNecessary && r.Passed() {
+			t.Error("a necessary condition holding was reported as the assertion passing")
 		}
 	}
 }
@@ -133,8 +140,8 @@ func TestTheRetryAfterFailureIsDetected(t *testing.T) {
 	// The specific assertion that failed silently on the first run.
 	items := []ChecklistItem{{Source: "platforms/go.md",
 		Text: "Concurrency limiter returns 429 with Retry-After header when agent is at capacity"}}
-	results := EvaluateChecklist(items, []GeneratedFile{{Content: "package main\n// no such header\n"}})
-	if len(results) != 1 || !results[0].Checked || results[0].Passed {
+	results := EvaluateChecklist(items, []GeneratedFile{{Path: "a.go", Content: "package main\n// no such header\n"}})
+	if len(results) != 1 || results[0].Outcome != OutcomeFailed {
 		t.Errorf("the Retry-After assertion was not evaluated as a failure: %+v", results)
 	}
 }
