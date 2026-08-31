@@ -42,6 +42,7 @@ func handleInit(args []string, root string) error {
 	allowedSigners := ""
 	encryptKeys := false
 	verifyOnly := false
+	resume := false
 
 	for i := 0; i < len(args); i++ {
 		switch {
@@ -61,6 +62,8 @@ func handleInit(args []string, root string) error {
 			encryptKeys = true
 		case args[i] == "--verify-only":
 			verifyOnly = true
+		case args[i] == "--resume":
+			resume = true
 		}
 	}
 
@@ -87,9 +90,21 @@ func handleInit(args []string, root string) error {
 		return nil
 	}
 
+	// Refusing to overwrite is right; refusing to CONTINUE is not.
+	//
+	// Generation caches every file on the inputs that produced it, precisely so a
+	// run that reached a build can be resumed cheaply — and then the command
+	// refused to run at all while a server/ directory existed, so the cache could
+	// never be used for the thing it was built for. A conformance repair on one
+	// file meant deleting nine and regenerating them.
+	//
+	// --resume continues into the existing directory. Without it the guard stands,
+	// because silently writing over somebody's edited hub is a different mistake.
 	serverDir := filepath.Join(root, "server")
-	if _, err := os.Stat(serverDir); err == nil {
-		return fmt.Errorf("server/ directory already exists at %s\n  Remove it first or use a different directory", serverDir)
+	if _, err := os.Stat(serverDir); err == nil && !resume {
+		return fmt.Errorf("server/ directory already exists at %s\n"+
+			"  Use --resume to continue generating into it (cached files are reused),\n"+
+			"  or remove it to start from nothing", serverDir)
 	}
 
 	fmt.Println()
@@ -99,6 +114,9 @@ func handleInit(args []string, root string) error {
 	fmt.Printf("  AI Model:  %s\n", dispatch.DiscoverProvider())
 	if encryptKeys {
 		fmt.Println("  Keys:      encrypted at rest")
+	}
+	if resume {
+		fmt.Println("  Mode:      resuming into the existing server/ directory")
 	}
 	fmt.Println()
 
@@ -192,9 +210,11 @@ func PrintHelp() {
   Weblisk Server
 
   Usage:
-    weblisk server init [--platform go|cloudflare]
+    weblisk server init [--platform go|cloudflare] [--resume]
       Generate orchestrator code using your AI model.
       The AI model builds the implementation from the protocol blueprint.
+      --resume continues into an existing server/ directory, reusing every
+      cached file whose inputs have not changed.
 
     weblisk server start [--port N]
       Build and run the generated orchestrator.
