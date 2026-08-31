@@ -211,3 +211,118 @@ func TestTypeNamesMustBeDeclaredToBeChecked(t *testing.T) {
 		t.Errorf("outcome = %s, want unchecked — Finding is not declared here", r.Outcome)
 	}
 }
+
+func TestAValueListIsNotAFieldList(t *testing.T) {
+	// protocol/types.md mixes required fields and permitted values in one
+	// sentence. Reading every backticked token as a field reported three correct
+	// types as missing keys, and the third one told me the pattern rather than
+	// the instance.
+	src := `package main
+
+type OperationIntent struct {
+	ID            string ` + "`json:\"id\"`" + `
+	Agent         string ` + "`json:\"agent\"`" + `
+	Operation     string ` + "`json:\"operation\"`" + `
+	Resource      string ` + "`json:\"resource\"`" + `
+	ResourceClass string ` + "`json:\"resource_class\"`" + `
+	Scope         string ` + "`json:\"scope\"`" + `
+	Environment   string ` + "`json:\"environment\"`" + `
+	Timestamp     int64  ` + "`json:\"timestamp\"`" + `
+}
+`
+	items := []ChecklistItem{{Source: "protocol/types.md",
+		Text: "OperationIntent requires `id`, `agent`, `operation`, `resource`, `resource_class`, `scope`, `environment`, and `timestamp`; operation includes `list` and `query`"}}
+	r := EvaluateChecklist(items, []GeneratedFile{{Path: "protocol.go", Content: src}})[0]
+	if r.Outcome == OutcomeFailed {
+		t.Fatalf("a complete type was failed for not having its field's VALUES as fields: %s", r.Detail)
+	}
+	if r.Outcome != OutcomeNecessary {
+		t.Errorf("outcome = %s, want necessary (the eight fields are present)", r.Outcome)
+	}
+
+	// A genuinely missing field in the first clause must still fail.
+	missing := strings.Replace(src, "\tScope         string `json:\"scope\"`\n", "", 1)
+	r2 := EvaluateChecklist(items, []GeneratedFile{{Path: "protocol.go", Content: missing}})[0]
+	if r2.Outcome != OutcomeFailed || !strings.Contains(r2.Detail, "scope") {
+		t.Errorf("a missing field was not caught: %s / %s", r2.Outcome, r2.Detail)
+	}
+
+	// And an assertion whose first clause is not about fields at all is left
+	// alone rather than guessed at.
+	supports := []ChecklistItem{{Source: "protocol/types.md",
+		Text: "WorkflowPhase `on_error` supports `fail`, `skip`, and `retry`; `max_retries` applies only when `on_error` = `\"retry\"`"}}
+	wf := "package main\n\ntype WorkflowPhase struct {\n\tOnError string `json:\"on_error\"`\n}\n"
+	if r := EvaluateChecklist(supports, []GeneratedFile{{Path: "protocol.go", Content: wf}})[0]; r.Outcome == OutcomeFailed {
+		t.Errorf("a 'supports' clause was read as a field list: %s", r.Detail)
+	}
+}
+
+func TestIndirectDependenciesAreNotDeclarations(t *testing.T) {
+	// The generated hub declared golang.org/x/crypto for Argon2id and `go mod
+	// tidy` wrote golang.org/x/sys beneath it as indirect. Counting that against
+	// the dependency policy reports a violation nobody committed and cannot fix
+	// without removing the permitted dependency above it.
+	assertion := ChecklistItem{Source: "platforms/go.md",
+		Text: "No dependency beyond `github.com/cloudflare/circl` and `golang.org/x/crypto`; every dependency declared in go.mod"}
+	files := []GeneratedFile{
+		{Path: "go.mod", Content: "module hub\n\ngo 1.22.0\n\nrequire (\n\tgithub.com/cloudflare/circl v1.6.1\n\tgolang.org/x/crypto v0.11.1\n)\n\nrequire golang.org/x/sys v0.10.0 // indirect\n"},
+		{Path: "identity.go", Content: "package main\n\nimport \"golang.org/x/crypto/argon2\"\n"},
+	}
+	if r := EvaluateChecklist([]ChecklistItem{assertion}, files)[0]; r.Outcome != OutcomeVerified {
+		t.Errorf("outcome = %s (%s), want verified", r.Outcome, r.Detail)
+	}
+	// A direct dependency outside the policy must still fail.
+	files[0].Content += "\nrequire github.com/gin-gonic/gin v1.9.0\n"
+	if r := EvaluateChecklist([]ChecklistItem{assertion}, files)[0]; r.Outcome != OutcomeFailed {
+		t.Errorf("a direct unpermitted dependency was not caught: %s", r.Outcome)
+	}
+}
+
+func TestAConditionalAssertionBindsOnlyWhenItsPremiseHolds(t *testing.T) {
+	// "IF SQLite was chosen: WAL journal mode, `user_version` pragma…" failed
+	// every implementation that took the JSONL default the blueprint recommends.
+	assertion := ChecklistItem{Source: "platforms/go.md",
+		Text: "IF SQLite was chosen: WAL journal mode, `user_version` pragma for migrations, tables created with `CREATE TABLE IF NOT EXISTS`"}
+
+	jsonl := []GeneratedFile{
+		{Path: "go.mod", Content: "module hub\n\ngo 1.22\n"},
+		{Path: "storage.go", Content: "package main\n\n// append-only JSONL\n"},
+	}
+	r := EvaluateChecklist([]ChecklistItem{assertion}, jsonl)[0]
+	if r.Outcome != OutcomeNotApplicable {
+		t.Errorf("JSONL backend: outcome = %s (%s), want not-applicable", r.Outcome, r.Detail)
+	}
+	// Not-applicable is not unchecked: nobody needs to review it.
+	_, _, _, na, unchecked := ChecklistCounts([]ChecklistResult{r})
+	if na != 1 || unchecked != 0 {
+		t.Errorf("counts: %d not-applicable, %d unchecked; want 1 and 0", na, unchecked)
+	}
+
+	// Choose SQLite and the obligation binds.
+	chosen := []GeneratedFile{
+		{Path: "go.mod", Content: "module hub\n\ngo 1.22\n\nrequire modernc.org/sqlite v1.29.0\n"},
+		{Path: "storage.go", Content: "package main\n\n// no pragmas here\n"},
+	}
+	if r := EvaluateChecklist([]ChecklistItem{assertion}, chosen)[0]; r.Outcome != OutcomeFailed {
+		t.Errorf("SQLite chosen and pragma absent: outcome = %s, want failed", r.Outcome)
+	}
+	withPragma := chosen
+	withPragma[1].Content = "package main\n\nconst pragmas = \"PRAGMA journal_mode=WAL; PRAGMA user_version=1;\"\n"
+	if r := EvaluateChecklist([]ChecklistItem{assertion}, withPragma)[0]; r.Outcome == OutcomeFailed {
+		t.Errorf("SQLite chosen and pragma present: %s", r.Detail)
+	}
+}
+
+func TestAnUnrecognisedPremiseIsNotExcused(t *testing.T) {
+	// Guessing that a premise is false is how a checking layer starts silently
+	// forgiving requirements — worse than the false failure it would be fixing.
+	assertion := ChecklistItem{Source: "x",
+		Text: "IF the deployment is clustered: sessions are replicated across nodes"}
+	r := EvaluateChecklist([]ChecklistItem{assertion}, []GeneratedFile{{Path: "a.go", Content: "package main\n"}})[0]
+	if r.Outcome != OutcomeUnchecked {
+		t.Errorf("outcome = %s, want unchecked", r.Outcome)
+	}
+	if !strings.Contains(r.Detail, "clustered") {
+		t.Errorf("the premise is not quoted for the human who must judge it: %q", r.Detail)
+	}
+}

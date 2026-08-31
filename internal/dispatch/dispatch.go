@@ -848,9 +848,9 @@ func reportChecklist(results []ChecklistResult) {
 	if len(results) == 0 {
 		return
 	}
-	verified, failed, necessary, unchecked := ChecklistSummary(results)
-	fmt.Printf("  Checklist: %d verified, %d failed, %d necessary-conditions-hold, %d unchecked\n",
-		verified, failed, necessary, unchecked)
+	verified, failed, necessary, notApplicable, unchecked := ChecklistCounts(results)
+	fmt.Printf("  Checklist: %d verified, %d failed, %d necessary-conditions-hold, %d not-applicable, %d unchecked\n",
+		verified, failed, necessary, notApplicable, unchecked)
 	for _, r := range results {
 		if r.Outcome == OutcomeFailed {
 			fmt.Printf("    [fail] %s\n           %s\n", r.Item.Text, r.Detail)
@@ -858,6 +858,9 @@ func reportChecklist(results []ChecklistResult) {
 	}
 	if necessary > 0 {
 		fmt.Printf("    %d assertions had their necessary conditions met — that is NOT a pass\n", necessary)
+	}
+	if notApplicable > 0 {
+		fmt.Printf("    %d assertions do not apply — their premise is established false\n", notApplicable)
 	}
 	if unchecked > 0 {
 		fmt.Printf("    %d assertions need review by hand — they are NOT passes\n", unchecked)

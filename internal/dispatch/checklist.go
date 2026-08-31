@@ -246,8 +246,36 @@ func EvaluateChecklist(items []ChecklistItem, files []GeneratedFile) []Checklist
 }
 
 func evaluateOne(item ChecklistItem, ctx *CheckContext) ChecklistResult {
-	a := parseAssertion(item, ctx)
 	r := ChecklistResult{Item: item, Outcome: OutcomeUnchecked}
+
+	// A conditional assertion binds only when its premise holds. Evaluated
+	// unconditionally, "IF SQLite was chosen: WAL journal mode, `user_version`
+	// pragma…" fails every implementation that took the JSONL default — a failure
+	// for making the choice the blueprint recommends.
+	//
+	// An unrecognised premise leaves the assertion unchecked with the premise
+	// quoted, never excused: guessing a premise false is how a checking layer
+	// starts silently forgiving requirements.
+	text := item.Text
+	if premise, obligation, isConditional := splitConditional(item.Text); isConditional {
+		holds, settled := evaluatePremise(premise, ctx)
+		switch {
+		case !settled:
+			r.Check = "conditional premise not settled"
+			r.Detail = "conditional on: " + premise
+			return r
+		case !holds:
+			r.Outcome = OutcomeNotApplicable
+			r.Check = "conditional premise refuted"
+			r.Detail = premise + " — not the case in this implementation"
+			return r
+		}
+		// The premise holds; the obligation is what must be satisfied.
+		text = obligation
+	}
+
+	scoped := ChecklistItem{Source: item.Source, Text: text, Group: item.Group}
+	a := parseAssertion(scoped, ctx)
 
 	for _, sc := range structuralChecks {
 		if !sc.applies(a) {
@@ -270,7 +298,7 @@ func evaluateOne(item ChecklistItem, ctx *CheckContext) ChecklistResult {
 		return r
 	}
 
-	lower := strings.ToLower(item.Text)
+	lower := strings.ToLower(text)
 	for _, mc := range mechanicalChecks {
 		if !strings.Contains(lower, mc.match) {
 			continue
@@ -323,6 +351,18 @@ func attributeFailure(a assertion, ctx *CheckContext) []string {
 // and it is not folded into `unchecked` either, because a necessary condition
 // holding is a real result worth reporting.
 func ChecklistSummary(results []ChecklistResult) (verified, failed, necessary, unchecked int) {
+	v, f, n, na, u := ChecklistCounts(results)
+	_ = na
+	return v, f, n, u
+}
+
+// ChecklistCounts counts every outcome, including not-applicable.
+//
+// `not-applicable` is separate from `unchecked` because they call for different
+// things: an unchecked assertion needs a human to look at it, and an inapplicable
+// one needs nobody. Folding them inflates "needs review by hand" with work that
+// does not exist.
+func ChecklistCounts(results []ChecklistResult) (verified, failed, necessary, notApplicable, unchecked int) {
 	for _, r := range results {
 		switch r.Outcome {
 		case OutcomeVerified:
@@ -331,6 +371,8 @@ func ChecklistSummary(results []ChecklistResult) (verified, failed, necessary, u
 			failed++
 		case OutcomeNecessary:
 			necessary++
+		case OutcomeNotApplicable:
+			notApplicable++
 		default:
 			unchecked++
 		}

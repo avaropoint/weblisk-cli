@@ -266,12 +266,23 @@ func jsonTag(tag *ast.BasicLit) (key string, optional bool) {
 	return key, optional
 }
 
-var reGoModRequire = regexp.MustCompile(`(?m)^\s*(?:require\s+)?([a-z0-9][\w.\-]*\.[a-z]{2,}(?:/[\w.\-~]+)+)\s+v\S+`)
+var reGoModRequire = regexp.MustCompile(`(?m)^\s*(?:require\s+)?([a-z0-9][\w.\-]*\.[a-z]{2,}(?:/[\w.\-~]+)+)\s+v\S+(.*)$`)
 
-// goModRequires lists module paths a go.mod requires.
+// goModRequires lists the module paths a go.mod requires DIRECTLY.
+//
+// Lines marked `// indirect` are excluded. They are not the implementation's
+// dependencies — they are its dependencies' dependencies, written by the
+// toolchain, and no author chose them. The generated hub declared
+// golang.org/x/crypto for Argon2id and `go mod tidy` added golang.org/x/sys
+// beneath it; counting that against a dependency policy reports a violation
+// nobody committed and cannot fix without removing the permitted dependency
+// above it.
 func goModRequires(content string) []string {
 	var out []string
 	for _, m := range reGoModRequire.FindAllStringSubmatch(content, -1) {
+		if strings.Contains(m[2], "// indirect") {
+			continue
+		}
 		if !containsString(out, m[1]) {
 			out = append(out, m[1])
 		}
@@ -292,9 +303,78 @@ const (
 	// OutcomeNecessary — a necessary condition holds; the assertion itself is
 	// NOT established. Never counted as verified.
 	OutcomeNecessary Outcome = "necessary"
+	// OutcomeNotApplicable — the assertion is conditional and its premise is
+	// established false. Distinct from `unchecked`: nobody needs to review it.
+	OutcomeNotApplicable Outcome = "not-applicable"
 	// OutcomeUnchecked — nothing mechanical applies.
 	OutcomeUnchecked Outcome = "unchecked"
 )
+
+// reConditional matches an assertion whose obligation is conditional.
+//
+// platforms/go.md: "IF SQLite was chosen: WAL journal mode, `user_version`
+// pragma for migrations, tables created with `CREATE TABLE IF NOT EXISTS`".
+// Evaluated unconditionally, that assertion fails every implementation that took
+// the JSONL default — a failure for making the choice the blueprint recommends.
+var reConditional = regexp.MustCompile(`(?i)^\s*IF\s+(.+?):\s*(.+)$`)
+
+// splitConditional separates a conditional assertion's premise from its
+// obligation.
+func splitConditional(text string) (premise, obligation string, ok bool) {
+	m := reConditional.FindStringSubmatch(text)
+	if m == nil {
+		return "", text, false
+	}
+	return strings.TrimSpace(m[1]), strings.TrimSpace(m[2]), true
+}
+
+// premiseTest settles whether a conditional assertion's premise holds.
+//
+// Deliberately a short registered list rather than a general evaluator. A
+// premise nothing here recognises leaves the assertion UNCHECKED with the
+// premise quoted — not excused. Guessing that a premise is false is how a
+// checking layer starts silently forgiving requirements, which is worse than
+// the false failure it would be fixing.
+type premiseTest struct {
+	// names are matched, lower-cased, against the premise text.
+	names []string
+	// holds reports whether the premise is true, and whether it was settled.
+	holds func(c *CheckContext) (bool, bool)
+}
+
+var premiseTests = []premiseTest{
+	{
+		// "IF SQLite was chosen" — settled by whether a SQLite driver is in the
+		// module graph. A Go program cannot use SQLite without one.
+		names: []string{"sqlite"},
+		holds: func(c *CheckContext) (bool, bool) {
+			for _, m := range c.Modules {
+				if strings.Contains(strings.ToLower(m), "sqlite") {
+					return true, true
+				}
+			}
+			for path := range c.Imports {
+				if strings.Contains(strings.ToLower(path), "sqlite") {
+					return true, true
+				}
+			}
+			return false, true
+		},
+	},
+}
+
+// evaluatePremise settles a premise if any registered test recognises it.
+func evaluatePremise(premise string, c *CheckContext) (holds, settled bool) {
+	lower := strings.ToLower(premise)
+	for _, pt := range premiseTests {
+		for _, name := range pt.names {
+			if strings.Contains(lower, name) {
+				return pt.holds(c)
+			}
+		}
+	}
+	return false, false
+}
 
 // structuralCheck evaluates an assertion against parsed structure.
 //
@@ -319,7 +399,16 @@ type assertion struct {
 	Text   string
 	Lower  string
 	Ticked []string // backticked spans, verbatim
-	Keys   []string // ticked spans that are plausible JSON keys or identifiers
+	Keys   []string // ticked spans the assertion names as FIELDS of a type
+	// Values are every ticked span that could be a value — a lowercase
+	// identifier, anywhere in the text.
+	//
+	// Separate from Keys because the two are different claims about the same
+	// notation. "OperationIntent requires `id`…; operation includes `list` and
+	// `query`" names eight fields and two values, in backticks, in one sentence.
+	// A check about fields must not see the values and a check about values must
+	// not be limited to the field clause.
+	Values []string
 	Types  []string // known type names named in the text
 	Routes []string // "POST /v1/register" style references in the text
 }
@@ -331,13 +420,55 @@ var (
 	rePathRef    = regexp.MustCompile("`?(/v\\d/[\\w/{}.\\-]+)`?")
 )
 
+// fieldKeys returns the backticked spans an assertion names as FIELDS.
+//
+// # Why this is narrower than "every backticked lowercase word"
+//
+// protocol/types.md mixes required fields and permitted values in one sentence:
+//
+//	OperationIntent requires `id`, `agent`, `operation`, `resource`,
+//	`resource_class`, `scope`, `environment`, and `timestamp`; operation
+//	includes `list` and `query`
+//
+// `list` and `query` are values the `operation` field may take, not fields of the
+// type. Reading every backticked token as a field reported three correct types as
+// missing keys — a confident wrong answer, and the third one told me the pattern
+// rather than the instance.
+//
+// The rule: the FIRST clause only, and only when it says requires or includes.
+// A clause after a semicolon may be about anything — defaults, value sets, what a
+// signature covers — and no reading of the words settles which. Coverage is lost
+// where a later clause does name fields; losing coverage is the safe direction,
+// because an unchecked assertion asks a human to look and a wrongly failed one
+// asks a model to break working code.
+func fieldKeys(text string) []string {
+	clause := text
+	if i := strings.Index(clause, ";"); i >= 0 {
+		clause = clause[:i]
+	}
+	lower := strings.ToLower(clause)
+	if !strings.Contains(lower, "requires") && !strings.Contains(lower, "includes") {
+		return nil
+	}
+	var out []string
+	for _, m := range reTicked.FindAllStringSubmatch(clause, -1) {
+		if reJSONKeyish.MatchString(m[1]) {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
 // parseAssertion pulls the mechanically usable pieces out of one item.
 func parseAssertion(item ChecklistItem, c *CheckContext) assertion {
 	a := assertion{Text: item.Text, Lower: strings.ToLower(item.Text)}
 	for _, m := range reTicked.FindAllStringSubmatch(item.Text, -1) {
 		a.Ticked = append(a.Ticked, m[1])
-		if reJSONKeyish.MatchString(m[1]) {
-			a.Keys = append(a.Keys, m[1])
+	}
+	a.Keys = fieldKeys(item.Text)
+	for _, t := range a.Ticked {
+		if reJSONKeyish.MatchString(t) {
+			a.Values = append(a.Values, t)
 		}
 	}
 	// Type names: only names the generated source actually declares as structs,
@@ -355,6 +486,37 @@ func parseAssertion(item ChecklistItem, c *CheckContext) assertion {
 }
 
 var structuralChecks = []structuralCheck{
+	{
+		// "ScopeLevel enum is constrained to `public`, `internal`, ..."
+		//
+		// One-way in the other direction from the field check: the values being
+		// declared does not establish that anything REJECTS values outside the
+		// set, which is what "constrained" claims.
+		name:   "enum values are declared",
+		oneWay: true,
+		applies: func(a assertion) bool {
+			return strings.Contains(a.Lower, "enum") && strings.Contains(a.Lower, "constrained") && len(a.Values) > 1
+		},
+		test: func(a assertion, c *CheckContext) (bool, string, []string) {
+			// Enum values may be declared against any type; search all values.
+			have := map[string]bool{}
+			for _, vals := range c.Values {
+				for _, v := range vals {
+					have[v] = true
+				}
+			}
+			var missing []string
+			for _, k := range a.Values {
+				if !have[k] {
+					missing = append(missing, k)
+				}
+			}
+			if len(missing) == 0 {
+				return true, "", nil
+			}
+			return false, "no constant declares value(s): " + strings.Join(missing, ", "), nil
+		},
+	},
 	{
 		// "ErrorResponse includes `error` (required), `code`, `category`,
 		// `retryable`, and `detail` fields with exact JSON keys"
@@ -385,37 +547,6 @@ var structuralChecks = []structuralCheck{
 			}
 			return false, typeName + " is missing JSON key(s): " + strings.Join(missing, ", "),
 				blameOwners(c, typeName)
-		},
-	},
-	{
-		// "ScopeLevel enum is constrained to `public`, `internal`, ..."
-		//
-		// One-way in the other direction from the field check: the values being
-		// declared does not establish that anything REJECTS values outside the
-		// set, which is what "constrained" claims.
-		name:   "enum values are declared",
-		oneWay: true,
-		applies: func(a assertion) bool {
-			return strings.Contains(a.Lower, "enum") && strings.Contains(a.Lower, "constrained") && len(a.Keys) > 1
-		},
-		test: func(a assertion, c *CheckContext) (bool, string, []string) {
-			// Enum values may be declared against any type; search all values.
-			have := map[string]bool{}
-			for _, vals := range c.Values {
-				for _, v := range vals {
-					have[v] = true
-				}
-			}
-			var missing []string
-			for _, k := range a.Keys {
-				if !have[k] {
-					missing = append(missing, k)
-				}
-			}
-			if len(missing) == 0 {
-				return true, "", nil
-			}
-			return false, "no constant declares value(s): " + strings.Join(missing, ", "), nil
 		},
 	},
 	{
@@ -580,7 +711,15 @@ var structuralChecks = []structuralCheck{
 		},
 	},
 	{
-		name: "handlers do not panic",
+		// "HTTP handlers write error JSON responses and do not panic".
+		//
+		// The subject is HTTP HANDLERS. A search of the whole source for `panic(`
+		// failed a correct implementation whose only panic was an init() assertion
+		// that the error-code registry's map keys agree with their entries — a
+		// startup invariant, and better code than not checking. The assertion
+		// names its subject, so the check reads the AST for functions with a
+		// handler signature and looks only inside those.
+		name: "HTTP handlers do not panic",
 		applies: func(a assertion) bool {
 			return strings.Contains(a.Lower, "do not panic")
 		},
@@ -595,22 +734,21 @@ var structuralChecks = []structuralCheck{
 				if err != nil {
 					continue
 				}
-				ast.Inspect(file, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
+				for _, d := range file.Decls {
+					fn, ok := d.(*ast.FuncDecl)
+					if !ok || !isHTTPHandler(fn) {
+						continue
 					}
-					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "panic" {
-						found = append(found, f.Path)
-						return false
+					if panicsIn(fn) {
+						found = append(found, f.Path+":"+fn.Name.Name)
 					}
-					return true
-				})
+				}
 			}
 			if len(found) == 0 {
 				return true, "", nil
 			}
-			return false, "panic() called in: " + strings.Join(found, ", "), found
+			return false, "panic() called in HTTP handler(s): " + strings.Join(found, ", "),
+				handlerFiles(found)
 		},
 	},
 	{
@@ -682,6 +820,52 @@ func goModFiles(c *CheckContext) []string {
 	for _, f := range c.Files {
 		if strings.HasSuffix(f.Path, "go.mod") {
 			out = append(out, f.Path)
+		}
+	}
+	return out
+}
+
+// isHTTPHandler reports whether a function has the net/http handler signature.
+//
+// (http.ResponseWriter, *http.Request) — the only shape net/http will call. A
+// name-based guess would miss a handler called serve and catch a helper called
+// handleError.
+func isHTTPHandler(fn *ast.FuncDecl) bool {
+	if fn.Type == nil || fn.Type.Params == nil || len(fn.Type.Params.List) != 2 {
+		return false
+	}
+	first := exprString(fn.Type.Params.List[0].Type)
+	second := exprString(fn.Type.Params.List[1].Type)
+	return strings.HasSuffix(first, "http.ResponseWriter") && strings.HasSuffix(second, "http.Request")
+}
+
+// panicsIn reports whether a function body calls panic directly.
+func panicsIn(fn *ast.FuncDecl) bool {
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "panic" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// handlerFiles reduces "file:function" blame entries to distinct files.
+func handlerFiles(entries []string) []string {
+	var out []string
+	for _, e := range entries {
+		file := e
+		if i := strings.LastIndex(e, ":"); i > 0 {
+			file = e[:i]
+		}
+		if !containsString(out, file) {
+			out = append(out, file)
 		}
 	}
 	return out
