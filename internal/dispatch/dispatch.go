@@ -54,7 +54,17 @@ func ServerInit(root, platform string) error {
 			// be read knowing that.
 			fmt.Printf("  [warn] declared requirements not found: %s\n", strings.Join(graph.Missing, ", "))
 		}
-		fmt.Printf("  Required: %s\n\n", req.Summary())
+		fmt.Printf("  Required: %s\n", req.Summary())
+		if len(req.UnboundTypes) > 0 {
+			// Stated, never supplied. A type the protocol defines that this
+			// component's bindings do not claim is a gap in the blueprint's
+			// contract, and quietly adding it would hide the gap while putting the
+			// tooling's judgement back in charge of what a component needs.
+			fmt.Printf("  [note] %d types are defined by the protocol and bound by no contract here.\n"+
+				"         They are not required of this component. If one is genuinely needed,\n"+
+				"         the blueprint's bindings are where that is declared.\n", len(req.UnboundTypes))
+		}
+		fmt.Println()
 
 		// Reuse the plan when the requirements have not changed. Without this the
 		// model re-plans every run — ten files where it planned twelve — and every
@@ -100,7 +110,7 @@ func ServerInit(root, platform string) error {
 		}
 
 		files, gerr := GenerateTarget(provider, plan, platform, graph.Map, graph.Order, platBP, root,
-			printProgress, req.Checklist)
+			printProgress, req.Checklist, req.Bindings)
 		if gerr != nil {
 			return gerr
 		}

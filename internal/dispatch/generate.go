@@ -283,7 +283,7 @@ func truncateLine(s string) string {
 // written.
 func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[string]string,
 	bpOrder []string, platBP string, written []string, decls map[string][]Declaration,
-	checklist []ChecklistItem) string {
+	checklist []ChecklistItem, bindings []Binding) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Generate exactly one file: %s\n\n", f.Path)
 	fmt.Fprintf(&b, "Purpose: %s\n", f.Purpose)
@@ -292,6 +292,9 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 	}
 	if len(f.Serves) > 0 {
 		fmt.Fprintf(&b, "It MUST serve these endpoints: %s\n", strings.Join(f.Serves, ", "))
+	}
+	if bd := FormatBindings(bindings); bd != "" {
+		b.WriteString("\n" + bd)
 	}
 	fmt.Fprintf(&b, "\nPlatform: %s\nTarget directory: %s\n", platform, plan.Root)
 	if len(written) > 0 {
@@ -374,7 +377,7 @@ are silent, they are silent — this prompt adds no requirements of its own.`
 // repeat.
 func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints map[string]string,
 	bpOrder []string, platBP, root string, onProgress ProgressFunc,
-	checklist []ChecklistItem) ([]GeneratedFile, error) {
+	checklist []ChecklistItem, bindings []Binding) ([]GeneratedFile, error) {
 	cache := NewGenerationCache(root)
 	if onProgress == nil {
 		onProgress = func(Progress) {}
@@ -409,7 +412,7 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path,
 				Status: status, Attempt: attempt, Detail: lastViolation})
 
-			prompt := filePrompt(f, plan, platform, blueprints, bpOrder, platBP, written, decls, checklist)
+			prompt := filePrompt(f, plan, platform, blueprints, bpOrder, platBP, written, decls, checklist, bindings)
 			if lastViolation != "" {
 				prompt = "Your previous response was rejected: " + lastViolation +
 					"\nProduce the file again, correctly.\n\n" + prompt

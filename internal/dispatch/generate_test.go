@@ -56,7 +56,7 @@ func TestProseIsRejectedAndRetried(t *testing.T) {
 		if pr.Status == "retrying" {
 			retried = pr.Detail
 		}
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("generation failed: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestMissingRequiredSymbolIsRejected(t *testing.T) {
 		"package main\n// still wrong\n",
 		"package main\n// wrong a third time\n",
 	}}
-	_, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", t.TempDir(), nil, nil)
+	_, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", t.TempDir(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("a file missing its required symbol was accepted")
 	}
@@ -99,7 +99,7 @@ func TestFencedOutputIsAccepted(t *testing.T) {
 	body := "package main\n\nfunc main() { _ = \"/v1/health\" }\n"
 	p := &fakeProvider{responses: []string{"```go\n" + body + "```"}}
 	root := t.TempDir()
-	if _, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", root, nil, nil); err != nil {
+	if _, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", root, nil, nil, nil); err != nil {
 		t.Fatalf("fenced output was rejected: %v", err)
 	}
 	got, _ := os.ReadFile(filepath.Join(root, "server", "main.go"))
@@ -123,7 +123,7 @@ func TestNothingIsWrittenUntilEveryFileSucceeds(t *testing.T) {
 		"package main\n// wrong\n", "package main\n// wrong\n", "package main\n// wrong\n",
 	}}
 	root := t.TempDir()
-	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", root, nil, nil); err == nil {
+	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", root, nil, nil, nil); err == nil {
 		t.Fatal("generation reported success despite a failed file")
 	}
 	if _, err := os.Stat(filepath.Join(root, "server", "a.go")); err == nil {
@@ -141,7 +141,7 @@ func TestEachFileIsToldWhatAlreadyExists(t *testing.T) {
 		},
 	}
 	p := &fakeProvider{responses: []string{"package main\n", "package main\n"}}
-	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", t.TempDir(), nil, nil); err != nil {
+	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", t.TempDir(), nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(p.prompts) != 2 {
@@ -160,7 +160,7 @@ func TestProgressReportsEveryFile(t *testing.T) {
 	var steps []string
 	if _, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", t.TempDir(), func(pr Progress) {
 		steps = append(steps, pr.Status)
-	}, nil); err != nil {
+	}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Order matters between generating and written; what follows them does not —
@@ -197,7 +197,7 @@ func TestFrontmatterIsRejectedAsNotSource(t *testing.T) {
 		if pr.Status == "retrying" {
 			retried = pr.Detail
 		}
-	}, nil); err != nil {
+	}, nil, nil); err != nil {
 		t.Fatalf("generation failed: %v", err)
 	}
 	if !strings.Contains(retried, "frontmatter") {
@@ -215,7 +215,7 @@ func TestNonGoContentIsRejectedForAGoPath(t *testing.T) {
 		"package main\n\nfunc main() {}\n",
 	}}
 	plan := &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
-	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil); err != nil {
+	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil, nil); err != nil {
 		t.Fatalf("valid Go on retry was rejected: %v", err)
 	}
 	if p.calls != 2 {
@@ -229,7 +229,7 @@ func TestAGoFileMayOpenWithADocComment(t *testing.T) {
 	body := "// Package main implements the orchestrator.\n//\n// Long notes.\npackage main\n\nfunc main() {}\n"
 	p := &fakeProvider{responses: []string{body}}
 	plan := &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
-	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil); err != nil {
+	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil, nil); err != nil {
 		t.Fatalf("a doc-commented file was rejected: %v", err)
 	}
 	if p.calls != 1 {

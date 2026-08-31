@@ -231,8 +231,13 @@ func planPrompt(req *Requirements, target, platform, specs, platBP string) strin
 	var b strings.Builder
 	fmt.Fprintf(&b, "Plan a %s implementation for the %s platform.\n\n", target, platform)
 	b.WriteString("REQUIREMENTS — every one of these must be placed in your plan.\n\n")
-	if len(req.Types) > 0 {
-		fmt.Fprintf(&b, "Types the protocol defines (%d). Every one must be declared by exactly one file:\n%s\n\n",
+	if bd := FormatBindings(req.Bindings); bd != "" {
+		// The blueprint's declared consumption, with fields. Not every type the
+		// protocol defines — see bindings.go for what demanding all 54 cost.
+		b.WriteString(bd)
+		b.WriteString("\nEvery type above must be declared by exactly one file.\n\n")
+	} else if len(req.Types) > 0 {
+		fmt.Fprintf(&b, "Types this component consumes (%d). Every one must be declared by exactly one file:\n%s\n\n",
 			len(req.Types), strings.Join(req.Types, ", "))
 	}
 	if len(req.Endpoints) > 0 {

@@ -29,9 +29,16 @@ import (
 
 // Requirements is what any conformant implementation must contain.
 type Requirements struct {
-	Types     []string        // from protocol/types.md
-	Endpoints []string        // from protocol/spec.md, for this target
-	Checklist []ChecklistItem // from every blueprint being read, scoped to this target
+	// Types are what the TARGET's blueprint declares it consumes, from its
+	// binding contracts — not every type the protocol defines.
+	Types []string
+	// Bindings are those declarations in full, with the fields used.
+	Bindings []Binding
+	// UnboundTypes are types the sent blueprints define that no binding claims.
+	// Reported as a gap in the blueprint's contract, never added to Types.
+	UnboundTypes []string
+	Endpoints    []string        // from protocol/spec.md, for this target
+	Checklist    []ChecklistItem // from every blueprint being read, scoped to this target
 	// Excluded are assertions a blueprint addresses to a DIFFERENT component.
 	//
 	// Kept rather than dropped so they can be reported. An assertion left out
@@ -98,8 +105,15 @@ func ExtractEndpoints(spec, section string) []string {
 func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 	req := &Requirements{}
 
+	// What this component declares it consumes. The blueprint's own statement,
+	// read rather than reconstructed — see bindings.go for what scraping every
+	// type heading instead cost.
+	if body, ok := g.Map[targetBlueprint(target)]; ok {
+		req.Bindings = ExtractBindings(body)
+		req.Types = BoundTypes(req.Bindings)
+	}
 	if types, ok := g.Map["protocol/types.md"]; ok {
-		req.Types = ExtractTypes(types)
+		req.UnboundTypes = UnboundTypes(ExtractTypes(types), req.Types)
 	}
 	if spec, ok := g.Map["protocol/spec.md"]; ok {
 		section := "Orchestrator Endpoints"
@@ -123,8 +137,11 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 // Summary is a one-line description for progress output.
 func (r *Requirements) Summary() string {
 	var parts []string
+	if n := len(r.UnboundTypes); n > 0 {
+		parts = append(parts, itoa(n)+" defined but unbound")
+	}
 	if n := len(r.Types); n > 0 {
-		parts = append(parts, plural(n, "type"))
+		parts = append(parts, plural(n, "bound type"))
 	}
 	if n := len(r.Endpoints); n > 0 {
 		parts = append(parts, plural(n, "endpoint"))
@@ -156,4 +173,13 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// targetBlueprint is the architecture blueprint whose bindings describe a target.
+func targetBlueprint(target string) string {
+	switch target {
+	case "orchestrator", "agent", "domain", "gateway", "admin":
+		return "architecture/" + target + ".md"
+	}
+	return ""
 }
