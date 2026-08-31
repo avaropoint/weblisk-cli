@@ -59,6 +59,10 @@ Shape:
   ]
 }
 
+"declares" means TOP-LEVEL symbols only — types, functions, methods, constants
+and package-level variables. Do NOT list struct fields, local variables, or
+anything nested inside another declaration. Name a method as (Type).Method.
+
 Requirements on the plan:
 - EVERY type listed in the requirements must be declared by exactly one file.
 - EVERY endpoint listed in the requirements must be served by exactly one file.

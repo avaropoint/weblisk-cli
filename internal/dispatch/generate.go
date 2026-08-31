@@ -92,16 +92,32 @@ func contractViolation(content string, f PlannedFile) string {
 	// substring. A plan writes a method as "(ScopeLevel).Valid"; Go source writes
 	// "func (s ScopeLevel) Valid() bool". Substring matching rejected correct code
 	// three times over that notation gap, and the failure looked like the model's.
-	if declared := ExtractDeclarations(f.Path, content); len(declared) > 0 {
-		if missing := missingFrom(declared, f.Declares); missing != "" {
-			return fmt.Sprintf("%q must define %s, which does not appear", f.Path, missing)
+	//
+	// Permissive by design, and that changed once Layer 2 existed. This check is
+	// a fast pre-filter, not the authority — the COMPILER is. A false rejection
+	// costs three regenerations and kills the run; a false acceptance is caught
+	// by the build minutes later. Strictness here rejected a struct field the
+	// plan had named, because a field is not a top-level declaration, and the
+	// run died over correct code.
+	declared := ExtractDeclarations(f.Path, content)
+	for _, sym := range f.Declares {
+		parsedOK := len(declared) > 0 && missingFrom(declared, []string{sym}) == ""
+		if parsedOK {
+			continue
 		}
-	} else {
-		for _, sym := range f.Declares {
-			if !strings.Contains(content, bareSymbol(sym)) {
-				return fmt.Sprintf("%q must define %s, which does not appear", f.Path, sym)
-			}
+		// Method notation states a receiver, so it is unambiguous about intent and
+		// must be verified by parsing. Falling back to a substring here would
+		// accept Valid() declared on the wrong type — a different promise from the
+		// one the plan made.
+		if reMethodNotation.MatchString(strings.TrimSpace(sym)) {
+			return fmt.Sprintf("%q must define %s, which does not appear", f.Path, sym)
 		}
+		// A bare identifier is ambiguous: the plan may mean a struct field, which
+		// no top-level parse can see.
+		if strings.Contains(content, bareSymbol(sym)) {
+			continue
+		}
+		return fmt.Sprintf("%q must define %s, which does not appear", f.Path, sym)
 	}
 	for _, ep := range f.Serves {
 		// Match on the path; the method may be expressed many ways in a router.

@@ -283,3 +283,47 @@ func TestFuncPrefixNotationIsTolerated(t *testing.T) {
 		t.Errorf("correct source was rejected: %s", v)
 	}
 }
+
+// TestAStructFieldSatisfiesADeclaration reproduces the run that died on correct
+// code: the plan named startedAt, which the model wrote as a field of the
+// Orchestrator struct, and a parse-only check cannot see fields.
+func TestAStructFieldSatisfiesADeclaration(t *testing.T) {
+	src := `package main
+
+import "time"
+
+type Orchestrator struct {
+	startedAt time.Time
+	port      int
+}
+
+func NewOrchestrator() *Orchestrator { return &Orchestrator{startedAt: time.Now()} }
+`
+	f := PlannedFile{Path: "orchestrator.go", Declares: []string{"Orchestrator", "startedAt", "NewOrchestrator"}}
+	if v := contractViolation(src, f); v != "" {
+		t.Errorf("correct source was rejected: %s", v)
+	}
+}
+
+func TestAGenuinelyAbsentSymbolIsStillRejected(t *testing.T) {
+	// Permissive is not absent: a symbol nowhere in the file must still fail.
+	src := "package main\n\ntype Orchestrator struct{ port int }\n"
+	f := PlannedFile{Path: "orchestrator.go", Declares: []string{"Orchestrator", "startedAt"}}
+	v := contractViolation(src, f)
+	if v == "" {
+		t.Fatal("a symbol absent from the file was accepted")
+	}
+	if !strings.Contains(v, "startedAt") {
+		t.Errorf("the complaint does not name the symbol: %s", v)
+	}
+}
+
+func TestMethodNotationStillRequiresTheRightReceiver(t *testing.T) {
+	// The permissive fallback must not undo the receiver check for methods that
+	// ARE top-level declarations.
+	src := "package main\n\ntype Other int\n\nfunc (o Other) Valid() bool { return true }\n"
+	f := PlannedFile{Path: "x.go", Declares: []string{"(ScopeLevel).Valid"}}
+	if v := contractViolation(src, f); v == "" {
+		t.Error("a method on the wrong type was accepted")
+	}
+}
