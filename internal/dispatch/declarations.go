@@ -43,6 +43,23 @@ import (
 type Declaration struct {
 	Name      string
 	Signature string // full form where the language allows it
+	// Receiver is the type a method is declared on, empty for everything else.
+	//
+	// Methods are namespaced BY that type: func (a *SQLiteStore) LoadAgents and
+	// func (b *MemStore) LoadAgents are different methods and do not collide.
+	// Recording only the bare name reported legal code as a redeclaration, and
+	// blocked a run in which all ten files had generated correctly.
+	Receiver string
+}
+
+// Key is the identifier a declaration actually occupies.
+//
+// For a method that is receiver-qualified; for everything else it is the name.
+func (d Declaration) Key() string {
+	if d.Receiver != "" {
+		return d.Receiver + "." + d.Name
+	}
+	return d.Name
 }
 
 func (d Declaration) String() string {
@@ -92,7 +109,9 @@ func goDeclarations(src string) []Declaration {
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			out = append(out, Declaration{Name: d.Name.Name, Signature: goFuncSignature(d)})
+			out = append(out, Declaration{
+				Name: d.Name.Name, Signature: goFuncSignature(d), Receiver: goReceiverType(d),
+			})
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
 				switch s := spec.(type) {
@@ -121,6 +140,29 @@ func goDeclarations(src string) []Declaration {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// goReceiverType returns the bare type a method is declared on, without pointer
+// or type-parameter decoration, or "" for a plain function.
+func goReceiverType(d *ast.FuncDecl) string {
+	if d.Recv == nil || len(d.Recv.List) == 0 {
+		return ""
+	}
+	t := d.Recv.List[0].Type
+	for {
+		switch x := t.(type) {
+		case *ast.StarExpr:
+			t = x.X
+		case *ast.IndexExpr: // generic receiver: Foo[T]
+			t = x.X
+		case *ast.IndexListExpr:
+			t = x.X
+		case *ast.Ident:
+			return x.Name
+		default:
+			return ""
+		}
+	}
 }
 
 // goFuncSignature renders a function or method signature.
@@ -227,17 +269,28 @@ func FormatDeclarations(byFile map[string][]Declaration, order []string) string 
 // DuplicateDeclarations reports symbols declared in more than one file — the
 // coherence failure of architecture/generation.md Layer 2.
 func DuplicateDeclarations(byFile map[string][]Declaration) map[string][]string {
-	where := map[string][]string{}
+	where := map[string]map[string]bool{}
 	for path, decls := range byFile {
 		for _, d := range decls {
-			where[d.Name] = append(where[d.Name], path)
+			key := d.Key()
+			if where[key] == nil {
+				where[key] = map[string]bool{}
+			}
+			// A set, not a list: two methods of the same name on different types
+			// within ONE file are legal, and reporting "store.go, store.go" as a
+			// collision was how that bug announced itself.
+			where[key][path] = true
 		}
 	}
 	dupes := map[string][]string{}
-	for name, files := range where {
+	for key, files := range where {
 		if len(files) > 1 {
-			sort.Strings(files)
-			dupes[name] = files
+			list := make([]string, 0, len(files))
+			for f := range files {
+				list = append(list, f)
+			}
+			sort.Strings(list)
+			dupes[key] = list
 		}
 	}
 	return dupes

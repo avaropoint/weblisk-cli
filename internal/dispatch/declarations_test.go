@@ -138,3 +138,55 @@ func TestTheRetryAfterFailureIsDetected(t *testing.T) {
 		t.Errorf("the Retry-After assertion was not evaluated as a failure: %+v", results)
 	}
 }
+
+// TestMethodsOnDifferentTypesDoNotCollide is the false positive that blocked a
+// run in which all ten files had generated correctly: two stores implementing
+// the same interface, and two types implementing error.
+func TestMethodsOnDifferentTypesDoNotCollide(t *testing.T) {
+	store := `package main
+
+type SQLiteStore struct{}
+type MemStore struct{}
+
+func (s *SQLiteStore) LoadAgents() error { return nil }
+func (m *MemStore) LoadAgents() error    { return nil }
+`
+	events := "package main\n\ntype EventError struct{}\n\nfunc (e *EventError) Error() string { return \"\" }\n"
+	registry := "package main\n\ntype RegistryError struct{}\n\nfunc (r *RegistryError) Error() string { return \"\" }\n"
+
+	byFile := map[string][]Declaration{
+		"store.go":    ExtractDeclarations("store.go", store),
+		"events.go":   ExtractDeclarations("events.go", events),
+		"registry.go": ExtractDeclarations("registry.go", registry),
+	}
+	if dupes := DuplicateDeclarations(byFile); len(dupes) > 0 {
+		t.Errorf("legal Go was reported as redeclaration: %v", dupes)
+	}
+}
+
+func TestARealRedeclarationIsStillCaught(t *testing.T) {
+	// The check must not have been loosened into uselessness: the original fault
+	// was a plain function declared in two files.
+	a := "package main\n\nfunc writeCanonical() {}\n"
+	b := "package main\n\nfunc writeCanonical() {}\n"
+	dupes := DuplicateDeclarations(map[string][]Declaration{
+		"identity.go": ExtractDeclarations("identity.go", a),
+		"helpers.go":  ExtractDeclarations("helpers.go", b),
+	})
+	if _, found := dupes["writeCanonical"]; !found {
+		t.Errorf("a genuine redeclaration was missed: %v", dupes)
+	}
+}
+
+func TestTheSameMethodOnTheSameTypeInTwoFilesIsCaught(t *testing.T) {
+	// Receiver-qualifying must not hide a real collision.
+	a := "package main\n\ntype S struct{}\n\nfunc (s *S) Run() {}\n"
+	b := "package main\n\nfunc (s *S) Run() {}\n"
+	dupes := DuplicateDeclarations(map[string][]Declaration{
+		"a.go": ExtractDeclarations("a.go", a),
+		"b.go": ExtractDeclarations("b.go", b),
+	})
+	if _, found := dupes["S.Run"]; !found {
+		t.Errorf("the same method on the same type in two files was missed: %v", dupes)
+	}
+}
