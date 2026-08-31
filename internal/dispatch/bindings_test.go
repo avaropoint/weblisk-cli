@@ -164,3 +164,79 @@ func TestTheRealOrchestratorRequiresTenTypesNotFiftyFour(t *testing.T) {
 		t.Errorf("only %d unbound — the reduction is not happening", len(unbound))
 	}
 }
+
+func TestAComponentsOwnBlueprintDeclaresWhatItServes(t *testing.T) {
+	// protocol/spec carries the protocol surface every implementation shares.
+	// Anything else a component owns is declared where that component is
+	// specified — the orchestrator's administrative endpoints, for instance,
+	// which protocol/spec does not and should not carry. Reading only spec
+	// missed nine endpoints the orchestrator's own blueprint declares.
+	bp := `# Orchestrator
+
+## Endpoints
+
+### Protocol endpoints
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | /v1/register | no | Agent registration |
+| GET | /v1/health | no | Health |
+
+### Administrative endpoints
+
+| Method | Path | Capability | Purpose |
+|--------|------|-----------|---------|
+| GET | /v1/admin/operators | ` + "`admin:*`" + ` | List operators |
+| POST | /v1/admin/agents/{name}/deregister | ` + "`admin:*`" + ` | Force-deregister |
+
+## Startup Sequence
+
+| POST | /v1/not-an-endpoint | x | a table outside the Endpoints section |
+`
+	got := ExtractTableEndpoints(bp)
+	want := []string{"POST /v1/register", "GET /v1/health", "GET /v1/admin/operators", "POST /v1/admin/agents/{name}/deregister"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for _, w := range want {
+		if !containsString(got, w) {
+			t.Errorf("%s not extracted: %v", w, got)
+		}
+	}
+	// A table in another section is not an endpoint declaration.
+	for _, g := range got {
+		if strings.Contains(g, "not-an-endpoint") {
+			t.Error("a table outside the Endpoints section was read as an endpoint")
+		}
+	}
+}
+
+func TestTheRealOrchestratorDeclaresItsAdminSurface(t *testing.T) {
+	root := "/Users/lwilson/Projects/Avaropoint/weblisk-blueprints"
+	if _, err := os.Stat(root); err != nil {
+		t.Skip("blueprints not present")
+	}
+	b, err := os.ReadFile(root + "/architecture/orchestrator.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ExtractTableEndpoints(string(b))
+	var admin int
+	for _, e := range got {
+		if strings.Contains(e, "/v1/admin/") {
+			admin++
+		}
+	}
+	if admin == 0 {
+		t.Error("the orchestrator declares no administrative endpoints — admin.md's " +
+			"binding contract consumes /v1/admin/* from it, and nothing provides them")
+	}
+	// And it must NOT claim what other components own.
+	for _, e := range got {
+		for _, other := range []string{"/v1/admin/strategies", "/v1/admin/approvals", "/v1/admin/workflows", "/v1/admin/federation"} {
+			if strings.Contains(e, other) {
+				t.Errorf("the orchestrator claims %s, which belongs to another provider", other)
+			}
+		}
+	}
+}

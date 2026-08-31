@@ -115,13 +115,30 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 	if types, ok := g.Map["protocol/types.md"]; ok {
 		req.UnboundTypes = UnboundTypes(ExtractTypes(types), req.Types)
 	}
+	// A component's own blueprint is the authoritative statement of what it
+	// serves. protocol/spec names the protocol surface; the architecture document
+	// adds whatever else that component owns — the orchestrator's administrative
+	// endpoints, for instance, which protocol/spec does not and should not carry.
+	seenEndpoint := map[string]bool{}
+	addEndpoints := func(in []string) {
+		for _, e := range in {
+			if !seenEndpoint[e] {
+				seenEndpoint[e] = true
+				req.Endpoints = append(req.Endpoints, e)
+			}
+		}
+	}
 	if spec, ok := g.Map["protocol/spec.md"]; ok {
 		section := "Orchestrator Endpoints"
 		if target == "agent" {
 			section = "Agent Endpoints"
 		}
-		req.Endpoints = ExtractEndpoints(spec, section)
+		addEndpoints(ExtractEndpoints(spec, section))
 	}
+	if body, ok := g.Map[targetBlueprint(target)]; ok {
+		addEndpoints(ExtractTableEndpoints(body))
+	}
+	sort.Strings(req.Endpoints)
 
 	// Every blueprint in the graph, in the graph's order — then scoped to this
 	// target, because a protocol blueprint's checklist covers both ends of the
@@ -182,4 +199,39 @@ func targetBlueprint(target string) string {
 		return "architecture/" + target + ".md"
 	}
 	return ""
+}
+
+// reTableEndpoint matches an endpoint row in a component's Endpoints table:
+//
+//	| POST | /v1/admin/operators/register | — | Register an operator |
+//	| GET  | /v1/services                 | yes | Service directory   |
+var reTableEndpoint = regexp.MustCompile(`(?m)^\|\s*(GET|POST|PUT|PATCH|DELETE)\s*\|\s*` + "`?" + `(/v\d[\w/{}.*\-]*)` + "`?" + `\s*\|`)
+
+// ExtractTableEndpoints reads the Endpoints section of a component's own
+// blueprint.
+//
+// A component's architecture document is the authoritative statement of what it
+// serves. protocol/spec carries the protocol surface every implementation shares;
+// anything else a component owns — the orchestrator's administrative endpoints —
+// is declared where that component is specified, and reading only protocol/spec
+// misses it entirely.
+func ExtractTableEndpoints(blueprint string) []string {
+	i := strings.Index(blueprint, "\n## Endpoints")
+	if i < 0 {
+		return nil
+	}
+	rest := blueprint[i+len("\n## Endpoints"):]
+	if end := strings.Index(rest, "\n## "); end >= 0 {
+		rest = rest[:end]
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range reTableEndpoint.FindAllStringSubmatch(rest, -1) {
+		ep := m[1] + " " + m[2]
+		if !seen[ep] {
+			seen[ep] = true
+			out = append(out, ep)
+		}
+	}
+	return out
 }
