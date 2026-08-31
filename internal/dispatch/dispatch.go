@@ -124,6 +124,14 @@ func ServerInit(root, platform string) error {
 			fmt.Printf("  [ok] builds with %q\n\n", plan.Build)
 		}
 
+		// What the blueprints say, as read by the model — the authority.
+		if verdicts, verr := SelfVerify(provider, files, req.Checklist); verr == nil {
+			reportVerdicts(verdicts, req.Checklist)
+		} else {
+			fmt.Printf("  [warn] verification against the assertions could not be read: %v\n\n", verr)
+		}
+		// What the structural checks think — advice, and useful mainly when it
+		// disagrees with the above.
 		reportChecklist(EvaluateChecklistAgainst(req.Checklist, files, graph.Map))
 		return nil
 	}
@@ -860,32 +868,58 @@ func printProgress(p Progress) {
 	}
 }
 
-// reportChecklist prints Layer 3.
+// reportChecklist prints the structural checks — as ADVICE, not as a verdict.
 //
-// Four counts, printed as four counts. "Necessary conditions hold" is the honest
-// description of a route existing when the assertion was about what the route
-// enforces — reporting it as a pass would turn "part of this was looked at" into
-// "it is fine", and reporting it as unchecked would throw away a real result.
+// These no longer drive the loop. The blueprints' assertions are sent to the
+// model verbatim and it judges its own output against them, because a check
+// written in Go is a transcription of a requirement into a second language and
+// ten of them were subtly wrong in one session.
+//
+// They are still printed, for the one thing they are unambiguously good for:
+// disagreeing. A structural check that refutes an assertion the model reported as
+// satisfied is worth a human's attention, and resolving that disagreement
+// silently in favour of either side is how a build comes to be trusted for the
+// wrong reason.
 func reportChecklist(results []ChecklistResult) {
 	if len(results) == 0 {
 		return
 	}
 	verified, failed, necessary, notApplicable, unchecked := ChecklistCounts(results)
-	fmt.Printf("  Checklist: %d verified, %d failed, %d necessary-conditions-hold, %d not-applicable, %d unchecked\n",
+	fmt.Printf("  Structural checks (advisory): %d verified, %d refuted, %d necessary-conditions-hold, %d not-applicable, %d no check\n",
 		verified, failed, necessary, notApplicable, unchecked)
 	for _, r := range results {
 		if r.Outcome == OutcomeFailed {
-			fmt.Printf("    [fail] %s\n           %s\n", r.Item.Text, r.Detail)
+			fmt.Printf("    [refuted] %s\n              %s\n", r.Item.Text, r.Detail)
 		}
 	}
-	if necessary > 0 {
-		fmt.Printf("    %d assertions had their necessary conditions met — that is NOT a pass\n", necessary)
+	if failed > 0 {
+		fmt.Printf("    %d structural check(s) disagree with the specification as read by the model.\n"+
+			"    Neither is authoritative here — read both.\n", failed)
 	}
-	if notApplicable > 0 {
-		fmt.Printf("    %d assertions do not apply — their premise is established false\n", notApplicable)
+	fmt.Println()
+}
+
+// reportVerdicts prints what the model found against the assertions.
+func reportVerdicts(verdicts []Verdict, checklist []ChecklistItem) {
+	if len(verdicts) == 0 {
+		return
 	}
-	if unchecked > 0 {
-		fmt.Printf("    %d assertions need review by hand — they are NOT passes\n", unchecked)
+	yes, no, unverifiable, unanswered := VerdictSummary(verdicts, len(checklist))
+	fmt.Printf("  Verification against the blueprints' assertions: %d satisfied, %d unmet, %d unverifiable by reading source, %d unanswered\n",
+		yes, no, unverifiable, unanswered)
+	for _, v := range Violations(verdicts, checklist) {
+		fmt.Printf("    [unmet] %s\n            %s", v.Item.Text, v.Evidence)
+		if v.File != "" {
+			fmt.Printf(" (%s)", v.File)
+		}
+		fmt.Println()
+	}
+	if unverifiable > 0 {
+		fmt.Printf("    %d assertions cannot be settled by reading source — behaviour over time,\n"+
+			"    across a restart, or under load. They need the conformance suite.\n", unverifiable)
+	}
+	if unanswered > 0 {
+		fmt.Printf("    [warn] %d assertions were not judged at all — the verification is incomplete\n", unanswered)
 	}
 	fmt.Println()
 }

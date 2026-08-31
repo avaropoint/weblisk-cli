@@ -324,14 +324,17 @@ func TestRepairKeepsGoingWhileErrorsFall(t *testing.T) {
 // The loop used to end the moment `go build` succeeded, and the caller then
 // evaluated the checklist and printed it. So a hub that compiled and violated
 // assertions from the very blueprints it was generated from reported success:
-// the verification checklist was a report, and the compiler was the contract.
+// the checklist was a report, and the compiler was the contract.
+//
+// Verification is now the model reading the assertions verbatim against its own
+// output, rather than structural checks written in Go. The exit condition is
+// unchanged; the authority moved back to the blueprint.
 func TestCompilingIsNotConforming(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Compiles, and the type is missing a JSON key the blueprint requires.
 	before := "package main\n\ntype ErrorResponse struct {\n\tError string `json:\"error\"`\n}\n\nfunc main() {}\n"
 	after := "package main\n\ntype ErrorResponse struct {\n\tError string `json:\"error\"`\n\tCode  string `json:\"code,omitempty\"`\n}\n\nfunc main() {}\n"
 
@@ -340,7 +343,11 @@ func TestCompilingIsNotConforming(t *testing.T) {
 	checklist := []ChecklistItem{{Source: "protocol/types.md",
 		Text: "ErrorResponse includes `error` and `code` fields with exact JSON keys"}}
 
-	p := &fakeProvider{responses: []string{after}}
+	p := &fakeProvider{responses: []string{
+		`[{"index":1,"holds":"no","file":"main.go","evidence":"ErrorResponse has no code field"}]`,
+		after,
+		`[{"index":1,"holds":"yes","file":"main.go","evidence":"Code string with a json code tag"}]`,
+	}}
 	var conformed []string
 	result, files, err := BuildAndRepair(p, plan, dir, "", []GeneratedFile{{Path: "main.go", Content: before}},
 		func(pr Progress) {
@@ -355,31 +362,32 @@ func TestCompilingIsNotConforming(t *testing.T) {
 		t.Fatalf("build failed: %s", result.Output)
 	}
 	if len(conformed) == 0 {
-		t.Fatal("the build passed and a failing assertion did not start a repair round")
+		t.Fatal("the build passed and an unmet assertion did not start a repair round")
 	}
 	if !strings.Contains(files[0].Content, `json:"code`) {
 		t.Errorf("the conformance repair was not applied:\n%s", files[0].Content)
 	}
-	// And it stops: a second evaluation finds nothing failing, so no further call.
-	if p.calls != 1 {
-		t.Errorf("provider called %d times, want 1 — the loop did not stop when the assertion held", p.calls)
+	// Verify, repair, verify. It stops once the assertion holds.
+	if p.calls != 3 {
+		t.Errorf("provider called %d times, want 3 — the loop did not stop when the assertion held", p.calls)
 	}
 }
 
 func TestConformanceRepairStopsWhenItIsNotConverging(t *testing.T) {
-	// A model that returns the same non-conforming file forever must not spend
-	// twelve rounds proving it.
+	// A model that keeps reporting the same assertion unmet, and keeps returning a
+	// file that does not fix it, must not spend twelve rounds proving it.
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stuck := "package main\n\ntype ErrorResponse struct {\n\tError string `json:\"error\"`\n}\n\nfunc main() {}\n"
+	stuck := "package main\n\nfunc main() {}\n"
 	plan := &Plan{Root: ".", Build: "go build ./...",
 		Files: []PlannedFile{{Path: "main.go", Purpose: "protocol types"}}}
 	checklist := []ChecklistItem{{Source: "protocol/types.md",
 		Text: "ErrorResponse includes `error` and `code` fields with exact JSON keys"}}
 
-	p := &fakeProvider{responses: []string{stuck, stuck, stuck, stuck, stuck, stuck, stuck, stuck}}
+	unmet := `[{"index":1,"holds":"no","file":"main.go","evidence":"ErrorResponse is absent"}]`
+	p := &fakeProvider{responses: []string{unmet, stuck, unmet, stuck, unmet, stuck, unmet, stuck}}
 	result, _, err := BuildAndRepair(p, plan, dir, "", []GeneratedFile{{Path: "main.go", Content: stuck}},
 		nil, checklist, nil)
 	if err != nil {
@@ -388,26 +396,27 @@ func TestConformanceRepairStopsWhenItIsNotConverging(t *testing.T) {
 	if !result.OK {
 		t.Fatalf("build failed: %s", result.Output)
 	}
-	// Rounds 1 and 2 see the same count, so the stall trips on round 3 at the
-	// latest. Three calls, not twelve.
-	if p.calls > 3 {
+	// Rounds 1 and 2 report the same count, so the stall trips by round 3.
+	if p.calls > 5 {
 		t.Errorf("provider called %d times — the stall detector did not trip", p.calls)
 	}
 }
 
 func TestAnAssertionNamingNoPlannedFileIsNotRepairedBlindly(t *testing.T) {
 	// A conformance repair aimed at the wrong file edits correct code to satisfy
-	// something it does not control. Reporting the failure is better.
+	// something it does not control. The model's file name is used as given and
+	// never corrected to a plausible one.
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	src := "package main\n\nfunc main() {}\n"
 	plan := &Plan{Root: ".", Build: "go build ./...", Files: []PlannedFile{{Path: "main.go"}}}
-	// Behavioural: nothing structural applies, so it is unchecked, not failed.
 	checklist := []ChecklistItem{{Source: "architecture/storage.md", Text: "All stores survive process restart"}}
 
-	p := &fakeProvider{}
+	p := &fakeProvider{responses: []string{
+		`[{"index":1,"holds":"no","file":"storage.go","evidence":"no store exists"}]`,
+	}}
 	result, _, err := BuildAndRepair(p, plan, dir, "", []GeneratedFile{{Path: "main.go", Content: src}}, nil, checklist, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -415,7 +424,54 @@ func TestAnAssertionNamingNoPlannedFileIsNotRepairedBlindly(t *testing.T) {
 	if !result.OK {
 		t.Fatalf("build failed: %s", result.Output)
 	}
-	if p.calls != 0 {
-		t.Errorf("provider called %d times for an unchecked assertion — the loop repaired against nothing", p.calls)
+	// One call — the verification. No repair: storage.go is not in the plan.
+	if p.calls != 1 {
+		t.Errorf("provider called %d times; want 1 — a file outside the plan was repaired", p.calls)
+	}
+}
+
+func TestAYesWithoutEvidenceIsNotAPass(t *testing.T) {
+	// A model asked "did you satisfy this?" will tend to say yes. Requiring the
+	// construct that satisfies it makes agreement cost something.
+	v, err := ParseVerdicts(`[{"index":1,"holds":"yes","file":"a.go","evidence":""}]`, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v[0].Holds != "unverifiable" {
+		t.Errorf("holds = %q, want unverifiable — a yes with no evidence is an opinion", v[0].Holds)
+	}
+	// And an unmet verdict with no fault named cannot be repaired against.
+	v, err = ParseVerdicts(`[{"index":1,"holds":"no","file":"a.go","evidence":"  "}]`, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v[0].Holds != "unverifiable" {
+		t.Errorf("holds = %q, want unverifiable", v[0].Holds)
+	}
+}
+
+func TestUnansweredAssertionsAreNotUnverifiable(t *testing.T) {
+	// A model returning one verdict for five assertions has not judged four of
+	// them. That is a gap in the verification, not a finding about the assertions,
+	// and folding the two reports an incomplete check as a complete one.
+	v, err := ParseVerdicts(`[{"index":1,"holds":"yes","file":"a.go","evidence":"present"}]`, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yes, no, unverifiable, unanswered := VerdictSummary(v, 5)
+	if yes != 1 || no != 0 || unverifiable != 0 || unanswered != 4 {
+		t.Errorf("summary = %d/%d/%d/%d, want 1/0/0/4", yes, no, unverifiable, unanswered)
+	}
+}
+
+func TestAVerdictForAnAssertionThatDoesNotExistIsDropped(t *testing.T) {
+	v, err := ParseVerdicts(`[{"index":1,"holds":"yes","file":"a.go","evidence":"ok"},`+
+		`{"index":9,"holds":"no","file":"b.go","evidence":"x"},`+
+		`{"index":1,"holds":"no","file":"c.go","evidence":"dup"}]`, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 1 || v[0].Index != 1 || v[0].Holds != "yes" {
+		t.Errorf("verdicts = %+v, want only the first entry for index 1", v)
 	}
 }

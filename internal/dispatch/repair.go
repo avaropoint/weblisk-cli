@@ -243,20 +243,29 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 		if result.OK {
 			onProgress(Progress{Path: "build", Status: "built", Attempt: round})
 
-			// Compiling is not conforming.
+			// Compiling is not conforming, and the blueprints say what conforming
+			// means.
 			//
-			// The loop used to end here, and the checklist was evaluated by the
-			// caller afterwards and printed. So a run that built and violated
-			// twelve assertions from the blueprints it was generated from reported
-			// success — the verification checklist was a report, and the exit
-			// condition was the compiler.
-			//
-			// Only FAILED assertions continue the loop. `necessary` and
-			// `unchecked` cannot be repaired against, because nothing has
-			// established what is wrong; treating them as work would spend rounds
-			// asking a model to fix code that may be correct.
-			verdict := EvaluateChecklistAgainst(checklist, rebuildList(content, order), spec)
-			bad := FailedChecklist(verdict)
+			// This used to evaluate structural checks written in Go. They found a
+			// real bug and produced ten false failures, each a re-reading of an
+			// assertion that was subtly not what the assertion said. The assertions
+			// now go to the model verbatim and it reads them against its own
+			// output — the same act a reviewer performs, with no transcription of
+			// the requirement into a second language. See selfverify.go.
+			verdicts, verr := SelfVerify(provider, rebuildList(content, order), checklist)
+			if verr != nil {
+				// Verification failing is not the implementation failing. Report it
+				// and stop, rather than treating an unreadable response as a pass.
+				onProgress(Progress{Path: "verify", Status: "failed", Attempt: round,
+					Detail: verr.Error()})
+				return result, rebuildList(content, order), nil
+			}
+			yes, no, unverifiable, unanswered := VerdictSummary(verdicts, len(checklist))
+			onProgress(Progress{Path: "verify", Status: "progress", Attempt: round,
+				Detail: fmt.Sprintf("%d satisfied, %d unmet, %d unverifiable, %d unanswered",
+					yes, no, unverifiable, unanswered)})
+
+			bad := Violations(verdicts, checklist)
 			if len(bad) == 0 {
 				return result, rebuildList(content, order), nil
 			}
@@ -266,27 +275,25 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 			} else {
 				defectStall = 0
 			}
-			onProgress(Progress{Path: "checklist", Status: "progress", Attempt: round,
-				Detail: fmt.Sprintf("builds, %d assertion(s) failing", len(bad))})
 			if defectStall >= 2 {
-				onProgress(Progress{Path: "checklist", Status: "failed", Attempt: round,
+				onProgress(Progress{Path: "verify", Status: "failed", Attempt: round,
 					Detail: fmt.Sprintf("no progress over two rounds — still %d assertion(s)", len(bad))})
 				return result, rebuildList(content, order), nil
 			}
 			previousDefects = len(bad)
 
-			byFile, unattributed := checklistTargets(bad, plan)
+			byFile, orphans := violationTargets(bad, plan)
 			if len(byFile) == 0 {
-				onProgress(Progress{Path: "checklist", Status: "failed", Attempt: round,
-					Detail: fmt.Sprintf("%d assertion(s) failing, none attributable to a planned file", len(bad))})
+				onProgress(Progress{Path: "verify", Status: "failed", Attempt: round,
+					Detail: fmt.Sprintf("%d assertion(s) unmet, none attributed to a planned file", len(bad))})
 				return result, rebuildList(content, order), nil
 			}
-			if len(unattributed) > 0 {
-				onProgress(Progress{Path: "checklist", Status: "progress", Attempt: round,
-					Detail: fmt.Sprintf("%d assertion(s) name no planned file and are left to review", len(unattributed))})
+			if len(orphans) > 0 {
+				onProgress(Progress{Path: "verify", Status: "progress", Attempt: round,
+					Detail: fmt.Sprintf("%d assertion(s) name no planned file and are left to review", len(orphans))})
 			}
 
-			for _, path := range sortedKeys(byFile) {
+			for _, path := range sortedViolationKeys(byFile) {
 				f := byPath[path]
 				onProgress(Progress{Path: path, Status: "repairing", Attempt: round,
 					Detail: byFile[path][0].Item.Text})
@@ -437,36 +444,33 @@ func askForFile(provider Provider, prompt string, f PlannedFile) (string, error)
 	return "", nil
 }
 
-// checklistTargets groups failing assertions by the planned file they are about.
+// violationTargets groups unmet assertions by the planned file they are about.
 //
 // Assertions naming no planned file are returned separately rather than assigned
 // somewhere plausible. A conformance repair aimed at the wrong file edits correct
 // code to satisfy something it does not control, which is worse than an
 // unrepaired failure that is reported.
-func checklistTargets(bad []ChecklistResult, plan *Plan) (map[string][]ChecklistResult, []ChecklistResult) {
+func violationTargets(bad []Violation, plan *Plan) (map[string][]Violation, []Violation) {
 	planned := map[string]bool{}
 	for _, f := range plan.Files {
 		planned[f.Path] = true
 	}
-	byFile := map[string][]ChecklistResult{}
-	var orphans []ChecklistResult
+	byFile := map[string][]Violation{}
+	var orphans []Violation
 	for _, r := range bad {
-		hit := false
-		for _, path := range r.Files {
-			// Blame arrives as a generated path, which is already plan-relative.
-			if planned[path] {
-				byFile[path] = append(byFile[path], r)
-				hit = true
-			}
+		// The model names the file it found the fault in. A name that is not in
+		// the plan is not corrected to one that is: repairing the wrong file edits
+		// correct code to satisfy something it does not control.
+		if p := filepath.Base(strings.TrimSpace(r.File)); planned[p] {
+			byFile[p] = append(byFile[p], r)
+			continue
 		}
-		if !hit {
-			orphans = append(orphans, r)
-		}
+		orphans = append(orphans, r)
 	}
 	return byFile, orphans
 }
 
-func sortedKeys(m map[string][]ChecklistResult) []string {
+func sortedViolationKeys(m map[string][]Violation) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -481,15 +485,15 @@ func sortedKeys(m map[string][]ChecklistResult) []string {
 // paraphrase would be the tooling's opinion of a requirement standing in for the
 // requirement, which is the failure mode that produced four false positives in
 // the checking layer already.
-func conformancePrompt(f PlannedFile, current string, failures []ChecklistResult, platBP string) string {
+func conformancePrompt(f PlannedFile, current string, failures []Violation, platBP string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "The file %s compiles but violates verification assertions from the blueprints it implements.\n\n", f.Path)
 	fmt.Fprintf(&b, "Purpose: %s\n\n", f.Purpose)
 	b.WriteString("Assertions this file must satisfy, quoted from their blueprint:\n")
 	for _, r := range failures {
 		fmt.Fprintf(&b, "\n  From %s:\n    %s\n", r.Item.Source, r.Item.Text)
-		if r.Detail != "" {
-			fmt.Fprintf(&b, "    What was found: %s\n", r.Detail)
+		if r.Evidence != "" {
+			fmt.Fprintf(&b, "    What was found: %s\n", r.Evidence)
 		}
 	}
 	b.WriteString("\nCurrent content of the file:\n\n")

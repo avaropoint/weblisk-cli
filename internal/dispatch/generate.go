@@ -323,6 +323,35 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 	return b.String()
 }
 
+// fileSystemPrompt carries the output contract and nothing else.
+//
+// # What was removed from it, and why
+//
+// It used to carry two blocks of policy I had written:
+//
+//	Use ONLY the target language's standard library unless the blueprint
+//	names a dependency.
+//
+//	Scope, which is a prohibition and not a preference:
+//	- Do NOT add configuration, metrics, dashboards, health pages or admin
+//	  surfaces that no blueprint specifies.
+//	...
+//
+// No blueprint says either of those things. The first was a dependency policy
+// that belongs to the platform blueprint — and it was the same stdlib-only rule
+// that turned out to contradict the key-derivation function the protocol
+// requires, so I was enforcing a corrected rule's old version from a second place.
+//
+// The second was worse. architecture/observability requires GET /metrics on every
+// component. It was in no blueprint's requires list, so it never reached a prompt
+// — and my prohibition told the model not to add metrics. The model was
+// instructed not to build a required endpoint and never shown the requirement.
+//
+// A prompt is where the blueprints speak. Anything in it that no blueprint says
+// is the tooling overriding the specification, and 1.5 KB of prohibition
+// overrides 200 KB of specification perfectly well. What remains here is only
+// what is mechanically unavoidable: the response has to BE the file, because a
+// response about the file cannot be written to disk.
 const fileSystemPrompt = `You generate one source file at a time for the Weblisk framework.
 
 Output rules, which are absolute:
@@ -333,17 +362,10 @@ Output rules, which are absolute:
 - No document ABOUT the file. The response IS the file.
 - The first character of your response is the first character of the file.
   For a Go file that is a comment or the word "package".
-- Use ONLY the target language's standard library unless the blueprint names a dependency.
-- Follow the blueprints exactly. Where they specify a name, shape or status code, use it.
 
-Scope, which is a prohibition and not a preference:
-- Implement ONLY what this file was asked for. Nothing else.
-- Do NOT add endpoints, routes or handlers beyond those named for this file.
-- Do NOT add configuration, metrics, dashboards, health pages or admin surfaces
-  that no blueprint specifies.
-- Do NOT add dependencies beyond the stated policy.
-- A helpful addition nobody asked for is a defect: it is unspecified, unreviewed,
-  and in a hub holding a tenant's keys it enlarges the attack surface.`
+The blueprints below are the specification. Follow them exactly: where they
+specify a name, shape, status code, dependency or endpoint, use it. Where they
+are silent, they are silent — this prompt adds no requirements of its own.`
 
 // GenerateTarget generates every file in a manifest target.
 //
