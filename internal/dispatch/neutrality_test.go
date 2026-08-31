@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -174,6 +175,122 @@ func TestPlatformBlueprintsDoNotRestateRequirements(t *testing.T) {
 				t.Errorf("platforms/%s carries %q — a parameter belongs to the blueprint that requires it, and a copy here cannot follow it when it changes",
 					e.Name(), strings.TrimSpace(m))
 			}
+		}
+	}
+}
+
+// knownBindingGaps are the requires: entries that no dependency contract covers,
+// as they stand today.
+//
+// Pinned rather than tolerated. Filling one correctly means reading both
+// documents and stating what is genuinely consumed — real specification work,
+// and guessing would put a wrong contract in front of every future generation.
+// So the set is recorded, may not grow, and shrinks as each is closed.
+//
+// architecture/orchestrator is absent from this list because it was the one that
+// cost a build: it declared architecture/storage and bound nothing from it, so
+// 27 KB of storage specification reached the model unexplained and the generated
+// orchestrator implemented all fourteen documented stores — ten of them owned by
+// other components.
+var knownBindingGaps = map[string]bool{
+	"architecture/admin.md architecture/orchestrator":             true,
+	"architecture/admin.md protocol/spec":                         true,
+	"architecture/agent.md architecture/observability":            true,
+	"architecture/agent.md patterns/messaging":                    true,
+	"architecture/agent.md patterns/retry":                        true,
+	"architecture/agent.md protocol/spec":                         true,
+	"architecture/change-management.md architecture/orchestrator": true,
+	"architecture/change-management.md patterns/messaging":        true,
+	"architecture/change-management.md patterns/versioning":       true,
+	"architecture/change-management.md protocol/spec":             true,
+	"architecture/cli.md architecture/orchestrator":               true,
+	"architecture/cli.md patterns/command":                        true,
+	"architecture/cli.md protocol/spec":                           true,
+	"architecture/data-security.md architecture/enforcement":      true,
+	"architecture/data-security.md patterns/contract":             true,
+	"architecture/data-security.md patterns/policy":               true,
+	"architecture/data-security.md patterns/privacy":              true,
+	"architecture/data-security.md patterns/scope":                true,
+	"architecture/data-security.md protocol/spec":                 true,
+	"architecture/domain.md architecture/orchestrator":            true,
+	"architecture/domain.md patterns/messaging":                   true,
+	"architecture/domain.md patterns/workflow":                    true,
+	"architecture/gateway.md architecture/admin":                  true,
+	"architecture/gateway.md architecture/observability":          true,
+	"architecture/gateway.md patterns/api-ai":                     true,
+	"architecture/gateway.md patterns/auth-session":               true,
+	"architecture/gateway.md patterns/auth-token":                 true,
+	"architecture/gateway.md patterns/rate-limiting":              true,
+	"architecture/gateway.md patterns/user-management":            true,
+	"architecture/generation.md architecture/testing":             true,
+	"architecture/generation.md protocol/spec":                    true,
+	"architecture/lifecycle.md patterns/messaging":                true,
+	"architecture/storage.md architecture/gateway":                true,
+}
+
+func TestFrontmatterRequiresAndBindingContractsAgree(t *testing.T) {
+	// The two declarations are the same claim at two resolutions. frontmatter
+	// `requires:` says which blueprints a component depends on; the Dependencies
+	// block says what it consumes from each. Generation reads the second, so a
+	// dependency present in the first and absent from the second arrives at the
+	// model with no statement of what it is for.
+	//
+	// That is not a tidiness problem. architecture/orchestrator declared
+	// architecture/storage, bound nothing from it, and the generated orchestrator
+	// implemented store_lifecycle.go, store_gateway.go and store_execution.go —
+	// state belonging to the Lifecycle Agent, the Gateway, and the Workflow and
+	// Task agents.
+	var found []string
+	for rel, body := range readBlueprints(t, []string{"architecture"}) {
+		bound := map[string]bool{}
+		for _, b := range ExtractBindings(body) {
+			bound[b.From] = true
+		}
+		if len(bound) == 0 {
+			// No binding block at all is a different gap, and one this guard does
+			// not yet insist on closing everywhere.
+			continue
+		}
+		for _, req := range DeclaredRequires(body) {
+			if bound[req] {
+				continue
+			}
+			key := rel + " " + req
+			if knownBindingGaps[key] {
+				continue
+			}
+			found = append(found, key)
+		}
+	}
+	sort.Strings(found)
+	for _, f := range found {
+		t.Errorf("new binding gap: %s\n"+
+			"  frontmatter requires it and the dependency contract binds nothing from it.\n"+
+			"  Generation reads the contract, so that blueprint reaches the model unexplained.", f)
+	}
+}
+
+func TestTheKnownBindingGapsStillExist(t *testing.T) {
+	// A pinned gap that has been closed must leave the list, or the list stops
+	// describing the corpus and starts hiding it.
+	present := map[string]bool{}
+	for rel, body := range readBlueprints(t, []string{"architecture"}) {
+		bound := map[string]bool{}
+		for _, b := range ExtractBindings(body) {
+			bound[b.From] = true
+		}
+		if len(bound) == 0 {
+			continue
+		}
+		for _, req := range DeclaredRequires(body) {
+			if !bound[req] {
+				present[rel+" "+req] = true
+			}
+		}
+	}
+	for pinned := range knownBindingGaps {
+		if !present[pinned] {
+			t.Errorf("%q is pinned as a known gap and no longer exists — remove it from knownBindingGaps", pinned)
 		}
 	}
 }
