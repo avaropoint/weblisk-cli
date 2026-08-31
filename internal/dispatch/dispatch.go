@@ -88,6 +88,15 @@ func ServerInit(root, platform string) error {
 		}
 		fmt.Println()
 
+		// One writer per target. Two generations sharing a directory produced
+		// twenty-one redeclaration errors between two correct plans, which reads
+		// exactly like a pipeline fault and is not one.
+		release, lerr := AcquireTargetLock(root, plan.Root)
+		if lerr != nil {
+			return lerr
+		}
+		defer release()
+
 		// The plan is a complete statement of what the target consists of, not an
 		// addition to whatever is already there. A previous run that split the
 		// registry differently left routing.go beside a new registry.go, and every
