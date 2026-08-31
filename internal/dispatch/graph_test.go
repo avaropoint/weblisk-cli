@@ -367,3 +367,32 @@ func TestTheRealSpecScopesToTheOrchestrator(t *testing.T) {
 		}
 	}
 }
+
+func TestWhatIsDeclaredAndNotFollowedIsStated(t *testing.T) {
+	// Depth one is a deliberate narrowing, and a deliberate narrowing has to be
+	// visible. architecture/storage.md declares seven requirements because it
+	// documents fourteen stores and names their consumers; following them would
+	// pull the whole framework into a starter hub. Declining is right. Declining
+	// silently is the fault that cost this pipeline protocol/types.md.
+	root := graphFixture(t)
+	g, err := ResolveGraph(root, "orchestrator", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fixture's platforms/go.md declares architecture/agent, which the
+	// starter hub does not follow.
+	if got := g.Deferred["platforms/go.md"]; !containsString(got, "architecture/agent.md") {
+		t.Errorf("platforms/go.md's unfollowed requirement is not recorded: %v", got)
+	}
+	// And what IS loaded is never listed as deferred.
+	for name, deps := range g.Deferred {
+		for _, d := range deps {
+			if _, loaded := g.Map[d]; loaded {
+				t.Errorf("%s lists %s as unfollowed, but it is in the graph", name, d)
+			}
+		}
+	}
+	if d := g.Describe(); !strings.Contains(d, "not followed") {
+		t.Fatalf("the description does not state what was declined:\n%s", d)
+	}
+}

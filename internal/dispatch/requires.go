@@ -228,6 +228,17 @@ type BlueprintGraph struct {
 	Missing  []string          // declared requirements this installation lacks
 	Sources  []Source          // directories searched, in precedence order
 	ServedBy map[string]Source // path → the source that actually answered
+	// Deferred are requirements declared by a blueprint IN the graph that were
+	// not loaded, because resolution stops at depth one from the target.
+	//
+	// Reported rather than left implicit. architecture/storage.md declares seven
+	// requirements — domain, gateway, workflow, task and lifecycle among them —
+	// because it documents fourteen stores and names their consumers. Following
+	// them would pull the whole framework into a starter hub, so declining is
+	// correct. Declining SILENTLY is how a pipeline comes to look complete while
+	// sending a fraction of what was declared, which is the exact fault that cost
+	// this one protocol/types.md.
+	Deferred map[string][]string // blueprint → its unloaded requirements
 }
 
 // Joined renders the graph as one document, for prompts that take the corpus
@@ -265,7 +276,23 @@ func ResolveGraph(root, target, platform string) (*BlueprintGraph, error) {
 	if err != nil {
 		return nil, err
 	}
-	g := &BlueprintGraph{Map: bpMap, Order: order, Missing: missing, Sources: srcs, ServedBy: map[string]Source{}}
+	g := &BlueprintGraph{Map: bpMap, Order: order, Missing: missing, Sources: srcs,
+		ServedBy: map[string]Source{}, Deferred: map[string][]string{}}
+
+	// What the graph declares and does not carry.
+	for _, name := range order {
+		for _, dep := range DeclaredRequires(bpMap[name]) {
+			file := blueprintFileName(dep)
+			if _, loaded := bpMap[file]; loaded {
+				continue
+			}
+			if containsString(missing, file) {
+				continue // already reported as absent from this installation
+			}
+			g.Deferred[name] = append(g.Deferred[name], file)
+		}
+		sort.Strings(g.Deferred[name])
+	}
 	// Which source answered for each blueprint, not merely which were searched.
 	//
 	// Precedence means a graph can be assembled from more than one copy — a
@@ -304,6 +331,17 @@ func (g *BlueprintGraph) Describe() string {
 			tag = label[src.Dir]
 		}
 		fmt.Fprintf(b, "    %s %s\n", tag, name)
+	}
+	if len(g.Deferred) > 0 {
+		b.WriteString("  Declared and not followed (depth one from the target):\n")
+		names := make([]string, 0, len(g.Deferred))
+		for name := range g.Deferred {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			fmt.Fprintf(b, "    %s requires %s\n", name, strings.Join(g.Deferred[name], ", "))
+		}
 	}
 	b.WriteString("  Read from:\n")
 	for i, s := range g.Sources {
