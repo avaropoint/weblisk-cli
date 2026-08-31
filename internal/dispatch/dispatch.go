@@ -88,13 +88,13 @@ func ServerInit(root, platform string) error {
 		// Layer 2: build, and feed failures back. Generating blind and reporting
 		// success is how eleven files that do not compile get called finished.
 		if plan.Build != "" {
-			result, repaired, rerr := BuildAndRepair(provider, plan, root, platBP, files, printProgress, req.Checklist)
+			result, repaired, rerr := BuildAndRepair(provider, plan, root, platBP, files, printProgress, req.Checklist, graph.Map)
 			if rerr != nil {
 				return rerr
 			}
 			files = repaired
 			if !result.OK {
-				reportChecklist(EvaluateChecklist(req.Checklist, files))
+				reportChecklist(EvaluateChecklistAgainst(req.Checklist, files, graph.Map))
 				fmt.Printf("  [failed] the implementation does not build\n\n")
 				fmt.Println(indentBlock(result.Output, "    "))
 				return fmt.Errorf("build failed: %s", plan.Build)
@@ -102,7 +102,7 @@ func ServerInit(root, platform string) error {
 			fmt.Printf("  [ok] builds with %q\n\n", plan.Build)
 		}
 
-		reportChecklist(EvaluateChecklist(req.Checklist, files))
+		reportChecklist(EvaluateChecklistAgainst(req.Checklist, files, graph.Map))
 		return nil
 	}
 

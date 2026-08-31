@@ -236,7 +236,13 @@ var mechanicalChecks = []mechanicalCheck{
 // exactly. The text table is the fallback, for assertions whose entire content
 // is the presence of a construct.
 func EvaluateChecklist(items []ChecklistItem, files []GeneratedFile) []ChecklistResult {
-	ctx := BuildCheckContext(files)
+	return EvaluateChecklistAgainst(items, files, nil)
+}
+
+// EvaluateChecklistAgainst evaluates the checklist with the blueprints available,
+// so a check can compare the artifact against the specification's own tables.
+func EvaluateChecklistAgainst(items []ChecklistItem, files []GeneratedFile, spec map[string]string) []ChecklistResult {
+	ctx := BuildCheckContextWith(files, spec)
 
 	results := make([]ChecklistResult, 0, len(items))
 	for _, item := range items {

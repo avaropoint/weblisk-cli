@@ -184,7 +184,7 @@ func repairPrompt(f PlannedFile, plan *Plan, errs, general []string,
 //
 // root is where the build command runs; the files live at root/plan.Root.
 func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []GeneratedFile,
-	onProgress ProgressFunc, checklist []ChecklistItem) (BuildResult, []GeneratedFile, error) {
+	onProgress ProgressFunc, checklist []ChecklistItem, spec map[string]string) (BuildResult, []GeneratedFile, error) {
 	dir := filepath.Join(root, plan.Root)
 	if onProgress == nil {
 		onProgress = func(Progress) {}
@@ -255,7 +255,7 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 			// `unchecked` cannot be repaired against, because nothing has
 			// established what is wrong; treating them as work would spend rounds
 			// asking a model to fix code that may be correct.
-			verdict := EvaluateChecklist(checklist, rebuildList(content, order))
+			verdict := EvaluateChecklistAgainst(checklist, rebuildList(content, order), spec)
 			bad := FailedChecklist(verdict)
 			if len(bad) == 0 {
 				return result, rebuildList(content, order), nil

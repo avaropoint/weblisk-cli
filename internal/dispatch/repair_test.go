@@ -53,7 +53,7 @@ func TestASucceedingBuildIsNotRepaired(t *testing.T) {
 	dir := t.TempDir()
 	p := &fakeProvider{}
 	plan := &Plan{Root: ".", Build: "true", Files: []PlannedFile{{Path: "a.go", Purpose: "x"}}}
-	result, _, err := BuildAndRepair(p, plan, dir, "platform", []GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil)
+	result, _, err := BuildAndRepair(p, plan, dir, "platform", []GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestABuildErrorIsFedBackAndFixed(t *testing.T) {
 			if pr.Status == "repairing" {
 				repaired, errSeen = pr.Path, pr.Detail
 			}
-		}, nil)
+		}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestRepairIsBoundedAndReportsHonestly(t *testing.T) {
 	p := &fakeProvider{responses: []string{broken, broken, broken, broken}}
 	plan := &Plan{Root: ".", Build: "go build ./...", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
 	result, _, err := BuildAndRepair(p, plan, dir, "platform",
-		[]GeneratedFile{{Path: "main.go", Content: broken}}, nil, nil)
+		[]GeneratedFile{{Path: "main.go", Content: broken}}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestTheBuildRunsFromTheProjectRoot(t *testing.T) {
 		Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
 	p := &fakeProvider{}
 	result, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "main.go", Content: "package main\n\nfunc main() {}\n"}}, nil, nil)
+		[]GeneratedFile{{Path: "main.go", Content: "package main\n\nfunc main() {}\n"}}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestPrepareRunsBeforeEveryBuild(t *testing.T) {
 		"package main\n", "package main\n", "package main\n", "package main\n",
 	}}
 	if _, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil); err != nil {
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(counter)
@@ -216,7 +216,7 @@ func TestAFailingPrepareStopsImmediately(t *testing.T) {
 		Files: []PlannedFile{{Path: "a.go", Purpose: "x"}}}
 	p := &fakeProvider{}
 	_, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil)
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("a failing prepare was not reported")
 	}
@@ -247,7 +247,7 @@ func TestRepairRetriesAContractViolation(t *testing.T) {
 	plan := &Plan{Root: ".", Build: "go build ./...",
 		Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
 	result, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "main.go", Content: broken}}, nil, nil)
+		[]GeneratedFile{{Path: "main.go", Content: broken}}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestRepairStopsWhenProgressStalls(t *testing.T) {
 			if pr.Status == "failed" {
 				stallDetail = pr.Detail
 			}
-		}, nil)
+		}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestRepairKeepsGoingWhileErrorsFall(t *testing.T) {
 	}
 	p := &fakeProvider{responses: replies}
 	result, _, err := BuildAndRepair(p, plan, root, "platform",
-		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil)
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestCompilingIsNotConforming(t *testing.T) {
 			if pr.Status == "repairing" {
 				conformed = append(conformed, pr.Path)
 			}
-		}, checklist)
+		}, checklist, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +381,7 @@ func TestConformanceRepairStopsWhenItIsNotConverging(t *testing.T) {
 
 	p := &fakeProvider{responses: []string{stuck, stuck, stuck, stuck, stuck, stuck, stuck, stuck}}
 	result, _, err := BuildAndRepair(p, plan, dir, "", []GeneratedFile{{Path: "main.go", Content: stuck}},
-		nil, checklist)
+		nil, checklist, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestAnAssertionNamingNoPlannedFileIsNotRepairedBlindly(t *testing.T) {
 	checklist := []ChecklistItem{{Source: "architecture/storage.md", Text: "All stores survive process restart"}}
 
 	p := &fakeProvider{}
-	result, _, err := BuildAndRepair(p, plan, dir, "", []GeneratedFile{{Path: "main.go", Content: src}}, nil, checklist)
+	result, _, err := BuildAndRepair(p, plan, dir, "", []GeneratedFile{{Path: "main.go", Content: src}}, nil, checklist, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

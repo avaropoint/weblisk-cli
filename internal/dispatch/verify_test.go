@@ -326,3 +326,106 @@ func TestAnUnrecognisedPremiseIsNotExcused(t *testing.T) {
 		t.Errorf("the premise is not quoted for the human who must judge it: %q", r.Detail)
 	}
 }
+
+func TestUnregisteredErrorCodesAreCaught(t *testing.T) {
+	// The real fault in the first hub that built. It transcribed the blueprint's
+	// error table faithfully, then its handlers wrote codes that were not in it:
+	// AUTH_FAILED, VALIDATION_FAILED, and SIGNATURE_INVALID where the protocol
+	// says INVALID_SIGNATURE. StatusForCode falls through to 500 for an
+	// unregistered code, so `GET /v1/services` without a token answered 500 with
+	// a correct AUTH_FAILED body — an interoperability break no compiler can see.
+	assertion := ChecklistItem{Source: "protocol/types.md",
+		Text: "All protocol-level error codes are registered centrally; agent-local codes use domain-descriptive names and do not collide with registered codes"}
+
+	registry := `package main
+
+type ErrorCodeSpec struct {
+	Code   string
+	Status int
+}
+
+var ErrorCodes = map[string]ErrorCodeSpec{
+	"INVALID_REQUEST":   {"INVALID_REQUEST", 400},
+	"INVALID_SIGNATURE": {"INVALID_SIGNATURE", 401},
+}
+`
+	handlers := `package main
+
+import "os"
+
+func handle() {
+	writeErrorCode(w, "SIGNATURE_INVALID", "bad signature")
+	writeErrorCode(w, "INVALID_REQUEST", "missing field")
+	_ = os.Getenv("WL_DEV")
+	_ = os.Getenv("MY_CONFIG_PATH")
+}
+`
+	files := []GeneratedFile{{Path: "protocol.go", Content: registry}, {Path: "orchestrator.go", Content: handlers}}
+	r := EvaluateChecklist([]ChecklistItem{assertion}, files)[0]
+	if r.Outcome != OutcomeFailed {
+		t.Fatalf("outcome = %s, want failed", r.Outcome)
+	}
+	if !strings.Contains(r.Detail, "SIGNATURE_INVALID") {
+		t.Errorf("the transposed code is not named: %s", r.Detail)
+	}
+	// Environment variable names are not error codes. The first version of this
+	// check reported WL_DEV and WL_PORT as unregistered codes, because I
+	// calibrated it on the thirty most frequent literals and never saw the rest.
+	for _, env := range []string{"WL_DEV", "MY_CONFIG_PATH"} {
+		if strings.Contains(r.Detail, env) {
+			t.Errorf("%s was reported as an error code: %s", env, r.Detail)
+		}
+	}
+	// A registered code must not be reported.
+	if strings.Contains(r.Detail, "INVALID_REQUEST") {
+		t.Errorf("a registered code was reported: %s", r.Detail)
+	}
+	if len(r.Files) != 1 || r.Files[0] != "orchestrator.go" {
+		t.Errorf("blame = %v, want [orchestrator.go]", r.Files)
+	}
+
+	// Fix the transposition and it holds — as a necessary condition, since the
+	// agent-local naming clause is not settled by this.
+	fixed := strings.Replace(handlers, "SIGNATURE_INVALID", "INVALID_SIGNATURE", 1)
+	files[1].Content = fixed
+	if r := EvaluateChecklist([]ChecklistItem{assertion}, files)[0]; r.Outcome != OutcomeNecessary {
+		t.Errorf("after the fix: outcome = %s (%s), want necessary", r.Outcome, r.Detail)
+	}
+}
+
+func TestStatusesAreCheckedAgainstTheBlueprintsOwnTable(t *testing.T) {
+	// Against protocol/types.md's table, not a copy of it in the tooling. A
+	// second copy is a second thing to keep right, and the two would disagree the
+	// moment either moved.
+	spec := map[string]string{"protocol/types.md": "" +
+		"| Code | HTTP | Category | Meaning |\n" +
+		"|---|---|---|---|\n" +
+		"| `INVALID_SIGNATURE` | 401 | permanent | signature failed |\n" +
+		"| `NAMESPACE_CONFLICT` | 409 | permanent | already owned |\n"}
+	assertion := ChecklistItem{Source: "protocol/types.md",
+		Text: "Error categories are constrained to `transient`, `permanent`, or `partial` and each standard error code maps to the correct HTTP status"}
+
+	right := "package main\n\nvar ErrorCodes = map[string]ErrorCodeSpec{\n" +
+		"\t\"INVALID_SIGNATURE\": {\"INVALID_SIGNATURE\", 401, \"permanent\"},\n" +
+		"\t\"NAMESPACE_CONFLICT\": {\"NAMESPACE_CONFLICT\", 409, \"permanent\"},\n}\n"
+	if r := EvaluateChecklistAgainst([]ChecklistItem{assertion}, []GeneratedFile{{Path: "protocol.go", Content: right}}, spec)[0]; r.Outcome != OutcomeVerified {
+		t.Errorf("a faithful registry: outcome = %s (%s), want verified", r.Outcome, r.Detail)
+	}
+
+	wrong := strings.Replace(right, "409", "500", 1)
+	r := EvaluateChecklistAgainst([]ChecklistItem{assertion}, []GeneratedFile{{Path: "protocol.go", Content: wrong}}, spec)[0]
+	if r.Outcome != OutcomeFailed {
+		t.Fatalf("a wrong status: outcome = %s, want failed", r.Outcome)
+	}
+	if !strings.Contains(r.Detail, "NAMESPACE_CONFLICT") || !strings.Contains(r.Detail, "409") {
+		t.Errorf("the detail does not say what was expected: %s", r.Detail)
+	}
+
+	// A keyed composite literal is equally correct Go, and the check must not
+	// care which arrangement the model chose.
+	keyed := "package main\n\nvar ErrorCodes = map[string]ErrorCodeSpec{\n" +
+		"\t\"NAMESPACE_CONFLICT\": {Code: \"NAMESPACE_CONFLICT\", Status: 409, Category: \"permanent\"},\n}\n"
+	if r := EvaluateChecklistAgainst([]ChecklistItem{assertion}, []GeneratedFile{{Path: "protocol.go", Content: keyed}}, spec)[0]; r.Outcome == OutcomeFailed {
+		t.Errorf("a keyed literal was misread: %s", r.Detail)
+	}
+}

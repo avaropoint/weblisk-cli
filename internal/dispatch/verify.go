@@ -45,6 +45,7 @@ package dispatch
 // Only `failed` drives repair. `necessary` is never counted as `verified`.
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -64,6 +65,19 @@ type CheckContext struct {
 	Imports map[string]string   // import path → first file importing it
 	Modules []string            // module paths required by go.mod
 	OwnerOf map[string]string   // declared symbol → file declaring it
+	// Codes are SCREAMING_SNAKE string literals used in the source but not
+	// declared as a key of a code registry — the codes a handler writes.
+	Codes map[string]string // code → first file using it
+	// Registered are the keys of every string-keyed map literal whose keys look
+	// like codes: the central registry, whatever it was named.
+	Registered map[string]bool
+	// CodeStatus is the HTTP status the artifact assigns each registered code,
+	// read from the registry entry's first integer literal.
+	CodeStatus map[string]int
+	// Spec is the blueprint set the artifact was generated from, so a check can
+	// compare against the specification's own tables rather than against a copy
+	// of them written into the tooling.
+	Spec map[string]string
 }
 
 // Field is one struct field and what it serialises as.
@@ -74,14 +88,25 @@ type Field struct {
 }
 
 // BuildCheckContext parses the generated files once.
+// BuildCheckContextWith parses the generated files and keeps the blueprints
+// available to checks that compare against the specification.
+func BuildCheckContextWith(files []GeneratedFile, spec map[string]string) *CheckContext {
+	ctx := BuildCheckContext(files)
+	ctx.Spec = spec
+	return ctx
+}
+
 func BuildCheckContext(files []GeneratedFile) *CheckContext {
 	ctx := &CheckContext{
-		Files:   files,
-		Fields:  map[string][]Field{},
-		Values:  map[string][]string{},
-		Routes:  map[string]string{},
-		Imports: map[string]string{},
-		OwnerOf: map[string]string{},
+		Files:      files,
+		Fields:     map[string][]Field{},
+		Values:     map[string][]string{},
+		Routes:     map[string]string{},
+		Imports:    map[string]string{},
+		OwnerOf:    map[string]string{},
+		Codes:      map[string]string{},
+		Registered: map[string]bool{},
+		CodeStatus: map[string]int{},
 	}
 	var all strings.Builder
 	for _, f := range files {
@@ -129,6 +154,68 @@ func (c *CheckContext) absorbGo(f GeneratedFile) {
 			}
 		}
 	}
+	// Error codes, and the registry they should come from.
+	//
+	// A code is a SCREAMING_SNAKE string literal that is not an environment
+	// variable name. The env exclusion is not a guess at what looks like a code:
+	// literals passed to os.Getenv or os.LookupEnv are found in the AST, and the
+	// WL_ prefix is the configuration namespace platforms/go.md itself declares.
+	//
+	// Both exclusions were added after the first measurement. I sampled the top
+	// thirty SCREAMING_SNAKE literals by frequency, saw error codes, and concluded
+	// every literal of that shape was one — then the check reported WL_DEV and
+	// WL_PORT as unregistered error codes. Calibrating on a truncated view is how
+	// a plausible rule gets shipped with a whole category missing from it.
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		mt, ok := lit.Type.(*ast.MapType)
+		if !ok {
+			return true
+		}
+		if id, ok := mt.Key.(*ast.Ident); !ok || id.Name != "string" {
+			return true
+		}
+		for _, elt := range lit.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			k, ok := kv.Key.(*ast.BasicLit)
+			if !ok || k.Kind != token.STRING {
+				continue
+			}
+			key := strings.Trim(k.Value, `"`)
+			if !reErrorCode.MatchString(key) {
+				continue
+			}
+			c.Registered[key] = true
+			// The status is the entry's first integer literal — positional or
+			// keyed, and in either arrangement the only 3-digit int in a row.
+			if st := firstStatusIn(kv.Value); st > 0 {
+				c.CodeStatus[key] = st
+			}
+		}
+		return true
+	})
+	envNames := environmentNames(file)
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		v := strings.Trim(lit.Value, `"`)
+		if !reErrorCode.MatchString(v) || envNames[v] || strings.HasPrefix(v, "WL_") {
+			return true
+		}
+		if _, seen := c.Codes[v]; !seen {
+			c.Codes[v] = f.Path
+		}
+		return true
+	})
+
 	// Routed paths, from the AST rather than a regex over text, so a path in a
 	// comment or an error message is not mistaken for a route.
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -245,6 +332,10 @@ func structFields(st *ast.StructType) []Field {
 	}
 	return out
 }
+
+// reErrorCode matches a protocol error code: SCREAMING_SNAKE with at least one
+// underscore, so a single word like "GET" or "POST" is not mistaken for one.
+var reErrorCode = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`)
 
 var reJSONTag = regexp.MustCompile(`json:"([^"]*)"`)
 
@@ -579,6 +670,80 @@ var structuralChecks = []structuralCheck{
 		},
 	},
 	{
+		// "All protocol-level error codes … are registered centrally"
+		//
+		// The generated hub transcribed the blueprint's error table faithfully and
+		// then its handlers wrote codes that were not in it: AUTH_FAILED,
+		// VALIDATION_FAILED, STORAGE_ERROR, and SIGNATURE_INVALID where the
+		// protocol says INVALID_SIGNATURE. Every status lookup for an unregistered
+		// code falls through to 500, so `GET /v1/services` without a token
+		// answered 500 with a correct AUTH_FAILED body — an interoperability break
+		// that no compiler can see and that the checklist already covers.
+		//
+		// One-way: every used code being registered establishes the first clause
+		// for this artifact and says nothing about the agent-local naming rule in
+		// the second.
+		name:   "error codes are centrally registered",
+		oneWay: true,
+		applies: func(a assertion) bool {
+			return strings.Contains(a.Lower, "error code") &&
+				(strings.Contains(a.Lower, "registered centrally") ||
+					strings.Contains(a.Lower, "registered") && strings.Contains(a.Lower, "collide"))
+		},
+		test: func(a assertion, c *CheckContext) (bool, string, []string) {
+			var unregistered, blame []string
+			for code, file := range c.Codes {
+				if c.Registered[code] {
+					continue
+				}
+				unregistered = append(unregistered, code)
+				if !containsString(blame, file) {
+					blame = append(blame, file)
+				}
+			}
+			if len(unregistered) == 0 {
+				return true, "", nil
+			}
+			sort.Strings(unregistered)
+			sort.Strings(blame)
+			return false, "error code(s) used but not in the central registry: " +
+				strings.Join(unregistered, ", "), blame
+		},
+	},
+	{
+		// "each standard error code maps to the correct HTTP status"
+		//
+		// Checked against protocol/types.md's own table rather than a copy of it
+		// written into the tooling — a second copy is a second thing to keep
+		// right, and it would disagree with the blueprint the moment either moved.
+		name: "registered codes carry the status the protocol assigns",
+		applies: func(a assertion) bool {
+			return strings.Contains(a.Lower, "error code") && strings.Contains(a.Lower, "http status")
+		},
+		test: func(a assertion, c *CheckContext) (bool, string, []string) {
+			want := specErrorTable(c.Spec)
+			if len(want) == 0 {
+				// No table to check against: say so rather than pass.
+				return true, "", nil
+			}
+			var wrong []string
+			for code, spec := range want {
+				got, ok := c.CodeStatus[code]
+				if !ok {
+					continue // absence is the other check's business
+				}
+				if got != spec.Status {
+					wrong = append(wrong, fmt.Sprintf("%s is %d, protocol says %d", code, got, spec.Status))
+				}
+			}
+			if len(wrong) == 0 {
+				return true, "", nil
+			}
+			sort.Strings(wrong)
+			return false, "status mismatch: " + strings.Join(wrong, "; "), blameOwners(c, "ErrorCodes")
+		},
+	},
+	{
 		// "No dependency beyond `github.com/cloudflare/circl`, plus a storage
 		// driver only if a backend other than the JSONL default was chosen; every
 		// dependency declared in go.mod"
@@ -868,5 +1033,98 @@ func handlerFiles(entries []string) []string {
 			out = append(out, file)
 		}
 	}
+	return out
+}
+
+// specErrorCode is one row of a blueprint's error-code table.
+type specErrorCode struct {
+	Status   int
+	Category string
+}
+
+// reSpecErrorRow matches a row of protocol/types.md's error tables:
+//
+//	| `INVALID_SIGNATURE` | 401 | permanent | ML-DSA-65 signature verification failed |
+var reSpecErrorRow = regexp.MustCompile("(?m)^\\|\\s*`([A-Z][A-Z0-9_]+)`\\s*\\|\\s*(\\d{3})\\s*\\|\\s*([a-z]+)")
+
+// specErrorTable reads every error-code row out of the blueprints.
+//
+// The specification's table is the authority. Transcribing it into the tooling
+// would create a second copy to keep right, and the two would disagree the
+// moment either moved — which is the whole argument for reading the blueprint.
+func specErrorTable(spec map[string]string) map[string]specErrorCode {
+	out := map[string]specErrorCode{}
+	for _, body := range spec {
+		for _, m := range reSpecErrorRow.FindAllStringSubmatch(body, -1) {
+			status := 0
+			for _, ch := range m[2] {
+				status = status*10 + int(ch-'0')
+			}
+			out[m[1]] = specErrorCode{Status: status, Category: m[3]}
+		}
+	}
+	return out
+}
+
+// firstStatusIn returns the first HTTP-status-shaped integer literal in an
+// expression, or 0.
+//
+// Positional and keyed composite literals arrange a registry entry differently,
+// and both are correct Go. Reading the first three-digit integer works for either
+// without the check caring which the model chose — which is the point: a check
+// that only understands one arrangement fails correct code for its style.
+func firstStatusIn(e ast.Expr) int {
+	status := 0
+	ast.Inspect(e, func(n ast.Node) bool {
+		if status > 0 {
+			return false
+		}
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.INT || len(lit.Value) != 3 {
+			return true
+		}
+		v := 0
+		for _, ch := range lit.Value {
+			if ch < '0' || ch > '9' {
+				return true
+			}
+			v = v*10 + int(ch-'0')
+		}
+		if v >= 100 && v < 600 {
+			status = v
+		}
+		return true
+	})
+	return status
+}
+
+// environmentNames returns the string literals a file reads from the environment.
+//
+// Exact rather than conventional: a literal passed to os.Getenv is an
+// environment variable whatever it is named, and a check that guessed from the
+// shape of the name would go on mistaking one for the other.
+func environmentNames(file *ast.File) map[string]bool {
+	out := map[string]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, isIdent := sel.X.(*ast.Ident)
+		if !isIdent || pkg.Name != "os" {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "Getenv", "LookupEnv", "Setenv", "Unsetenv":
+			if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				out[strings.Trim(lit.Value, `"`)] = true
+			}
+		}
+		return true
+	})
 	return out
 }
