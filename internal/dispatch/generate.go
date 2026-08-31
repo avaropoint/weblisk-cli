@@ -191,9 +191,7 @@ func notSourceIn(path, content string) string {
 	}
 	switch strings.ToLower(pathExt(path)) {
 	case ".go":
-		if !reGoPackage.MatchString(content) {
-			return "the response is not Go source — it has no package clause"
-		}
+		return notGoSource(content)
 	case ".mod":
 		if !strings.Contains(content, "module ") {
 			return "the response is not a go.mod — it has no module directive"
@@ -206,9 +204,75 @@ func notSourceIn(path, content string) string {
 	return ""
 }
 
-// reGoPackage matches a package clause, allowing leading comments and blank
-// lines — a generated file legitimately opens with a doc comment.
-var reGoPackage = regexp.MustCompile(`(?m)^package\s+[A-Za-z_][A-Za-z0-9_]*\s*$`)
+// rePackageClause matches a package clause on its own, after leading comments
+// have been stripped.
+var rePackageClause = regexp.MustCompile(`^package\s+[A-Za-z_][A-Za-z0-9_]*\s*$`)
+
+// notGoSource reports why content is not a Go file, or "" when it is plausibly one.
+//
+// # The check this replaces
+//
+// A multiline-anchored search for `^package name$` finds the clause ANYWHERE in
+// the response. That is what a leading doc comment needs, and it is also what let
+// this through a check named "is this Go source":
+//
+//	# Orchestrator
+//
+//	package main
+//
+// A model that answered in prose with the code beneath it passed, and the prose
+// was written to a .go file.
+//
+// # Why the rule is not a heuristic
+//
+// Go permits exactly comments and blank lines before the package clause. So
+// walking the head and requiring the first non-comment content to BE the package
+// clause cannot reject valid source — which matters, because this is a
+// pre-filter and a wrong check is more persuasive than no check.
+func notGoSource(content string) string {
+	inBlock := false
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if inBlock {
+			i := strings.Index(line, "*/")
+			if i < 0 {
+				continue
+			}
+			inBlock = false
+			line = strings.TrimSpace(line[i+2:])
+		}
+		// Consume any closed block comments opening on this line, so
+		// `/* c */ package main` — legal, if unusual — is read as a package clause.
+		for strings.HasPrefix(line, "/*") {
+			i := strings.Index(line[2:], "*/")
+			if i < 0 {
+				inBlock = true
+				line = ""
+				break
+			}
+			line = strings.TrimSpace(line[2+i+2:])
+		}
+		switch {
+		case line == "" || inBlock:
+			continue
+		case strings.HasPrefix(line, "//"):
+			continue
+		case rePackageClause.MatchString(line):
+			return ""
+		default:
+			return fmt.Sprintf("the response is not Go source — %q precedes any package clause", truncateLine(raw))
+		}
+	}
+	return "the response is not Go source — it has no package clause"
+}
+
+func truncateLine(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 60 {
+		return s[:60] + "…"
+	}
+	return s
+}
 
 // filePrompt asks for exactly one file.
 //

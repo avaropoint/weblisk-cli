@@ -239,3 +239,34 @@ func TestMixedSourcesAreAttributedPerBlueprint(t *testing.T) {
 		t.Fatalf("a source does not state how much of the graph it served:\n%s", d)
 	}
 }
+
+func TestProseBeforeThePackageClauseIsNotGoSource(t *testing.T) {
+	// The multiline anchor that lets a doc comment precede the package clause
+	// also let a whole markdown answer precede it.
+	bad := []string{
+		"# Orchestrator\n\npackage main\n\nfunc main() {}\n",
+		"Here is the file you asked for:\n\npackage main\n",
+		"```go\npackage main\n```\n",
+	}
+	for _, src := range bad {
+		if notSourceIn("main.go", src) == "" {
+			t.Errorf("accepted as Go source:\n%s", src)
+		}
+	}
+
+	// And everything Go actually permits must still pass — a pre-filter that
+	// rejects valid source is worse than the failure it prevents.
+	good := []string{
+		"package main\n",
+		"// Package main is the orchestrator.\npackage main\n",
+		"//go:build linux\n\npackage main\n",
+		"/*\nCopyright 2026.\n*/\n\npackage main\n",
+		"/* one line */ package main\n",
+		"\n\n\npackage main\n",
+	}
+	for _, src := range good {
+		if why := notSourceIn("main.go", src); why != "" {
+			t.Errorf("rejected valid Go (%s):\n%s", why, src)
+		}
+	}
+}
