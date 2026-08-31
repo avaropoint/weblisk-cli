@@ -109,3 +109,65 @@ func TestPruneKeepsLiveEntries(t *testing.T) {
 		t.Error("a live entry was pruned")
 	}
 }
+
+// TestThePlanIsReusedWhenRequirementsAreUnchanged is what makes the file cache
+// useful. Without it the model re-plans every run — ten files where it planned
+// twelve — and every per-file key is invalidated by a plan entry nobody changed.
+// Four consecutive runs reported "0 of N files reused" for exactly this reason.
+func TestThePlanIsReusedWhenRequirementsAreUnchanged(t *testing.T) {
+	root := t.TempDir()
+	c := NewGenerationCache(root)
+	req := &Requirements{Types: []string{"A", "B"}, Endpoints: []string{"GET /v1/health"}}
+	k := planKey(req, "orchestrator", "go", "PLATFORM", planSystemPrompt)
+
+	if c.GetPlan(k) != nil {
+		t.Fatal("an empty cache returned a plan")
+	}
+	original := &Plan{Target: "orchestrator", Root: "server", Build: "go build",
+		Files: []PlannedFile{{Path: "a.go", Purpose: "x"}}}
+	c.PutPlan(k, original)
+
+	got := c.GetPlan(k)
+	if got == nil {
+		t.Fatal("a stored plan was not returned")
+	}
+	if len(got.Files) != 1 || got.Files[0].Path != "a.go" || got.Build != "go build" {
+		t.Errorf("the plan round-tripped wrongly: %+v", got)
+	}
+}
+
+func TestChangingRequirementsInvalidatesThePlan(t *testing.T) {
+	// A new type in the protocol must produce a new plan, or the generated
+	// implementation silently omits it.
+	a := &Requirements{Types: []string{"A"}}
+	b := &Requirements{Types: []string{"A", "B"}}
+	if planKey(a, "orchestrator", "go", "P", planSystemPrompt) ==
+		planKey(b, "orchestrator", "go", "P", planSystemPrompt) {
+		t.Error("adding a required type did not invalidate the plan")
+	}
+}
+
+func TestChangingAChecklistAssertionInvalidatesThePlan(t *testing.T) {
+	// Assertions shape the plan — the model cites them in its file purposes — so
+	// a changed assertion must re-plan.
+	a := &Requirements{Checklist: []ChecklistItem{{Source: "go.md", Text: "one"}}}
+	b := &Requirements{Checklist: []ChecklistItem{{Source: "go.md", Text: "two"}}}
+	if planKey(a, "orchestrator", "go", "P", planSystemPrompt) ==
+		planKey(b, "orchestrator", "go", "P", planSystemPrompt) {
+		t.Error("changing a checklist assertion did not invalidate the plan")
+	}
+}
+
+func TestACorruptCachedPlanIsIgnored(t *testing.T) {
+	// A truncated or hand-edited cache entry must cause a re-plan, not a crash.
+	root := t.TempDir()
+	c := NewGenerationCache(root)
+	c.Put("plan-x", "{not json")
+	if c.GetPlan("plan-x") != nil {
+		t.Error("a corrupt cached plan was returned")
+	}
+	c.Put("plan-y", `{"target":"orchestrator","files":[]}`)
+	if c.GetPlan("plan-y") != nil {
+		t.Error("a cached plan with no files was returned")
+	}
+}

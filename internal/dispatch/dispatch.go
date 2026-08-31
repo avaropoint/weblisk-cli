@@ -45,9 +45,21 @@ func ServerInit(root, platform string) error {
 		fmt.Printf("  Platform: %s\n", platform)
 		fmt.Printf("  Required: %s\n\n", req.Summary())
 
-		plan, perr := MakePlan(provider, req, "orchestrator", platform, specs, platBP, printProgress)
-		if perr != nil {
-			return perr
+		// Reuse the plan when the requirements have not changed. Without this the
+		// model re-plans every run — ten files where it planned twelve — and every
+		// per-file cache entry is invalidated by a plan entry nobody changed.
+		cache := NewGenerationCache(root)
+		pk := planKey(req, "orchestrator", platform, platBP, planSystemPrompt)
+		plan := cache.GetPlan(pk)
+		if plan != nil {
+			fmt.Println("  Plan reused — requirements unchanged since the last run")
+		} else {
+			var perr error
+			plan, perr = MakePlan(provider, req, "orchestrator", platform, specs, platBP, printProgress)
+			if perr != nil {
+				return perr
+			}
+			cache.PutPlan(pk, plan)
 		}
 		fmt.Printf("\n  Plan accepted: %d files in %s/\n", len(plan.Files), plan.Root)
 		for _, f := range plan.Order() {
@@ -800,6 +812,8 @@ func printProgress(p Progress) {
 		fmt.Println("  Asking the model to plan the implementation...")
 	case "replanning":
 		fmt.Printf("  Re-planning — %s\n", p.Detail)
+	case "preparing":
+		fmt.Println("  Resolving dependencies...")
 	case "building":
 		fmt.Printf("  Building (round %d)...\n", p.Attempt)
 	case "built":

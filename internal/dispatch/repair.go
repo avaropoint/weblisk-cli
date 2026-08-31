@@ -198,6 +198,16 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 		return BuildResult{}, files, err
 	}
 
+	// Resolve dependencies once, before any build. This is not a repairable
+	// failure: no amount of regenerating source produces a lockfile.
+	if strings.TrimSpace(plan.Prepare) != "" {
+		onProgress(Progress{Path: "prepare", Status: "preparing"})
+		if prep := RunBuild(root, plan.Prepare); !prep.OK {
+			return prep, files, fmt.Errorf("dependency resolution failed: %s\n%s",
+				plan.Prepare, prep.Output)
+		}
+	}
+
 	var result BuildResult
 	for round := 1; round <= maxRepairRounds; round++ {
 		onProgress(Progress{Path: "build", Status: "building", Attempt: round})

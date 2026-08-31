@@ -28,10 +28,14 @@ type PlannedFile struct {
 
 // Plan is the model's proposed structure for one target.
 type Plan struct {
-	Target string        `json:"target"`
-	Root   string        `json:"root"`
-	Build  string        `json:"build"`
-	Files  []PlannedFile `json:"files"`
+	Target string `json:"target"`
+	Root   string `json:"root"`
+	// Prepare resolves dependencies before the build — "go mod tidy" and its
+	// equivalents. Writing source cannot produce a lockfile, and a build without
+	// one fails naming a source file that has nothing wrong with it.
+	Prepare string        `json:"prepare"`
+	Build   string        `json:"build"`
+	Files   []PlannedFile `json:"files"`
 }
 
 const planSystemPrompt = `You plan an implementation before writing it.
@@ -47,6 +51,7 @@ Shape:
 {
   "target": "orchestrator",
   "root": "server",
+  "prepare": "<the dependency-resolution command from the platform blueprint, if it has one>",
   "build": "<the build command from the platform blueprint>",
   "files": [
     {

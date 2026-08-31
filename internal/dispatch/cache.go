@@ -166,3 +166,52 @@ func (c *GenerationCache) Prune(live map[string]bool) (int, error) {
 	}
 	return removed, nil
 }
+
+// planKey hashes the inputs that determine a plan.
+//
+// The requirements and the planning instructions — nothing else. Two runs with
+// unchanged blueprints should produce the SAME plan, and re-deriving it is not
+// merely wasteful: a model that plans ten files where it planned twelve
+// invalidates every per-file cache entry, so the file cache never hits and the
+// whole run regenerates. Caching the plan is what makes caching the files work.
+func planKey(req *Requirements, target, platform, platBP, systemPrompt string) string {
+	h := sha256.New()
+	h.Write([]byte(target))
+	h.Write([]byte(platform))
+	for _, t := range req.Types {
+		h.Write([]byte(t))
+	}
+	for _, e := range req.Endpoints {
+		h.Write([]byte(e))
+	}
+	for _, c := range req.Checklist {
+		h.Write([]byte(c.Source))
+		h.Write([]byte(c.Text))
+	}
+	h.Write([]byte(platBP))
+	h.Write([]byte(systemPrompt))
+	return "plan-" + hex.EncodeToString(h.Sum(nil))
+}
+
+// GetPlan returns a cached plan for these requirements, or nil.
+func (c *GenerationCache) GetPlan(key string) *Plan {
+	raw := c.Get(key)
+	if raw == "" {
+		return nil
+	}
+	var p Plan
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return nil
+	}
+	if len(p.Files) == 0 {
+		return nil
+	}
+	return &p
+}
+
+// PutPlan stores a validated plan.
+func (c *GenerationCache) PutPlan(key string, p *Plan) {
+	if b, err := json.Marshal(p); err == nil {
+		c.Put(key, string(b))
+	}
+}
