@@ -43,6 +43,15 @@ import (
 type Declaration struct {
 	Name      string
 	Signature string // full form where the language allows it
+	// Package is the package clause of the file this was declared in.
+	//
+	// A symbol is only a redeclaration within ONE package. When every file was
+	// `package main` that was the same thing as "within one target", and this
+	// field was unnecessary. With binaries under cmd/ and shared code under
+	// internal/, `Config` in internal/storage and `Config` in internal/identity
+	// are two different types and reporting them as a collision would refuse
+	// correct code.
+	Package string
 	// Receiver is the type a method is declared on, empty for everything else.
 	//
 	// Methods are namespaced BY that type: func (a *SQLiteStore) LoadAgents and
@@ -56,6 +65,14 @@ type Declaration struct {
 //
 // For a method that is receiver-qualified; for everything else it is the name.
 func (d Declaration) Key() string {
+	if d.Package != "" {
+		return d.Package + "." + d.qualified()
+	}
+	return d.qualified()
+}
+
+// qualified is the identifier within a package.
+func (d Declaration) qualified() string {
 	if d.Receiver != "" {
 		return d.Receiver + "." + d.Name
 	}
@@ -105,6 +122,10 @@ func goDeclarations(src string) []Declaration {
 		// none is honest; returning a partial list from a broken parse is not.
 		return nil
 	}
+	pkg := ""
+	if file.Name != nil {
+		pkg = file.Name.Name
+	}
 	var out []Declaration
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
@@ -139,6 +160,9 @@ func goDeclarations(src string) []Declaration {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	for i := range out {
+		out[i].Package = pkg
+	}
 	return out
 }
 

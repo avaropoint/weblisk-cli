@@ -855,24 +855,36 @@ var structuralChecks = []structuralCheck{
 		},
 	},
 	{
-		name: "all source files declare package main",
+		// "each binary is `package main` under cmd/ and shared code is a package
+		// under internal/".
+		//
+		// This used to demand `package main` in EVERY file, which was right while
+		// platforms/go specified one flat package per component and became wrong
+		// the moment it specified a module with cmd/ and internal/. A check that
+		// encodes a layout outlives the layout.
+		name: "binaries are package main and shared code is not",
 		applies: func(a assertion) bool {
 			return strings.Contains(a.Lower, "package main")
 		},
 		test: func(a assertion, c *CheckContext) (bool, string, []string) {
 			var bad []string
+			isMain := regexp.MustCompile(`(?m)^package\s+main\s*$`)
 			for _, f := range c.Files {
 				if !strings.HasSuffix(f.Path, ".go") {
 					continue
 				}
-				if !regexp.MustCompile(`(?m)^package\s+main\s*$`).MatchString(f.Content) {
-					bad = append(bad, f.Path)
+				underCmd := strings.HasPrefix(f.Path, "cmd/") || !strings.Contains(f.Path, "/")
+				if underCmd && !isMain.MatchString(f.Content) {
+					bad = append(bad, f.Path+" (a binary that is not package main)")
+				}
+				if strings.HasPrefix(f.Path, "internal/") && isMain.MatchString(f.Content) {
+					bad = append(bad, f.Path+" (shared code declared package main)")
 				}
 			}
 			if len(bad) == 0 {
 				return true, "", nil
 			}
-			return false, "not in package main: " + strings.Join(bad, ", "), bad
+			return false, strings.Join(bad, ", "), bad
 		},
 	},
 	{

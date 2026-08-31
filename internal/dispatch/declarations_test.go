@@ -180,7 +180,10 @@ func TestARealRedeclarationIsStillCaught(t *testing.T) {
 		"identity.go": ExtractDeclarations("identity.go", a),
 		"helpers.go":  ExtractDeclarations("helpers.go", b),
 	})
-	if _, found := dupes["writeCanonical"]; !found {
+	// Keys are package-qualified: a symbol is only a redeclaration within one
+	// package, and with cmd/ and internal/ packages the same name in two of them
+	// is two different things.
+	if _, found := dupes["main.writeCanonical"]; !found {
 		t.Errorf("a genuine redeclaration was missed: %v", dupes)
 	}
 }
@@ -193,7 +196,7 @@ func TestTheSameMethodOnTheSameTypeInTwoFilesIsCaught(t *testing.T) {
 		"a.go": ExtractDeclarations("a.go", a),
 		"b.go": ExtractDeclarations("b.go", b),
 	})
-	if _, found := dupes["S.Run"]; !found {
+	if _, found := dupes["main.S.Run"]; !found {
 		t.Errorf("the same method on the same type in two files was missed: %v", dupes)
 	}
 }
