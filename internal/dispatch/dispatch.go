@@ -78,12 +78,34 @@ func ServerInit(root, platform string) error {
 		}
 		fmt.Println()
 
+		// The plan is a complete statement of what the target consists of, not an
+		// addition to whatever is already there. A previous run that split the
+		// registry differently left routing.go beside a new registry.go, and every
+		// symbol in it was declared twice — nine correct files and one leftover,
+		// producing a build no repair could fix because no file was wrong.
+		if rec, rerr := ReconcileTarget(root, plan); rerr != nil {
+			return fmt.Errorf("reconciling %s: %w", plan.Root, rerr)
+		} else {
+			for _, f := range rec.Stale {
+				fmt.Printf("  Removed %s — written by a previous run, not in this plan\n", f)
+			}
+			if len(rec.Foreign) > 0 {
+				// Not generation's to remove, and not generation's to hide.
+				fmt.Printf("  [note] left in place, not written by generation: %s\n",
+					strings.Join(rec.Foreign, ", "))
+			}
+			if len(rec.Stale) > 0 || len(rec.Foreign) > 0 {
+				fmt.Println()
+			}
+		}
+
 		files, gerr := GenerateTarget(provider, plan, platform, graph.Map, graph.Order, platBP, root,
 			printProgress, req.Checklist)
 		if gerr != nil {
 			return gerr
 		}
 		fmt.Printf("\n  [ok] Generated %d files in %s/\n\n", len(files), plan.Root)
+		RecordWritten(root, plan, files)
 
 		// Layer 2: build, and feed failures back. Generating blind and reporting
 		// success is how eleven files that do not compile get called finished.
