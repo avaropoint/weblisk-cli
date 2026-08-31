@@ -53,14 +53,26 @@ func TestTheRealGoGraphIncludesTheTypes(t *testing.T) {
 	}
 	for _, want := range []string{
 		"platforms/go.md", "protocol/spec.md", "protocol/identity.md",
-		"architecture/orchestrator.md", "architecture/storage.md",
+		"architecture/orchestrator.md", "protocol/types.md",
 	} {
 		if _, ok := loaded[want]; !ok {
 			t.Errorf("%s is declared and was not resolved", want)
 		}
 	}
-	if len(order) < 8 {
-		t.Errorf("resolved only %d blueprints; the declared graph is larger", len(order))
+	// A STARTER hub, not the framework. architecture/orchestrator.md declares two
+	// requirements; the platform blueprint declares nine because it is the guide
+	// for every component type, and following those pulls in agent, domain,
+	// gateway and lifecycle — components nobody asked for.
+	for _, notWanted := range []string{
+		"architecture/agent.md", "architecture/domain.md",
+		"architecture/gateway.md", "architecture/lifecycle.md",
+	} {
+		if _, ok := loaded[notWanted]; ok {
+			t.Errorf("%s was resolved; it is a different component's blueprint", notWanted)
+		}
+	}
+	if len(order) > 8 {
+		t.Errorf("resolved %d blueprints; a starter orchestrator needs about five", len(order))
 	}
 }
 

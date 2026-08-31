@@ -98,8 +98,7 @@ func ServerInit(root, platform string) error {
 			files = repaired
 			if !result.OK {
 				reportChecklist(EvaluateChecklist(req.Checklist, files))
-				fmt.Printf("  [failed] the implementation does not build after %d repair rounds\n\n",
-					maxRepairRounds)
+				fmt.Printf("  [failed] the implementation does not build\n\n")
 				fmt.Println(indentBlock(result.Output, "    "))
 				return fmt.Errorf("build failed: %s", plan.Build)
 			}
@@ -826,6 +825,8 @@ func printProgress(p Progress) {
 		fmt.Println("  Resolving dependencies...")
 	case "building":
 		fmt.Printf("  Building (round %d)...\n", p.Attempt)
+	case "progress":
+		fmt.Printf("    %s\n", p.Detail)
 	case "built":
 		fmt.Println("  Build succeeded")
 	case "reused":

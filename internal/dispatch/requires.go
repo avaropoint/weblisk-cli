@@ -156,11 +156,26 @@ func ResolveDeclared(root string, roots ...string) (map[string]string, []string,
 		order = append(order, file)
 	}
 
-	// Roots first, then their declared requirements.
+	// Roots first.
 	for _, r := range roots {
 		add(r)
 	}
+	// Then requirements declared by the TARGET's blueprints only.
+	//
+	// A platform blueprint's requires list covers every component type it
+	// describes — orchestrator, agent, domain, gateway — because it is the guide
+	// for building any of them. Following it while generating a starter hub pulls
+	// in architecture/agent, architecture/domain, architecture/gateway and
+	// architecture/lifecycle: blueprints for components nobody asked for. The
+	// objective is a STARTER hub, not the whole framework.
+	//
+	// architecture/orchestrator.md requires exactly two things. That is the
+	// specification's own statement of what an orchestrator needs, and it is the
+	// one to follow.
 	for _, r := range roots {
+		if isPlatformBlueprint(r) {
+			continue
+		}
 		body, ok := loaded[blueprintFileName(r)]
 		if !ok {
 			continue
@@ -174,6 +189,12 @@ func ResolveDeclared(root string, roots ...string) (map[string]string, []string,
 	}
 	sort.Strings(missing)
 	return loaded, order, missing, nil
+}
+
+// isPlatformBlueprint reports whether a path is a platform guide, whose requires
+// list describes every component type rather than the one being built.
+func isPlatformBlueprint(path string) bool {
+	return strings.HasPrefix(path, "platforms/")
 }
 
 // GenerationRoots are the blueprints a target is generated from, before their

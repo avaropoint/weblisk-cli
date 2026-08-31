@@ -33,12 +33,19 @@ import (
 // because a wedged toolchain would otherwise hang the run with no output.
 const buildTimeout = 5 * time.Minute
 
-// maxRepairRounds bounds how many times the pipeline will feed errors back.
+// repairRoundCeiling is a runaway guard, not the exit condition.
 //
-// Three is enough for the usual causes — a missing dependency, a file returned
-// in the wrong format, a name that drifted — and few enough that a target the
-// model cannot fix fails visibly rather than looping.
-const maxRepairRounds = 3
+// The loop ends when VERIFICATION passes — the build succeeds — or when it stops
+// making progress. A fixed count was the wrong criterion: it stopped a run that
+// was still reducing errors round on round, and it kept spending calls on one
+// that had stalled. The verification checklist and the build say whether an
+// artifact is complete; a number picked in the tooling says nothing.
+//
+// This ceiling exists only so a pathological case terminates.
+const repairRoundCeiling = 12
+
+// maxRepairRounds is retained for callers that reason about the budget.
+const maxRepairRounds = repairRoundCeiling
 
 // BuildResult is the outcome of running a target's build command.
 type BuildResult struct {
@@ -203,8 +210,14 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 
 	prepare := strings.TrimSpace(plan.Prepare)
 
+	// Progress is measured, not assumed: the error count must fall. Two rounds
+	// with no reduction means the model is not converging, and further rounds
+	// spend calls to produce the same output.
+	previousErrors := -1
+	stalled := 0
+
 	var result BuildResult
-	for round := 1; round <= maxRepairRounds; round++ {
+	for round := 1; round <= repairRoundCeiling; round++ {
 		// Resolve before EVERY build, not once. A repair changes imports — adding
 		// a package, dropping one — and the lockfile then needs updating again.
 		// Running it once produced "go: updates to go.mod needed" on round two,
@@ -226,6 +239,28 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 		}
 
 		byFile := ErrorsByFileIn(result.Output, plan.Root)
+
+		// Verification-driven exit: keep going while the count is falling.
+		errorCount := 0
+		for _, errs := range byFile {
+			errorCount += len(errs)
+		}
+		if previousErrors >= 0 {
+			if errorCount >= previousErrors {
+				stalled++
+			} else {
+				stalled = 0
+			}
+		}
+		onProgress(Progress{Path: "build", Status: "progress", Attempt: round,
+			Detail: fmt.Sprintf("%d error(s) remaining", errorCount)})
+		if stalled >= 2 {
+			onProgress(Progress{Path: "build", Status: "failed", Attempt: round,
+				Detail: fmt.Sprintf("no progress over two rounds — still %d error(s)", errorCount)})
+			return result, rebuildList(content, order), nil
+		}
+		previousErrors = errorCount
+
 		targets := filesToRepair(byFile, plan)
 		if len(targets) == 0 {
 			// Nothing the plan owns was blamed — a missing dependency or a

@@ -258,3 +258,63 @@ func TestRepairRetriesAContractViolation(t *testing.T) {
 		t.Errorf("made %d calls; the rejected reply should have been retried within the round", p.calls)
 	}
 }
+
+// TestRepairStopsWhenProgressStalls — a fixed round count was the wrong exit
+// condition. It stopped runs that were still reducing errors and kept spending
+// calls on ones that had stalled. The criterion is whether verification is
+// getting closer.
+func TestRepairStopsWhenProgressStalls(t *testing.T) {
+	root := t.TempDir()
+	// Build always reports the same two errors: no progress is possible.
+	plan := &Plan{Root: ".", Build: "echo './a.go:1:1: x' >&2; echo './a.go:2:2: y' >&2; exit 1",
+		Files: []PlannedFile{{Path: "a.go", Purpose: "x"}}}
+	replies := make([]string, 40)
+	for i := range replies {
+		replies[i] = "package main\n"
+	}
+	p := &fakeProvider{responses: replies}
+	var stallDetail string
+	_, _, err := BuildAndRepair(p, plan, root, "platform",
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}},
+		func(pr Progress) {
+			if pr.Status == "failed" {
+				stallDetail = pr.Detail
+			}
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stallDetail, "no progress") {
+		t.Errorf("a stalled repair was not reported as such: %q", stallDetail)
+	}
+	// It must give up well before the runaway ceiling.
+	if p.calls > 6 {
+		t.Errorf("made %d calls on a target with no possible progress", p.calls)
+	}
+}
+
+// TestRepairKeepsGoingWhileErrorsFall — the previous fixed limit of three
+// stopped runs that were converging.
+func TestRepairKeepsGoingWhileErrorsFall(t *testing.T) {
+	root := t.TempDir()
+	counter := filepath.Join(root, "n")
+	// Each build reports one fewer error than the last, reaching zero on the 5th.
+	build := "n=$(cat " + counter + " 2>/dev/null || echo 5); " +
+		"n=$((n-1)); echo $n > " + counter + "; " +
+		"if [ $n -le 0 ]; then exit 0; fi; " +
+		"i=0; while [ $i -lt $n ]; do echo \"./a.go:$i:1: err\" >&2; i=$((i+1)); done; exit 1"
+	plan := &Plan{Root: ".", Build: build, Files: []PlannedFile{{Path: "a.go", Purpose: "x"}}}
+	replies := make([]string, 40)
+	for i := range replies {
+		replies[i] = "package main\n"
+	}
+	p := &fakeProvider{responses: replies}
+	result, _, err := BuildAndRepair(p, plan, root, "platform",
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK {
+		t.Errorf("a converging repair was abandoned before it finished: %s", result.Output)
+	}
+}
