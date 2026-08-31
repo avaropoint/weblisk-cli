@@ -253,21 +253,40 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 					otherOrder = append(otherOrder, p)
 				}
 			}
+			// Retry a contract violation, exactly as generation does. Repair
+			// previously gave up on the file after one bad response, so a reply
+			// that came back as prose cost the whole ROUND for that file — and the
+			// next round then re-read the same unrepaired errors. Three files were
+			// lost that way in one run.
 			prompt := repairPrompt(f, plan, byFile[path], byFile[""], others, otherOrder, platBP)
-			raw, err := provider.Chat([]Message{
-				{Role: "system", Content: fileSystemPrompt},
-				{Role: "user", Content: prompt},
-			})
-			if err != nil {
-				return result, rebuildList(content, order), fmt.Errorf("repairing %s: %w", path, err)
+			var accepted string
+			var lastViolation string
+			for attempt := 1; attempt <= maxFileAttempts; attempt++ {
+				ask := prompt
+				if lastViolation != "" {
+					ask = "Your previous response was rejected: " + lastViolation +
+						"\nOutput the file itself, nothing else.\n\n" + prompt
+				}
+				raw, err := provider.Chat([]Message{
+					{Role: "system", Content: fileSystemPrompt},
+					{Role: "user", Content: ask},
+				})
+				if err != nil {
+					return result, rebuildList(content, order), fmt.Errorf("repairing %s: %w", path, err)
+				}
+				candidate := stripFence(raw)
+				if v := contractViolation(candidate, f); v != "" {
+					lastViolation = v
+					continue
+				}
+				accepted = candidate
+				break
 			}
-			candidate := stripFence(raw)
-			if v := contractViolation(candidate, f); v != "" {
-				// Leave the old content; the next round sees the same errors.
-				onProgress(Progress{Path: path, Status: "failed", Attempt: round, Detail: v})
+			if accepted == "" {
+				onProgress(Progress{Path: path, Status: "failed", Attempt: round, Detail: lastViolation})
 				continue
 			}
-			content[path] = candidate
+			content[path] = accepted
 		}
 
 		if err := writeContent(dir, content, order); err != nil {

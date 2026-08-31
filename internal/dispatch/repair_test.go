@@ -227,3 +227,34 @@ func TestAFailingPrepareStopsImmediately(t *testing.T) {
 		t.Errorf("made %d model calls for an unrepairable failure", p.calls)
 	}
 }
+
+// TestRepairRetriesAContractViolation — repair used to give up on a file after
+// one bad response, so a reply that came back as prose cost the whole round and
+// the next round re-read the same unrepaired errors. Three files were lost that
+// way in one run.
+func TestRepairRetriesAContractViolation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	broken := "package main\n\nfunc main() { undefinedCall() }\n"
+	fixed := "package main\n\nfunc main() {}\n"
+	// First reply is prose, second is the file.
+	p := &fakeProvider{responses: []string{
+		"I'll rewrite the file and verify it compiles first.",
+		fixed,
+	}}
+	plan := &Plan{Root: ".", Build: "go build ./...",
+		Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
+	result, _, err := BuildAndRepair(p, plan, root, "platform",
+		[]GeneratedFile{{Path: "main.go", Content: broken}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK {
+		t.Errorf("the build did not recover after a prose reply: %s", result.Output)
+	}
+	if p.calls != 2 {
+		t.Errorf("made %d calls; the rejected reply should have been retried within the round", p.calls)
+	}
+}

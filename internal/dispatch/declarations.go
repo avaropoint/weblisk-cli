@@ -118,7 +118,7 @@ func goDeclarations(src string) []Declaration {
 				case *ast.TypeSpec:
 					out = append(out, Declaration{
 						Name:      s.Name.Name,
-						Signature: fmt.Sprintf("type %s %s", s.Name.Name, exprString(s.Type)),
+						Signature: fmt.Sprintf("type %s %s", s.Name.Name, typeDetail(s.Type)),
 					})
 				case *ast.ValueSpec:
 					kind := "var"
@@ -203,6 +203,67 @@ func fieldListString(fl *ast.FieldList, withNames bool) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// typeDetail renders a type with enough of its shape for another FILE to use it.
+//
+// # Why this is not exprString
+//
+// exprString collapses a struct to the word "struct", which was a deliberate
+// choice and the wrong one. A run left fifty build errors concentrated in one
+// file, six of them "target.Name undefined (type AgentEntry has no field or
+// method Name)" — because the file was told AgentEntry existed and never told
+// what was in it, so it guessed.
+//
+// Reaching into another file's struct is among the most common cross-file
+// errors there is, and the information that prevents it was being discarded to
+// save prompt space. Fields are cheap; a wrong guess costs a repair round.
+//
+// Interfaces get their method set for the same reason. Everything else stays
+// compact — a caller needs a map's key and value types, not a recursive
+// expansion of them.
+func typeDetail(e ast.Expr) string {
+	switch t := e.(type) {
+	case *ast.StructType:
+		if t.Fields == nil || len(t.Fields.List) == 0 {
+			return "struct{}"
+		}
+		parts := make([]string, 0, len(t.Fields.List))
+		for _, f := range t.Fields.List {
+			ft := exprString(f.Type)
+			if len(f.Names) == 0 {
+				parts = append(parts, ft) // embedded
+				continue
+			}
+			names := make([]string, 0, len(f.Names))
+			for _, n := range f.Names {
+				names = append(names, n.Name)
+			}
+			parts = append(parts, strings.Join(names, ", ")+" "+ft)
+		}
+		return "struct{ " + strings.Join(parts, "; ") + " }"
+	case *ast.InterfaceType:
+		if t.Methods == nil || len(t.Methods.List) == 0 {
+			return "interface{}"
+		}
+		parts := make([]string, 0, len(t.Methods.List))
+		for _, m := range t.Methods.List {
+			if len(m.Names) == 0 {
+				parts = append(parts, exprString(m.Type))
+				continue
+			}
+			sig := ""
+			if fn, ok := m.Type.(*ast.FuncType); ok {
+				sig = "(" + fieldListString(fn.Params, true) + ")"
+				if fn.Results != nil && len(fn.Results.List) > 0 {
+					sig += " (" + fieldListString(fn.Results, false) + ")"
+				}
+			}
+			parts = append(parts, m.Names[0].Name+sig)
+		}
+		return "interface{ " + strings.Join(parts, "; ") + " }"
+	}
+	return exprString(e)
 }
 
 // exprString renders a type expression compactly. Composite types collapse to

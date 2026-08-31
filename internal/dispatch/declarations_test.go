@@ -190,3 +190,66 @@ func TestTheSameMethodOnTheSameTypeInTwoFilesIsCaught(t *testing.T) {
 		t.Errorf("the same method on the same type in two files was missed: %v", dupes)
 	}
 }
+
+// TestStructFieldsReachOtherFiles is the fifty-error run: channel.go used
+// target.Name six times against an AgentEntry that has no Name field, because it
+// was told the type existed and never what was in it.
+func TestStructFieldsReachOtherFiles(t *testing.T) {
+	src := `package main
+
+import "time"
+
+type AgentEntry struct {
+	AgentID   string
+	URL       string
+	PublicKey string
+	LastSeen  time.Time
+}
+
+type ChannelEntry struct {
+	ChannelID string
+	TTL       int
+}
+`
+	decls := ExtractDeclarations("registry.go", src)
+	byName := map[string]string{}
+	for _, d := range decls {
+		byName[d.Name] = d.Signature
+	}
+	for _, field := range []string{"AgentID", "URL", "PublicKey", "LastSeen"} {
+		if !strings.Contains(byName["AgentEntry"], field) {
+			t.Errorf("field %s is not visible to other files: %q", field, byName["AgentEntry"])
+		}
+	}
+	// And the absence is visible too — which is what stops a guess at .Name.
+	if strings.Contains(byName["AgentEntry"], "Name") {
+		t.Errorf("a field that does not exist appeared: %q", byName["AgentEntry"])
+	}
+	if !strings.Contains(byName["ChannelEntry"], "ChannelID") {
+		t.Errorf("ChannelEntry fields missing: %q", byName["ChannelEntry"])
+	}
+}
+
+func TestInterfaceMethodsAreVisible(t *testing.T) {
+	src := "package main\n\ntype Store interface {\n\tLoad(id string) error\n\tSave(id string) error\n}\n"
+	decls := ExtractDeclarations("store.go", src)
+	sig := ""
+	for _, d := range decls {
+		if d.Name == "Store" {
+			sig = d.Signature
+		}
+	}
+	if !strings.Contains(sig, "Load") || !strings.Contains(sig, "Save") {
+		t.Errorf("interface method set not visible: %q", sig)
+	}
+}
+
+func TestNestedTypesStayCompact(t *testing.T) {
+	// A caller needs a map's key and value types, not a recursive expansion.
+	src := "package main\n\ntype Registry struct {\n\tagents map[string]*AgentEntry\n}\n"
+	decls := ExtractDeclarations("r.go", src)
+	sig := decls[0].Signature
+	if !strings.Contains(sig, "map[string]*AgentEntry") {
+		t.Errorf("field type lost: %q", sig)
+	}
+}
