@@ -67,10 +67,20 @@ func ServerInit(root, platform string) error {
 		}
 		fmt.Println()
 
-		bpMap, bpOrder, bperr := LoadBlueprintMap(root, BlueprintSets["orchestrator"]...)
+		// Everything the blueprints declare, sent whole. A hardcoded list of three
+		// omitted protocol/types.md — fifty-five type definitions with their field
+		// tables — and the model then invented fields and used them.
+		bpMap, bpOrder, bpMissing, bperr := ResolveDeclared(root, GenerationRoots("orchestrator", platform)...)
 		if bperr != nil {
 			return bperr
 		}
+		if len(bpMissing) > 0 {
+			// Stated, never silent. A declared requirement this installation does
+			// not carry is a gap in what the model was given, and the output should
+			// be read knowing that.
+			fmt.Printf("  [warn] declared requirements not found: %s\n", strings.Join(bpMissing, ", "))
+		}
+		fmt.Printf("  Blueprints: %d, as declared by requires:\n\n", len(bpOrder))
 		files, gerr := GenerateTarget(provider, plan, platform, bpMap, bpOrder, platBP, root,
 			printProgress, req.Checklist)
 		if gerr != nil {

@@ -22,7 +22,10 @@ package dispatch
 // The default is INCLUSION. A file whose purpose matches nothing gets everything,
 // because sending too much costs time and sending too little costs correctness.
 
-import "strings"
+import (
+	"os"
+	"strings"
+)
 
 // blueprintRelevance maps a blueprint to the words that mean a file needs it.
 //
@@ -56,7 +59,31 @@ var alwaysSend = map[string]bool{}
 // A file that serves endpoints always gets the protocol; a file that declares
 // nothing and serves nothing — a module manifest, a config — gets only the
 // platform blueprint.
+// filteringEnabled gates the keyword filter. OFF by default.
+//
+// # Why it is off
+//
+// The filter withheld blueprints from a file when its plan entry matched no
+// keyword in a table written here. That is the tooling deciding what a
+// specification means, which is a claim to know better than the specification —
+// and every compression of the spec in this pipeline has produced a defect:
+// four types named where fifty-five existed, structs collapsed to the word
+// "struct", and three blueprints loaded where nine were declared.
+//
+// It saved real time. So did collapsing struct fields. Correctness first, and
+// the cache is what makes the cost bearable: unchanged blueprints are paid for
+// once.
+//
+// Set WL_AI_FILTER_BLUEPRINTS=1 to re-enable, and expect to measure the effect
+// on build errors rather than assume it.
+func filteringEnabled() bool {
+	return os.Getenv("WL_AI_FILTER_BLUEPRINTS") == "1"
+}
+
 func relevantBlueprints(f PlannedFile, loaded map[string]string) map[string]string {
+	if !filteringEnabled() {
+		return loaded
+	}
 	haystack := strings.ToLower(f.Purpose + " " + f.Path + " " +
 		strings.Join(f.Declares, " ") + " " + strings.Join(f.Serves, " "))
 
