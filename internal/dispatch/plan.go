@@ -13,6 +13,7 @@ package dispatch
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -103,7 +104,8 @@ func ParsePlan(raw string) (*Plan, error) {
 func ValidatePlan(p *Plan, req *Requirements) []string {
 	var gaps []string
 
-	declaredBy := map[string][]string{}
+	declaredBy := map[string][]string{} // package-qualified — collisions
+	placedAt := map[string][]string{}   // bare name — placement
 	servedBy := map[string][]string{}
 	paths := map[string]bool{}
 	for _, f := range p.Files {
@@ -122,7 +124,20 @@ func ValidatePlan(p *Plan, req *Requirements) []string {
 			gaps = append(gaps, fmt.Sprintf("%q has no purpose", f.Path))
 		}
 		for _, d := range f.Declares {
-			declaredBy[d] = append(declaredBy[d], f.Path)
+			// Two indexes, because two questions are being asked.
+			//
+			// "Is this type placed anywhere?" is answered by the bare name: a
+			// required type satisfies the requirement wherever it lives.
+			//
+			// "Is this symbol declared twice?" is answered package-qualified. A
+			// symbol collides only within ONE package, and platforms/go now
+			// specifies a module with cmd/ and internal/ packages — so
+			// observability.NewRegistry and orchestrator.NewRegistry are different
+			// symbols, and a plan naming both was rejected as incoherent when it
+			// was correct.
+			placedAt[d] = append(placedAt[d], f.Path)
+			key := planPackage(f.Path) + "." + d
+			declaredBy[key] = append(declaredBy[key], f.Path)
 		}
 		for _, e := range f.Serves {
 			servedBy[strings.Join(strings.Fields(e), " ")] = append(servedBy[e], f.Path)
@@ -132,7 +147,7 @@ func ValidatePlan(p *Plan, req *Requirements) []string {
 	// Every required type is placed somewhere.
 	var missingTypes []string
 	for _, t := range req.Types {
-		if len(declaredBy[t]) == 0 {
+		if len(placedAt[t]) == 0 {
 			missingTypes = append(missingTypes, t)
 		}
 	}
@@ -299,4 +314,18 @@ func MakePlan(provider Provider, req *Requirements, target, platform, specs, pla
 	}
 	return nil, fmt.Errorf("no valid plan after %d attempts; last gaps: %s",
 		maxFileAttempts, strings.Join(lastGaps, "; "))
+}
+
+// planPackage is the package a planned file will belong to, from its directory.
+//
+// At plan time the code does not exist, so the directory is the only signal —
+// and it is a good one: Go's convention is that a package's name matches the
+// directory holding it, and the plan's own paths are what generation will write.
+// A file at the plan root belongs to the root package, whatever it is called.
+func planPackage(path string) string {
+	dir := filepath.Dir(filepath.Clean(path))
+	if dir == "." || dir == string(filepath.Separator) {
+		return ""
+	}
+	return filepath.Base(dir)
 }
