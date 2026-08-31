@@ -294,3 +294,40 @@ func TestTheKnownBindingGapsStillExist(t *testing.T) {
 		}
 	}
 }
+
+func TestPlatformBlueprintsNameNoSpecificComponent(t *testing.T) {
+	// A platform blueprint says how a binary for this runtime is laid out and
+	// built. Which agents and domain controllers exist is chosen by adopting
+	// their blueprints — so an example agent in a platform document is a
+	// component nobody asked for, presented as though it were part of the
+	// platform.
+	//
+	// All four carried one: agents/seo, weblisk-agent-seo, seo-analyzer,
+	// domains/seo, in structure listings, build commands and test fixtures.
+	// Generation reads these documents whole, so a named component is an
+	// invitation to build it.
+	entries, err := os.ReadDir(filepath.Join(blueprintsRoot, "platforms"))
+	if err != nil {
+		t.Skip("blueprints not present")
+	}
+	// Names that would be a specific component rather than a placeholder.
+	suspicious := regexp.MustCompile(`(?i)\b(seo|analyzer|crawler|scraper|summari[sz]er|translator|classifier)\b`)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || e.Name() == "README.md" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(blueprintsRoot, "platforms", e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Prose and fenced examples alike: a build command in a fence is exactly
+		// where these lived.
+		for i, line := range strings.Split(string(b), "\n") {
+			if m := suspicious.FindString(line); m != "" {
+				t.Errorf("platforms/%s:%d names the component %q — a platform blueprint "+
+					"describes the runtime, not which components a deployment has\n    %s",
+					e.Name(), i+1, m, strings.TrimSpace(line))
+			}
+		}
+	}
+}
