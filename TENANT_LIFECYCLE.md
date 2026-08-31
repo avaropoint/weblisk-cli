@@ -166,7 +166,7 @@ That is not a lowering of the bar. It is the bar that can be *verified* —
 `architecture/testing.md` L1-01 through L3 either pass or they do not, and no
 amount of stylistic difference changes that answer.
 
-Four things make it hold. Only the first exists today.
+Four things make it hold. Three of them exist now.
 
 ### 1. The blueprint is the template
 
@@ -176,38 +176,75 @@ here, and it is why file templates were the wrong instinct: a copied file fixes
 the text and says nothing about behaviour, while a blueprint fixes the behaviour
 and leaves the text free.
 
-### 2. The output contract must be enforced, not requested
+### 2. The output contract is enforced, not requested — done
 
-Today the generator is ASKED, in prose, to prefix each file with
-`// filename: <path>`, and a regex the model never sees decides whether it
+The generator used to ASK, in prose, for each file to be prefixed with
+`// filename: <path>`, and a regex the model never saw decided whether it
 complied. A convention in a paragraph is honoured differently by different
 models, which is precisely the non-determinism this section exists to remove.
 
-The contract must be machine-checkable and retried on violation, rather than
-discovered as "AI returned no code files" after several minutes.
+Generation now asks for exactly one file per call, and a rejected response is
+retried with the reason. The failure mode it replaced — "AI returned no code
+files", discovered after several minutes — cannot recur, because no single
+response carries the whole hub.
 
-### 3. Generation is per-file, driven by a declared manifest
+### 3. Generation is per-file, from a plan validated against the blueprints — done
 
-One call asking for a whole orchestrator has no checkpoint, no progress, and no
-attributable failure — and it failed twice here, once by timeout and once by
+One call asking for a whole orchestrator has no checkpoint, no progress and no
+attributable failure, and it failed twice here: once by timeout, once by
 returning nothing usable.
 
-The blueprint should declare WHICH files must exist. Then generation is a loop
-over that manifest, one file per call. Four consequences, all of them the ones we
-need:
+The first design for the fix was a **declared manifest**: the blueprint naming
+which files must exist. It was built, and then removed, because it was the wrong
+instinct in the same way file templates were. A manifest listing four types where
+`protocol/types.md` defines fifty-five does not constrain generation — it
+*narrows* it, and the narrowing is invisible, because the pipeline reports
+success against the manifest it was given rather than against the specification.
+A tooling artifact had quietly become the contract.
 
-- The file set stops being the AI's choice and becomes the blueprint's
-- Failure is attributable to a file rather than to "the hub"
-- Progress is real, which is what the GUI needs anyway
-- A failed file is retried without regenerating the other nineteen
+What is there instead:
 
-### 4. Structure is checked before behaviour
+- The **model plans** the file set, and states for each file what it will declare
+  and which endpoints it will serve
+- The plan is **validated against requirements extracted from the blueprints** —
+  every type, every endpoint, every checklist assertion must be claimed by some
+  file before a line is generated
+- The plan is **cached on those requirements**, so unchanged blueprints produce
+  the same file set run after run. This is what makes per-file caching work at
+  all: a model that plans ten files where it planned twelve invalidates every
+  file's cache entry
+- The file set is therefore neither the tooling's choice nor an unconstrained
+  model's — it is whatever satisfies the specification
 
-With a declared manifest, output is verifiable before anything runs: are all the
-required files present, do they compile, does each expose what the blueprint said
-it would. Only then is the conformance suite worth running. A structural failure
-diagnosed in seconds beats the same failure diagnosed as a conformance error
-minutes later.
+The other three consequences hold as before: failure is attributable to a file,
+progress is real, and a failed file is retried alone.
+
+### 4. Structure is checked before behaviour — done
+
+Four layers, in cost order, each one authoritative over the one before:
+
+| Layer | Checks | Authority |
+|---|---|---|
+| 1 | the response is the file, and declares what the plan said | a pre-filter only |
+| 2 | it compiles | the compiler is the authority |
+| 3 | the blueprints' Verification Checklists | drives the loop |
+| 4 | conformance L1–L3 | not built yet |
+
+Layer 3 is the one that changes what "done" means. It reports four outcomes —
+`verified`, `failed`, `necessary`, `unchecked` — and the loop continues while
+anything is `failed`. Before that, the loop stopped when the compiler was happy
+and printed the checklist afterwards, which meant a hub could violate the
+blueprints it was generated from and still report success.
+
+`necessary` exists because the interesting assertions are only partly checkable.
+"POST /v1/register enforces exclusive namespace ownership (409 on conflict)"
+holds a structural claim a parser settles and a behavioural claim it cannot.
+Calling that a pass would be a confident wrong answer; calling it unchecked would
+throw away a cheap detection of a definite fault.
+
+Layer 4 is the gap. Until the conformance suite exists, behavioural assertions —
+"all stores survive process restart", "retries with exponential backoff" — are
+reported as unchecked, and they are the majority.
 
 ### The resulting claim
 
@@ -219,10 +256,13 @@ wrote it and it seemed fine" is not.
 
 ## Open questions
 
-1. **Generation or hand-written skeleton?** `weblisk server init` failed twice —
-   once on timeout, once returning nothing parseable. The seven-endpoint hub is
-   small enough to write by hand, and a working reference makes generation more
-   likely to succeed afterwards because there is something to diff against.
+1. **Generation or hand-written skeleton?** Settled in favour of generation. The
+   two early failures were both tooling faults, not evidence against the
+   approach: one call for the whole hub with a prose output convention. Per-file
+   generation from a validated plan reaches a build reliably. The hand-written
+   reference is no longer the shorter path, and it would have to be maintained
+   against the blueprints by hand — which is the coupling this project exists to
+   remove.
 2. **Where does Studio put a tenant?** `weblisk new` creates in the working
    directory. Studio has no working directory, so a parent path is an explicit
    input on the form and cannot be inherited.
