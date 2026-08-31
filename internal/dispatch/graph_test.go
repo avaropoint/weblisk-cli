@@ -270,3 +270,100 @@ func TestProseBeforeThePackageClauseIsNotGoSource(t *testing.T) {
 		}
 	}
 }
+
+func TestAnotherComponentsAssertionsAreExcludedAndReported(t *testing.T) {
+	// protocol/spec.md describes both ends of the conversation. Its checklist
+	// contains "Agent responds to POST /v1/describe", which an orchestrator does
+	// not and must not serve. Handing those to an orchestrator's checklist makes
+	// the route check report ten failures that are correct behaviour, and the
+	// conformance loop then repairs toward implementing an agent.
+	spec := `<!--
+requires: []
+-->
+# Protocol
+### Orchestrator Endpoints
+#### POST /v1/register
+## Verification Checklist
+
+- [ ] An ungrouped assertion applies to everything
+
+### Agent Protocol
+- [ ] Agent responds to ` + "`POST /v1/describe`" + ` with a valid manifest
+- [ ] Agent accepts ` + "`POST /v1/event`" + ` and dispatches to handlers
+
+### Orchestrator Protocol
+- [ ] Orchestrator ` + "`POST /v1/register`" + ` validates namespace ownership
+
+### Event Publishing
+- [ ] Framework retries failed deliveries with exponential backoff
+`
+	items := ExtractChecklist("protocol/spec.md", spec)
+	if len(items) != 5 {
+		t.Fatalf("extracted %d assertions, want 5", len(items))
+	}
+	// The group travels with the assertion. Only an item BEFORE the first
+	// heading is ungrouped — one after a blank line is still inside its section,
+	// which is what markdown means and what a reader would assume.
+	if items[0].Group != "" {
+		t.Errorf("an assertion before any heading carries group %q", items[0].Group)
+	}
+	if items[1].Group != "Agent Protocol" {
+		t.Errorf("group = %q, want Agent Protocol", items[1].Group)
+	}
+
+	mine, others := ScopeChecklist(items, "orchestrator")
+	if len(others) != 2 {
+		t.Fatalf("excluded %d, want the 2 agent assertions: %+v", len(others), others)
+	}
+	if len(mine) != 3 {
+		t.Fatalf("kept %d, want 3 — orchestrator, event publishing, ungrouped", len(mine))
+	}
+	// A shared group is NOT another component's: the orchestrator publishes
+	// system.* events, so "Framework retries..." is its obligation too.
+	var kept []string
+	for _, m := range mine {
+		kept = append(kept, m.Group)
+	}
+	if !containsString(kept, "Event Publishing") || !containsString(kept, "") {
+		t.Errorf("a shared group was excluded: kept groups %v", kept)
+	}
+
+	// Excluded, never silent.
+	if s := ExcludedSummary(others); !strings.Contains(s, "agent") || !strings.Contains(s, "2") {
+		t.Errorf("exclusions are not reported with a count and an owner: %q", s)
+	}
+
+	// And from the other side: generating an agent keeps them.
+	agentMine, agentOthers := ScopeChecklist(items, "agent")
+	if len(agentOthers) != 1 || len(agentMine) != 4 {
+		t.Errorf("for an agent: kept %d, excluded %d; want 4 and 1", len(agentMine), len(agentOthers))
+	}
+}
+
+func TestTheRealSpecScopesToTheOrchestrator(t *testing.T) {
+	// Against the actual blueprints, not a fixture agreeing with me.
+	root := "/Users/lwilson/Projects/Avaropoint/weblisk-blueprints"
+	if _, err := os.Stat(root); err != nil {
+		t.Skip("blueprints not present")
+	}
+	spec, err := os.ReadFile(filepath.Join(root, "protocol/spec.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := ExtractChecklist("protocol/spec.md", string(spec))
+	mine, others := ScopeChecklist(items, "orchestrator")
+	if len(others) == 0 {
+		t.Fatal("no agent assertions excluded from an orchestrator's checklist")
+	}
+	for _, it := range mine {
+		if strings.HasPrefix(it.Text, "Agent ") {
+			t.Errorf("an agent assertion survived scoping: %q (group %q)", it.Text, it.Group)
+		}
+	}
+	// Every excluded one must be attributable, or the report is a bare number.
+	for _, it := range others {
+		if groupComponent(it.Group) == "" {
+			t.Errorf("excluded assertion has no owning component: %q", it.Text)
+		}
+	}
+}

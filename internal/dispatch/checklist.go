@@ -30,11 +30,24 @@ import (
 type ChecklistItem struct {
 	Source string // blueprint it came from
 	Text   string
+	// Group is the `###` subheading the assertion sits under, empty when
+	// ungrouped. It is how a blueprint says which component an assertion is
+	// addressed to — see ScopeChecklist.
+	Group string
 }
 
 var reChecklistItem = regexp.MustCompile(`(?m)^-\s*\[\s*\]\s*(.+?)\s*$`)
 
-// ExtractChecklist reads the Verification Checklist of one blueprint.
+var reChecklistGroup = regexp.MustCompile(`(?m)^###\s+(.+?)\s*$`)
+
+// ExtractChecklist reads the Verification Checklist of one blueprint, recording
+// the `###` group each assertion sits under.
+//
+// The group is not decoration. A protocol blueprint describes both ends of a
+// conversation, so protocol/spec.md's checklist holds assertions no single
+// implementation can satisfy — an orchestrator does not serve POST /v1/describe.
+// The heading is the blueprint's own statement of which component an assertion is
+// addressed to, which is why it is read rather than inferred from wording.
 func ExtractChecklist(source, blueprint string) []ChecklistItem {
 	i := strings.Index(blueprint, "## Verification Checklist")
 	if i < 0 {
@@ -44,13 +57,81 @@ func ExtractChecklist(source, blueprint string) []ChecklistItem {
 	if end := strings.Index(rest, "\n## "); end >= 0 {
 		rest = rest[:end]
 	}
+
+	// Walk lines so a group heading applies to the assertions that follow it.
+	group := ""
 	var out []ChecklistItem
-	for _, m := range reChecklistItem.FindAllStringSubmatch(rest, -1) {
-		if t := strings.TrimSpace(m[1]); t != "" {
-			out = append(out, ChecklistItem{Source: source, Text: t})
+	for _, line := range strings.Split(rest, "\n") {
+		if m := reChecklistGroup.FindStringSubmatch(line); m != nil {
+			group = strings.TrimSpace(m[1])
+			continue
+		}
+		if m := reChecklistItem.FindStringSubmatch(line); m != nil {
+			if t := strings.TrimSpace(m[1]); t != "" {
+				out = append(out, ChecklistItem{Source: source, Text: t, Group: group})
+			}
 		}
 	}
 	return out
+}
+
+// componentGroups are the component names a checklist group may be addressed to.
+//
+// A closed list, from schemas/common.md. Anything else — "Event Publishing",
+// "Cross-Cutting" — addresses every implementation.
+var componentGroups = []string{"agent", "orchestrator", "domain", "gateway"}
+
+// ScopeChecklist splits assertions into this target's obligations and another
+// component's.
+//
+// Excluded assertions are RETURNED, not dropped. An assertion left out silently
+// is indistinguishable from one that was never written, and quietly narrowing a
+// specification is how a pipeline comes to report success against a contract
+// nobody agreed to.
+func ScopeChecklist(items []ChecklistItem, target string) (mine, others []ChecklistItem) {
+	target = strings.ToLower(strings.TrimSpace(target))
+	for _, it := range items {
+		owner := groupComponent(it.Group)
+		if owner == "" || owner == target {
+			mine = append(mine, it)
+			continue
+		}
+		others = append(others, it)
+	}
+	return mine, others
+}
+
+// groupComponent returns the component a group heading is addressed to, or "".
+func groupComponent(group string) string {
+	lower := strings.ToLower(strings.TrimSpace(group))
+	for _, c := range componentGroups {
+		if lower == c || strings.HasPrefix(lower, c+" ") {
+			return c
+		}
+	}
+	return ""
+}
+
+// ExcludedSummary describes assertions another component owns, for reporting.
+func ExcludedSummary(others []ChecklistItem) string {
+	if len(others) == 0 {
+		return ""
+	}
+	byOwner := map[string]int{}
+	var order []string
+	for _, it := range others {
+		owner := groupComponent(it.Group)
+		if _, seen := byOwner[owner]; !seen {
+			order = append(order, owner)
+		}
+		byOwner[owner]++
+	}
+	sort.Strings(order)
+	parts := make([]string, 0, len(order))
+	for _, owner := range order {
+		parts = append(parts, itoa(byOwner[owner])+" for the "+owner)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // FormatChecklist renders assertions as acceptance criteria for a prompt.

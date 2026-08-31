@@ -31,7 +31,12 @@ import (
 type Requirements struct {
 	Types     []string        // from protocol/types.md
 	Endpoints []string        // from protocol/spec.md, for this target
-	Checklist []ChecklistItem // from every blueprint being read
+	Checklist []ChecklistItem // from every blueprint being read, scoped to this target
+	// Excluded are assertions a blueprint addresses to a DIFFERENT component.
+	//
+	// Kept rather than dropped so they can be reported. An assertion left out
+	// silently is indistinguishable from one that was never written.
+	Excluded []ChecklistItem
 }
 
 var (
@@ -104,10 +109,14 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 		req.Endpoints = ExtractEndpoints(spec, section)
 	}
 
-	// Every blueprint in the graph, in the graph's order.
+	// Every blueprint in the graph, in the graph's order — then scoped to this
+	// target, because a protocol blueprint's checklist covers both ends of the
+	// conversation and an orchestrator does not serve POST /v1/describe.
+	var all []ChecklistItem
 	for _, name := range g.Order {
-		req.Checklist = append(req.Checklist, ExtractChecklist(name, g.Map[name])...)
+		all = append(all, ExtractChecklist(name, g.Map[name])...)
 	}
+	req.Checklist, req.Excluded = ScopeChecklist(all, target)
 	return req
 }
 
@@ -122,6 +131,9 @@ func (r *Requirements) Summary() string {
 	}
 	if n := len(r.Checklist); n > 0 {
 		parts = append(parts, plural(n, "checklist assertion"))
+	}
+	if n := len(r.Excluded); n > 0 {
+		parts = append(parts, itoa(n)+" excluded ("+ExcludedSummary(r.Excluded)+")")
 	}
 	return strings.Join(parts, ", ")
 }
