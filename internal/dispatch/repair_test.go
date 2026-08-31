@@ -133,3 +133,44 @@ func TestAnEmptyBuildCommandIsNotRun(t *testing.T) {
 		t.Error("an absent build command was treated as a failure")
 	}
 }
+
+// TestTheBuildRunsFromTheProjectRoot reproduces a run that generated all twelve
+// files and then failed on "cd: server: No such file or directory". Build
+// commands come from a platform blueprint's Build and Run section and are
+// written from the project root, not from inside the target.
+func TestTheBuildRunsFromTheProjectRoot(t *testing.T) {
+	root := t.TempDir()
+	srv := filepath.Join(root, "server")
+	if err := os.MkdirAll(srv, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srv, "go.mod"), []byte("module x\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := &Plan{Root: "server", Build: "cd server && go build ./...",
+		Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
+	p := &fakeProvider{}
+	result, _, err := BuildAndRepair(p, plan, root, "platform",
+		[]GeneratedFile{{Path: "main.go", Content: "package main\n\nfunc main() {}\n"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK {
+		t.Errorf("a root-relative build command failed: %s", result.Output)
+	}
+}
+
+// TestCompilerPathsAreMatchedToPlanPaths — the build reports "server/main.go"
+// and the plan says "main.go". A mismatch means the repair loop finds nothing to
+// repair and gives up without saying why.
+func TestCompilerPathsAreMatchedToPlanPaths(t *testing.T) {
+	byFile := ErrorsByFileIn("./server/main.go:3:5: undefined: x", "server")
+	if len(byFile["main.go"]) != 1 {
+		t.Errorf("path not normalised to the plan root: %v", byFile)
+	}
+	// And a target rooted at "." must be left alone.
+	flat := ErrorsByFileIn("./main.go:3:5: undefined: x", ".")
+	if len(flat["main.go"]) != 1 {
+		t.Errorf("a flat target was mangled: %v", flat)
+	}
+}

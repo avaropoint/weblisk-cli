@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -46,8 +47,13 @@ type BuildResult struct {
 	Command string
 }
 
-// RunBuild executes the plan's build command in the target directory.
-func RunBuild(dir, command string) BuildResult {
+// RunBuild executes the plan's build command.
+//
+// runDir is the PROJECT ROOT, not the target directory. Build commands come from
+// a platform blueprint's Build and Run section and are written from the root —
+// "cd server && go build -o orchestrator ." — so running them inside the target
+// looks for server/server and fails on a cd before the compiler is ever invoked.
+func RunBuild(runDir, command string) BuildResult {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return BuildResult{OK: true, Command: ""}
@@ -55,7 +61,7 @@ func RunBuild(dir, command string) BuildResult {
 	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	cmd.Dir = dir
+	cmd.Dir = runDir
 	out, err := cmd.CombinedOutput()
 	return BuildResult{OK: err == nil, Output: string(out), Command: command}
 }
@@ -69,6 +75,20 @@ var reBuildError = regexp.MustCompile(`(?m)^\.?/?([\w./-]+\.\w+):(\d+):(?:(\d+):
 // Errors naming no file — a missing module, a linker failure — are returned
 // under the empty key, because they still have to reach somebody.
 func ErrorsByFile(output string) map[string][]string {
+	return errorsByFile(output, "")
+}
+
+// ErrorsByFileIn is ErrorsByFile with the target root stripped from each path,
+// so "server/main.go:12" matches the plan's "main.go".
+//
+// Necessary because the build runs from the project root while the plan names
+// files relative to its own root, and a mismatch means the repair loop finds
+// nothing to repair and silently gives up.
+func ErrorsByFileIn(output, targetRoot string) map[string][]string {
+	return errorsByFile(output, targetRoot)
+}
+
+func errorsByFile(output, targetRoot string) map[string][]string {
 	byFile := map[string][]string{}
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
@@ -76,7 +96,11 @@ func ErrorsByFile(output string) map[string][]string {
 			continue
 		}
 		if m := reBuildError.FindStringSubmatch(line); m != nil {
-			byFile[m[1]] = append(byFile[m[1]], line)
+			path := m[1]
+			if targetRoot != "" && targetRoot != "." {
+				path = strings.TrimPrefix(path, targetRoot+"/")
+			}
+			byFile[path] = append(byFile[path], line)
 			continue
 		}
 		byFile[""] = append(byFile[""], line)
@@ -145,8 +169,13 @@ func repairPrompt(f PlannedFile, plan *Plan, errs, general []string,
 // compiler blamed — with the errors — until it builds or the rounds run out.
 //
 // Returns the final build result and the files as they stand.
-func BuildAndRepair(provider Provider, plan *Plan, dir, platBP string, files []GeneratedFile,
+// BuildAndRepair builds the target and, on failure, regenerates the files the
+// compiler blamed.
+//
+// root is where the build command runs; the files live at root/plan.Root.
+func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []GeneratedFile,
 	onProgress ProgressFunc) (BuildResult, []GeneratedFile, error) {
+	dir := filepath.Join(root, plan.Root)
 	if onProgress == nil {
 		onProgress = func(Progress) {}
 	}
@@ -172,13 +201,13 @@ func BuildAndRepair(provider Provider, plan *Plan, dir, platBP string, files []G
 	var result BuildResult
 	for round := 1; round <= maxRepairRounds; round++ {
 		onProgress(Progress{Path: "build", Status: "building", Attempt: round})
-		result = RunBuild(dir, plan.Build)
+		result = RunBuild(root, plan.Build)
 		if result.OK {
 			onProgress(Progress{Path: "build", Status: "built", Attempt: round})
 			return result, rebuildList(content, order), nil
 		}
 
-		byFile := ErrorsByFile(result.Output)
+		byFile := ErrorsByFileIn(result.Output, plan.Root)
 		targets := filesToRepair(byFile, plan)
 		if len(targets) == 0 {
 			// Nothing the plan owns was blamed — a missing dependency or a
@@ -228,7 +257,7 @@ func BuildAndRepair(provider Provider, plan *Plan, dir, platBP string, files []G
 		}
 	}
 
-	result = RunBuild(dir, plan.Build)
+	result = RunBuild(root, plan.Build)
 	return result, rebuildList(content, order), nil
 }
 

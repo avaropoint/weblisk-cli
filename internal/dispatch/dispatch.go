@@ -69,8 +69,7 @@ func ServerInit(root, platform string) error {
 		// Layer 2: build, and feed failures back. Generating blind and reporting
 		// success is how eleven files that do not compile get called finished.
 		if plan.Build != "" {
-			dir := filepath.Join(root, plan.Root)
-			result, repaired, rerr := BuildAndRepair(provider, plan, dir, platBP, files, printProgress)
+			result, repaired, rerr := BuildAndRepair(provider, plan, root, platBP, files, printProgress)
 			if rerr != nil {
 				return rerr
 			}
