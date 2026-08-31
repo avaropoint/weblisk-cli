@@ -137,7 +137,10 @@ func filesToRepair(byFile map[string][]string, plan *Plan) []string {
 func repairPrompt(f PlannedFile, plan *Plan, errs, general []string,
 	decls map[string][]Declaration, order []string, platBP string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "The generated implementation does not build. Rewrite %s to fix it.\n\n", f.Path)
+	fmt.Fprintf(&b, "Rewrite %s so the implementation builds.\n\n", f.Path)
+	b.WriteString("Output the complete corrected file and nothing else. No explanation, " +
+		"no plan, no summary of what you changed, no code fence. The first character " +
+		"of your response is the first character of the file.\n\n")
 	b.WriteString("Compiler errors naming this file:\n")
 	for _, e := range errs {
 		b.WriteString("  " + e + "\n")
@@ -198,18 +201,23 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 		return BuildResult{}, files, err
 	}
 
-	// Resolve dependencies once, before any build. This is not a repairable
-	// failure: no amount of regenerating source produces a lockfile.
-	if strings.TrimSpace(plan.Prepare) != "" {
-		onProgress(Progress{Path: "prepare", Status: "preparing"})
-		if prep := RunBuild(root, plan.Prepare); !prep.OK {
-			return prep, files, fmt.Errorf("dependency resolution failed: %s\n%s",
-				plan.Prepare, prep.Output)
-		}
-	}
+	prepare := strings.TrimSpace(plan.Prepare)
 
 	var result BuildResult
 	for round := 1; round <= maxRepairRounds; round++ {
+		// Resolve before EVERY build, not once. A repair changes imports — adding
+		// a package, dropping one — and the lockfile then needs updating again.
+		// Running it once produced "go: updates to go.mod needed" on round two,
+		// which names no file, so the loop correctly found nothing to repair and
+		// stopped on a fault no repair could have addressed.
+		if prepare != "" {
+			onProgress(Progress{Path: "prepare", Status: "preparing", Attempt: round})
+			if prep := RunBuild(root, prepare); !prep.OK {
+				return prep, files, fmt.Errorf("dependency resolution failed: %s\n%s",
+					prepare, prep.Output)
+			}
+		}
+
 		onProgress(Progress{Path: "build", Status: "building", Attempt: round})
 		result = RunBuild(root, plan.Build)
 		if result.OK {
@@ -267,6 +275,9 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 		}
 	}
 
+	if prepare != "" {
+		_ = RunBuild(root, prepare)
+	}
 	result = RunBuild(root, plan.Build)
 	return result, rebuildList(content, order), nil
 }

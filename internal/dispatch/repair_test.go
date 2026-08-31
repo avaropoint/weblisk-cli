@@ -174,3 +174,56 @@ func TestCompilerPathsAreMatchedToPlanPaths(t *testing.T) {
 		t.Errorf("a flat target was mangled: %v", flat)
 	}
 }
+
+// TestPrepareRunsBeforeEveryBuild reproduces a round-two failure: repairs
+// changed imports, go.mod needed resolving again, and prepare had run only once.
+// The resulting error names no file, so the loop found nothing to repair and
+// stopped on a fault no repair could have fixed.
+func TestPrepareRunsBeforeEveryBuild(t *testing.T) {
+	root := t.TempDir()
+	counter := filepath.Join(root, "prepare-count")
+	// Prepare appends a line each time. The build always fails AND blames a file
+	// the plan owns, so the loop repairs and goes round again rather than taking
+	// the "no file blamed" early exit.
+	plan := &Plan{
+		Root:    ".",
+		Prepare: "echo x >> " + counter,
+		Build:   "echo './a.go:1:1: forced failure' >&2; exit 1",
+		Files:   []PlannedFile{{Path: "a.go", Purpose: "x"}},
+	}
+	p := &fakeProvider{responses: []string{
+		"package main\n", "package main\n", "package main\n", "package main\n",
+	}}
+	if _, _, err := BuildAndRepair(p, plan, root, "platform",
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatalf("prepare never ran: %v", err)
+	}
+	runs := strings.Count(string(b), "x")
+	if runs < 2 {
+		t.Errorf("prepare ran %d time(s); it must run before every build round", runs)
+	}
+}
+
+func TestAFailingPrepareStopsImmediately(t *testing.T) {
+	// Dependency resolution is not repairable; burning rounds on it wastes the
+	// budget that real errors need.
+	root := t.TempDir()
+	plan := &Plan{Root: ".", Prepare: "exit 1", Build: "true",
+		Files: []PlannedFile{{Path: "a.go", Purpose: "x"}}}
+	p := &fakeProvider{}
+	_, _, err := BuildAndRepair(p, plan, root, "platform",
+		[]GeneratedFile{{Path: "a.go", Content: "package main\n"}}, nil)
+	if err == nil {
+		t.Fatal("a failing prepare was not reported")
+	}
+	if !strings.Contains(err.Error(), "dependency resolution") {
+		t.Errorf("the failure does not name the step: %v", err)
+	}
+	if p.calls != 0 {
+		t.Errorf("made %d model calls for an unrepairable failure", p.calls)
+	}
+}
