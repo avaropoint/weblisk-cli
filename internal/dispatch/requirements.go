@@ -80,14 +80,23 @@ func ExtractEndpoints(spec, section string) []string {
 	return out
 }
 
-// GatherRequirements assembles what an implementation of one target must satisfy.
-func GatherRequirements(root, platform, target string) (*Requirements, error) {
+// GatherRequirements assembles what an implementation of one target must satisfy,
+// from the blueprints that target is actually generated from.
+//
+// The graph is the argument, not a target name, so requirements cannot be
+// gathered from a different set than the one sent. Every blueprint in the graph
+// contributes its checklist: an assertion is what the loop terminates on, and
+// omitting a sent blueprint's assertions means grading against a specification
+// narrower than the one the model was given. That omission cost
+// architecture/storage.md's fourteen assertions — including the store contract
+// whose AgentEntry schema the generated code kept inventing fields for.
+func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 	req := &Requirements{}
 
-	if types, err := LoadBlueprint(root, "protocol/types.md"); err == nil {
+	if types, ok := g.Map["protocol/types.md"]; ok {
 		req.Types = ExtractTypes(types)
 	}
-	if spec, err := LoadBlueprint(root, "protocol/spec.md"); err == nil {
+	if spec, ok := g.Map["protocol/spec.md"]; ok {
 		section := "Orchestrator Endpoints"
 		if target == "agent" {
 			section = "Agent Endpoints"
@@ -95,19 +104,11 @@ func GatherRequirements(root, platform, target string) (*Requirements, error) {
 		req.Endpoints = ExtractEndpoints(spec, section)
 	}
 
-	sources := append([]string{}, BlueprintSets[target]...)
-	sources = append(sources, PlatformBlueprint(platform), "protocol/types.md")
-	seen := map[string]bool{}
-	for _, src := range sources {
-		if seen[src] {
-			continue
-		}
-		seen[src] = true
-		if bp, err := LoadBlueprint(root, src); err == nil {
-			req.Checklist = append(req.Checklist, ExtractChecklist(src, bp)...)
-		}
+	// Every blueprint in the graph, in the graph's order.
+	for _, name := range g.Order {
+		req.Checklist = append(req.Checklist, ExtractChecklist(name, g.Map[name])...)
 	}
-	return req, nil
+	return req
 }
 
 // Summary is a one-line description for progress output.

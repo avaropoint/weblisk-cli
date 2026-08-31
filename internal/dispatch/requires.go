@@ -33,6 +33,8 @@ package dispatch
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -216,4 +218,102 @@ func GenerationRoots(target, platform string) []string {
 		return append(roots, "architecture/gateway.md")
 	}
 	return roots
+}
+
+// BlueprintGraph is the blueprint set one implementation is generated from,
+// together with where each copy came from.
+type BlueprintGraph struct {
+	Map      map[string]string // path → content
+	Order    []string          // stable order, roots first
+	Missing  []string          // declared requirements this installation lacks
+	Sources  []Source          // directories searched, in precedence order
+	ServedBy map[string]Source // path → the source that actually answered
+}
+
+// Joined renders the graph as one document, for prompts that take the corpus
+// whole rather than per file.
+func (g *BlueprintGraph) Joined() string {
+	parts := make([]string, 0, len(g.Order))
+	for _, name := range g.Order {
+		parts = append(parts, g.Map[name])
+	}
+	return strings.Join(parts, "\n\n---\n\n")
+}
+
+// ResolveGraph is the ONE place a target's blueprint set is decided.
+//
+// # Why this exists rather than three lists
+//
+// Three parts of generation each answered "which blueprints?" separately, and
+// they disagreed:
+//
+//   - the PLAN was made from a hardcoded three
+//   - GENERATION sent the declared graph of six
+//   - the CHECKLIST — which is the loop's termination condition — came from the
+//     hardcoded three plus the platform and types
+//
+// So architecture/storage.md was sent to the model and its fourteen assertions
+// were not in what the loop verified, while the plan that decided which files
+// exist was made without ever seeing it. Each list was defensible alone. Held
+// together they meant the pipeline was planning against one specification,
+// building against a second, and grading against a third.
+//
+// One resolution, used by all three.
+func ResolveGraph(root, target, platform string) (*BlueprintGraph, error) {
+	srcs := ResolveSources(root)
+	bpMap, order, missing, err := ResolveDeclared(root, GenerationRoots(target, platform)...)
+	if err != nil {
+		return nil, err
+	}
+	g := &BlueprintGraph{Map: bpMap, Order: order, Missing: missing, Sources: srcs, ServedBy: map[string]Source{}}
+	// Which source answered for each blueprint, not merely which were searched.
+	//
+	// Precedence means a graph can be assembled from more than one copy — a
+	// project override of two files with the cached repo supplying the rest. A
+	// list of directories cannot express that, and the mixed case is precisely
+	// the one where a number disagrees with the file you just edited.
+	for _, name := range order {
+		for _, s := range srcs {
+			if _, err := os.Stat(filepath.Join(s.Dir, name)); err == nil {
+				g.ServedBy[name] = s
+				break
+			}
+		}
+	}
+	return g, nil
+}
+
+// Describe renders the graph and its provenance for run output.
+//
+// Printed on every generation, because a specification pipeline that will not
+// say which copy of the specification it read cannot be held to its result.
+func (g *BlueprintGraph) Describe() string {
+	b := &strings.Builder{}
+	// Label each source once, so a blueprint can be attributed in a column
+	// rather than by repeating a path six times.
+	label := map[string]string{}
+	for i, s := range g.Sources {
+		label[s.Dir] = fmt.Sprintf("[%d]", i+1)
+	}
+
+	fmt.Fprintf(b, "  Blueprints: %d, as declared by requires:\n", len(g.Order))
+	for _, name := range g.Order {
+		src, ok := g.ServedBy[name]
+		tag := "[?]"
+		if ok {
+			tag = label[src.Dir]
+		}
+		fmt.Fprintf(b, "    %s %s\n", tag, name)
+	}
+	b.WriteString("  Read from:\n")
+	for i, s := range g.Sources {
+		used := 0
+		for _, served := range g.ServedBy {
+			if served.Dir == s.Dir {
+				used++
+			}
+		}
+		fmt.Fprintf(b, "    [%d] %s — %d of %d\n", i+1, s.Describe(), used, len(g.Order))
+	}
+	return b.String()
 }

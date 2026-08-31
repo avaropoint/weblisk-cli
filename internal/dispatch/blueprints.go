@@ -1,9 +1,32 @@
 package dispatch
 
-// Resolves blueprints from multiple sources with fallthrough:
-//   1. Local project:  ./blueprints/ in the user's project
-//   2. Custom sources: WL_BLUEPRINT_SOURCES (comma-separated Git URLs)
-//   3. Core:           github.com/avaropoint/weblisk-blueprints (always)
+// Resolving blueprints, and knowing which copy you resolved.
+//
+// # The cache that never expired
+//
+// Blueprints were fetched with a depth-one clone into ~/.weblisk/blueprints and
+// then served forever. ensureCloned's entire freshness test was "does the
+// directory have anything in it", so a clone taken in May was still answering
+// questions in August. Nothing in the output said so.
+//
+// That is not a slow cache. It is a specification pipeline reading a
+// specification nobody wrote, and reporting conformance against it.
+//
+// # Two things a cache owes its caller
+//
+// Freshness is the obvious one, and the cheap one: fetch and reset when the copy
+// is older than the TTL, keep working offline when the network is gone.
+//
+// Provenance is the one that was actually missing. Blueprints resolve from three
+// places — the project, custom sources, the core repo — and the first hit wins.
+// When a measurement disagrees with the file you just edited, the question is
+// never "is the cache stale"; it is "which copy did that number come from". A
+// resolver that cannot answer it turns every disagreement into a guess.
+//
+// So resolution reports the directory, the kind of source, and the commit. The
+// generation cache keys on blueprint CONTENT (see cache.go), so a refresh
+// invalidates exactly the files whose inputs moved — but only if the refresh
+// happens at all.
 
 import (
 	"crypto/sha256"
@@ -12,18 +35,60 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/avaropoint/weblisk-cli/internal/config"
 )
 
 const coreRepo = "https://github.com/avaropoint/weblisk-blueprints.git"
 
-// BlueprintSets defines which blueprints are loaded for each generation target.
-var BlueprintSets = map[string][]string{
-	"orchestrator": {"protocol/spec.md", "architecture/orchestrator.md", "protocol/identity.md"},
-	"agent":        {"protocol/spec.md", "architecture/agent.md", "protocol/identity.md"},
-	"domain":       {"protocol/spec.md", "architecture/domain.md", "architecture/orchestrator.md", "protocol/identity.md"},
-	"gateway":      {"protocol/spec.md", "architecture/gateway.md", "architecture/orchestrator.md", "protocol/identity.md"},
+// blueprintTTL is how long a fetched copy is trusted before it is refreshed.
+//
+// A day, because blueprints are specifications: they change on the scale of
+// someone deciding something, not on the scale of a build. Long enough that a
+// day of generation runs costs one fetch; short enough that yesterday's decision
+// is in today's build.
+const blueprintTTL = 24 * time.Hour
+
+// fetchStamp records when a cached source was last refreshed. Untracked inside
+// the checkout, so `git reset --hard` leaves it alone.
+const fetchStamp = ".weblisk-fetched"
+
+// Source is a place blueprints are read from, and what is known about it.
+type Source struct {
+	Dir      string    // directory searched
+	Kind     string    // "project", "custom" or "core"
+	Origin   string    // repo URL; empty for a project directory
+	Revision string    // short commit, when the directory is a checkout
+	Fetched  time.Time // when this copy was last refreshed; zero when unknown
+}
+
+// Describe renders a source for output — everything needed to tell two copies
+// of the same blueprints apart.
+func (s Source) Describe() string {
+	b := &strings.Builder{}
+	fmt.Fprintf(b, "%s (%s", s.Dir, s.Kind)
+	if s.Revision != "" {
+		fmt.Fprintf(b, " @%s", s.Revision)
+	}
+	if !s.Fetched.IsZero() {
+		fmt.Fprintf(b, ", fetched %s ago", roundDuration(time.Since(s.Fetched)))
+	}
+	b.WriteString(")")
+	return b.String()
+}
+
+func roundDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "moments"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
 
 // sourceDir returns a deterministic cache directory name for a repo URL.
@@ -48,15 +113,30 @@ func blueprintCacheBase() string {
 	return filepath.Join(home, ".weblisk", "blueprints")
 }
 
-// resolvedSources returns the ordered list of blueprint directories to search.
-// Order: local project → custom sources → core.
-func resolvedSources(root string) []string {
-	var dirs []string
+// offline reports whether network refreshes are suppressed.
+//
+// An explicit switch, because the alternative is inferring it from a failed
+// fetch — which is slow on every run and wrong on a flaky link.
+func offline() bool {
+	v := strings.ToLower(os.Getenv("WL_BLUEPRINT_OFFLINE"))
+	return v == "1" || v == "true" || v == "yes"
+}
 
-	// 1. Local project blueprints (highest priority).
+// ResolveSources returns the ordered sources blueprints are read from, refreshing
+// cached copies whose TTL has passed.
+//
+// Order: local project → custom sources → core. First hit wins, which is what
+// makes a local checkout override the cache — and what makes provenance worth
+// reporting.
+func ResolveSources(root string) []Source {
+	var out []Source
+
+	// 1. Local project blueprints (highest priority). Never refreshed: this is a
+	// working directory, not a copy, and fetching over someone's edits would be a
+	// cache eating their work.
 	localDir := filepath.Join(root, "blueprints")
 	if info, err := os.Stat(localDir); err == nil && info.IsDir() {
-		dirs = append(dirs, localDir)
+		out = append(out, Source{Dir: localDir, Kind: "project", Revision: revisionOf(localDir)})
 	}
 
 	cacheBase := blueprintCacheBase()
@@ -65,31 +145,96 @@ func resolvedSources(root string) []string {
 	cfg := config.Resolve()
 	for _, repo := range cfg.BlueprintSources {
 		cacheDir := filepath.Join(cacheBase, sourceDir(repo))
-		if err := ensureCloned(repo, cacheDir); err != nil {
+		if err := ensureFresh(repo, cacheDir); err != nil {
 			fmt.Fprintf(os.Stderr, "  [warn] Blueprint source %s: %v\n", repo, err)
 			continue
 		}
-		dirs = append(dirs, cacheDir)
+		out = append(out, describeCache(cacheDir, "custom", repo))
 	}
 
 	// 3. Core blueprints (always present as fallback).
 	coreDir := filepath.Join(cacheBase, sourceDir(coreRepo))
-	if err := ensureCloned(coreRepo, coreDir); err != nil {
+	if err := ensureFresh(coreRepo, coreDir); err != nil {
 		fmt.Fprintf(os.Stderr, "  [warn] Core blueprints: %v\n", err)
 	} else {
-		dirs = append(dirs, coreDir)
+		out = append(out, describeCache(coreDir, "core", coreRepo))
 	}
 
+	return out
+}
+
+// resolvedSources returns just the directories, in order.
+func resolvedSources(root string) []string {
+	srcs := ResolveSources(root)
+	dirs := make([]string, 0, len(srcs))
+	for _, s := range srcs {
+		dirs = append(dirs, s.Dir)
+	}
 	return dirs
 }
 
-// ensureCloned clones a repo if it hasn't been cached yet.
-func ensureCloned(repoURL, cacheDir string) error {
-	// If the cache exists and has content, skip.
-	if entries, err := os.ReadDir(cacheDir); err == nil && len(entries) > 0 {
+func describeCache(dir, kind, origin string) Source {
+	return Source{
+		Dir:      dir,
+		Kind:     kind,
+		Origin:   origin,
+		Revision: revisionOf(dir),
+		Fetched:  stampTime(dir),
+	}
+}
+
+// revisionOf returns the short commit of a directory that is a git checkout.
+func revisionOf(dir string) string {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--short", "HEAD")
+	outBytes, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(outBytes))
+}
+
+func stampTime(dir string) time.Time {
+	info, err := os.Stat(filepath.Join(dir, fetchStamp))
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+func touchStamp(dir string) {
+	_ = os.WriteFile(filepath.Join(dir, fetchStamp), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
+}
+
+// ensureFresh clones a source that is missing and refreshes one that is stale.
+//
+// A refresh failure is a warning, never an error: a cached specification is
+// worse than a current one and far better than none, and a build on a plane must
+// still run. The staleness is reported by Describe, so the output says which it
+// was working from.
+func ensureFresh(repoURL, cacheDir string) error {
+	entries, err := os.ReadDir(cacheDir)
+	present := err == nil && len(entries) > 0
+
+	if !present {
+		return clone(repoURL, cacheDir)
+	}
+	if offline() {
 		return nil
 	}
+	stamp := stampTime(cacheDir)
+	if !stamp.IsZero() && time.Since(stamp) < blueprintTTL {
+		return nil
+	}
+	if err := refresh(cacheDir); err != nil {
+		fmt.Fprintf(os.Stderr, "  [warn] Could not refresh %s: %v\n    Using the cached copy; run `weblisk blueprint update` when connected.\n",
+			filepath.Base(cacheDir), err)
+		// Stamp anyway, so an offline session does not retry on every command.
+		touchStamp(cacheDir)
+	}
+	return nil
+}
 
+func clone(repoURL, cacheDir string) error {
 	fmt.Printf("  Fetching blueprints from %s...\n", repoURL)
 	if err := os.MkdirAll(filepath.Dir(cacheDir), 0755); err != nil {
 		return fmt.Errorf("creating cache directory: %w", err)
@@ -102,8 +247,30 @@ func ensureCloned(repoURL, cacheDir string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("cloning %s: %w\n  If this is a private repo, ensure your Git credentials have access.", repoURL, err)
 	}
+	touchStamp(cacheDir)
 
 	fmt.Printf("  [ok] Cached %s\n", filepath.Base(cacheDir))
+	return nil
+}
+
+// refresh brings an existing shallow checkout up to its remote head.
+//
+// fetch + reset rather than delete + clone: it moves only what changed, and it
+// cannot leave the cache empty if the network drops halfway.
+func refresh(cacheDir string) error {
+	before := revisionOf(cacheDir)
+	fetch := exec.Command("git", "-C", cacheDir, "fetch", "--depth=1", "origin", "HEAD")
+	if out, err := fetch.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	reset := exec.Command("git", "-C", cacheDir, "reset", "--hard", "FETCH_HEAD")
+	if out, err := reset.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	touchStamp(cacheDir)
+	if after := revisionOf(cacheDir); after != before && before != "" {
+		fmt.Printf("  Blueprints updated: %s → %s\n", before, after)
+	}
 	return nil
 }
 
@@ -164,21 +331,40 @@ func LoadBlueprintMap(root string, names ...string) (map[string]string, []string
 	return out, order, nil
 }
 
-// UpdateBlueprints removes all cached blueprint sources, forcing a re-fetch.
+// UpdateBlueprints forces every cached source to its remote head, ignoring the
+// TTL, and reports what is now in place.
+//
+// It used to delete ~/.weblisk/blueprints outright. That threw away every custom
+// source along with the core one and turned a refresh into a full re-clone of
+// each — for a change that is usually a handful of edited lines. Expiring the
+// stamps makes the ordinary refresh path do the work, so there is one mechanism
+// to be correct rather than two.
 func UpdateBlueprints(root string) error {
-	cacheBase := blueprintCacheBase()
-	if err := os.RemoveAll(cacheBase); err != nil {
-		return fmt.Errorf("clearing blueprint cache: %w", err)
-	}
-	fmt.Println("  Cleared blueprint cache.")
+	expireStamps(blueprintCacheBase())
 
-	// Re-fetch all sources.
-	dirs := resolvedSources(root)
-	if len(dirs) == 0 {
+	srcs := ResolveSources(root)
+	if len(srcs) == 0 {
 		return fmt.Errorf("no blueprint sources available after refresh")
 	}
-	fmt.Printf("  [ok] %d blueprint source(s) ready\n", len(dirs))
+	fmt.Printf("  [ok] %d blueprint source(s) ready\n", len(srcs))
+	for _, s := range srcs {
+		fmt.Printf("    %s\n", s.Describe())
+	}
 	return nil
+}
+
+// expireStamps removes the fetch stamps under a cache base so the next
+// resolution refreshes rather than trusting the TTL.
+func expireStamps(base string) {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			_ = os.Remove(filepath.Join(base, e.Name(), fetchStamp))
+		}
+	}
 }
 
 // PlatformBlueprint returns the blueprint path for a platform.

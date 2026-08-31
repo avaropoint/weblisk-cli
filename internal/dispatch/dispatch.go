@@ -26,10 +26,14 @@ func ServerInit(root, platform string) error {
 		return err
 	}
 
-	specs, err := LoadBlueprints(root, BlueprintSets["orchestrator"]...)
+	// One resolution, before anything reads it. The plan, the checklist and the
+	// per-file prompts all come from THIS graph — see ResolveGraph for what went
+	// wrong when they each had their own list.
+	graph, err := ResolveGraph(root, "orchestrator", platform)
 	if err != nil {
-		return fmt.Errorf("loading blueprints: %w", err)
+		return fmt.Errorf("resolving blueprints: %w", err)
 	}
+	specs := graph.Joined()
 
 	platBP, err := LoadBlueprint(root, PlatformBlueprint(platform))
 	if err != nil {
@@ -40,9 +44,16 @@ func ServerInit(root, platform string) error {
 	// decides how to arrange it, and the plan is validated against the
 	// requirements before a single file is generated. See
 	// architecture/generation.md.
-	req, rerr := GatherRequirements(root, platform, "orchestrator")
-	if rerr == nil && (len(req.Types) > 0 || len(req.Endpoints) > 0) {
+	req := GatherRequirements(graph, "orchestrator")
+	if len(req.Types) > 0 || len(req.Endpoints) > 0 {
 		fmt.Printf("  Platform: %s\n", platform)
+		fmt.Print(graph.Describe())
+		if len(graph.Missing) > 0 {
+			// Stated, never silent. A declared requirement this installation does
+			// not carry is a gap in what the model was given, and the output should
+			// be read knowing that.
+			fmt.Printf("  [warn] declared requirements not found: %s\n", strings.Join(graph.Missing, ", "))
+		}
 		fmt.Printf("  Required: %s\n\n", req.Summary())
 
 		// Reuse the plan when the requirements have not changed. Without this the
@@ -67,21 +78,7 @@ func ServerInit(root, platform string) error {
 		}
 		fmt.Println()
 
-		// Everything the blueprints declare, sent whole. A hardcoded list of three
-		// omitted protocol/types.md — fifty-five type definitions with their field
-		// tables — and the model then invented fields and used them.
-		bpMap, bpOrder, bpMissing, bperr := ResolveDeclared(root, GenerationRoots("orchestrator", platform)...)
-		if bperr != nil {
-			return bperr
-		}
-		if len(bpMissing) > 0 {
-			// Stated, never silent. A declared requirement this installation does
-			// not carry is a gap in what the model was given, and the output should
-			// be read knowing that.
-			fmt.Printf("  [warn] declared requirements not found: %s\n", strings.Join(bpMissing, ", "))
-		}
-		fmt.Printf("  Blueprints: %d, as declared by requires:\n\n", len(bpOrder))
-		files, gerr := GenerateTarget(provider, plan, platform, bpMap, bpOrder, platBP, root,
+		files, gerr := GenerateTarget(provider, plan, platform, graph.Map, graph.Order, platBP, root,
 			printProgress, req.Checklist)
 		if gerr != nil {
 			return gerr
@@ -151,10 +148,11 @@ func AgentCreate(root, name, platform string) error {
 		return err
 	}
 
-	specs, err := LoadBlueprints(root, BlueprintSets["agent"]...)
+	graph, err := ResolveGraph(root, "agent", platform)
 	if err != nil {
-		return fmt.Errorf("loading blueprints: %w", err)
+		return fmt.Errorf("resolving blueprints: %w", err)
 	}
+	specs := graph.Joined()
 
 	platBP, err := LoadBlueprint(root, PlatformBlueprint(platform))
 	if err != nil {
@@ -208,10 +206,11 @@ func DomainCreate(root, name, platform string) error {
 		return err
 	}
 
-	specs, err := LoadBlueprints(root, BlueprintSets["domain"]...)
+	graph, err := ResolveGraph(root, "domain", platform)
 	if err != nil {
-		return fmt.Errorf("loading blueprints: %w", err)
+		return fmt.Errorf("resolving blueprints: %w", err)
 	}
+	specs := graph.Joined()
 
 	platBP, err := LoadBlueprint(root, PlatformBlueprint(platform))
 	if err != nil {
@@ -266,10 +265,11 @@ func GatewayCreate(root, platform string) error {
 		return err
 	}
 
-	specs, err := LoadBlueprints(root, BlueprintSets["gateway"]...)
+	graph, err := ResolveGraph(root, "gateway", platform)
 	if err != nil {
-		return fmt.Errorf("loading blueprints: %w", err)
+		return fmt.Errorf("resolving blueprints: %w", err)
 	}
+	specs := graph.Joined()
 
 	platBP, err := LoadBlueprint(root, PlatformBlueprint(platform))
 	if err != nil {
