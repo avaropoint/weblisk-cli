@@ -233,8 +233,45 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 		if prepare != "" {
 			onProgress(Progress{Path: "prepare", Status: "preparing", Attempt: round})
 			if prep := RunBuild(root, prepare); !prep.OK {
-				return prep, files, fmt.Errorf("dependency resolution failed: %s\n%s",
-					prepare, prep.Output)
+				// A dependency-resolution failure used to end the run. Most of
+				// them should: a network failure or a missing toolchain is not
+				// something a model can fix.
+				//
+				// But one kind is ordinary source: an import path that does not
+				// exist. A generated hub imported
+				// github.com/cloudflare/circl/sign/mldsa65 — plausible, and wrong;
+				// the package is under sign/mldsa/mldsa65 — and `go mod tidy`
+				// refused with "module found, but does not contain package". The
+				// whole run ended on a one-line fault in one file, with 52 correct
+				// files already written.
+				targets := filesWithBadImports(prep.Output, content)
+				if len(targets) == 0 {
+					return prep, files, fmt.Errorf("dependency resolution failed: %s\n%s",
+						prepare, prep.Output)
+				}
+				repaired := false
+				for _, path := range targets {
+					f := byPath[path]
+					onProgress(Progress{Path: path, Status: "repairing", Attempt: round,
+						Detail: firstLine([]string{importFaultLine(prep.Output)})})
+					prompt := importRepairPrompt(f, content[path], prep.Output, platBP)
+					accepted, aerr := askForFile(provider, prompt, f)
+					if aerr != nil {
+						return prep, files, fmt.Errorf("repairing imports in %s: %w", path, aerr)
+					}
+					if accepted != "" {
+						content[path] = accepted
+						repaired = true
+					}
+				}
+				if !repaired {
+					return prep, files, fmt.Errorf("dependency resolution failed: %s\n%s",
+						prepare, prep.Output)
+				}
+				if err := writeContent(dir, content, order); err != nil {
+					return prep, rebuildList(content, order), err
+				}
+				continue
 			}
 		}
 
@@ -503,6 +540,80 @@ func conformancePrompt(f PlannedFile, current string, failures []Violation, plat
 		"rename here becomes a build failure there.\n")
 	if platBP != "" {
 		b.WriteString("\nPlatform requirements:\n\n")
+		b.WriteString(platBP)
+	}
+	return b.String()
+}
+
+// reMissingPackage matches a resolver complaint about an import that does not
+// exist, in the two shapes Go emits.
+var reMissingPackage = regexp.MustCompile(
+	`(?m)(?:no required module provides package|does not contain package|cannot find package)\s+"?([\w./-]+)"?`)
+
+// reImportingPackage matches the "X imports Y" line that names the offender.
+var reImportingPackage = regexp.MustCompile(`(?m)^\s*([\w./-]+) imports\s*$`)
+
+// filesWithBadImports finds the generated files importing a package the resolver
+// could not find.
+//
+// Resolver output names a PACKAGE, not a file — "weblisk/internal/identity
+// imports github.com/…/mldsa65". So the offending import path is taken from the
+// error and matched against the source of every generated file, which is exact:
+// a file either contains that import or it does not.
+func filesWithBadImports(output string, content map[string]string) []string {
+	var missing []string
+	for _, m := range reMissingPackage.FindAllStringSubmatch(output, -1) {
+		if p := strings.TrimSpace(m[1]); p != "" && strings.Contains(p, "/") {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var out []string
+	for path, body := range content {
+		for _, pkg := range missing {
+			if strings.Contains(body, `"`+pkg+`"`) {
+				if !containsString(out, path) {
+					out = append(out, path)
+				}
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// importFaultLine is the first resolver line worth showing a reader.
+func importFaultLine(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "does not contain package") ||
+			strings.Contains(line, "no required module provides package") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return firstLine(strings.Split(output, "\n"))
+}
+
+// importRepairPrompt asks for one file back with its imports corrected.
+//
+// Deliberately narrow: the resolver's own words, the file, and an instruction to
+// change nothing else. A wrong import is a one-token fault, and inviting a
+// rewrite of a file that is otherwise correct is how a repair becomes a
+// regression.
+func importRepairPrompt(f PlannedFile, current, resolverOutput, platBP string) string {
+	var b strings.Builder
+	b.WriteString("The dependency resolver rejected an import in this file.\n\n")
+	b.WriteString("Resolver output:\n\n")
+	b.WriteString(indentBlock(resolverOutput, "    "))
+	b.WriteString("\n\nThe import path does not exist. The platform blueprint's Primitive " +
+		"Mapping table gives the exact package path for every required module — use it.\n\n")
+	fmt.Fprintf(&b, "File: %s\nPurpose: %s\n\nCurrent content:\n\n", f.Path, f.Purpose)
+	b.WriteString(current)
+	b.WriteString("\n\nReturn the file with its imports corrected and NOTHING else changed. " +
+		"Every declaration, signature and line of logic stays exactly as it is.\n")
+	if platBP != "" {
+		b.WriteString("\nPlatform blueprint:\n\n")
 		b.WriteString(platBP)
 	}
 	return b.String()

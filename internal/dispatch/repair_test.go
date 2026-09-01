@@ -475,3 +475,67 @@ func TestAVerdictForAnAssertionThatDoesNotExistIsDropped(t *testing.T) {
 		t.Errorf("verdicts = %+v, want only the first entry for index 1", v)
 	}
 }
+
+func TestAWrongImportPathIsRepairedNotFatal(t *testing.T) {
+	// The fault: 53 files generated correctly, and the run ended on one of them
+	// importing github.com/cloudflare/circl/sign/mldsa65 — plausible, and wrong;
+	// the package is under sign/mldsa/mldsa65. `go mod tidy` refused with
+	// "module found, but does not contain package", which names a PACKAGE and no
+	// file, so nothing could be repaired and 52 correct files were discarded.
+	output := `go: finding module for package github.com/cloudflare/circl/sign/mldsa65
+go: weblisk/internal/identity imports
+	github.com/cloudflare/circl/sign/mldsa65: module github.com/cloudflare/circl@latest found (v1.6.5), but does not contain package github.com/cloudflare/circl/sign/mldsa65`
+
+	content := map[string]string{
+		"internal/identity/keys.go":  "package identity\n\nimport \"github.com/cloudflare/circl/sign/mldsa65\"\n",
+		"internal/identity/token.go": "package identity\n\nimport \"github.com/cloudflare/circl/sign/mldsa65\"\n",
+		"internal/protocol/types.go": "package protocol\n\nimport \"encoding/json\"\n",
+		"internal/storage/jsonl.go":  "package storage\n\nimport \"os\"\n",
+	}
+	got := filesWithBadImports(output, content)
+	if len(got) != 2 {
+		t.Fatalf("found %v; want the two files importing the missing package", got)
+	}
+	for _, want := range []string{"internal/identity/keys.go", "internal/identity/token.go"} {
+		if !containsString(got, want) {
+			t.Errorf("%s imports the missing package and was not found", want)
+		}
+	}
+	// Files that do not import it must be left alone — a repair aimed at a
+	// correct file is how a fix becomes a regression.
+	for _, never := range []string{"internal/protocol/types.go", "internal/storage/jsonl.go"} {
+		if containsString(got, never) {
+			t.Errorf("%s does not import the missing package and was targeted", never)
+		}
+	}
+}
+
+func TestAResolverFailureNobodyCanFixIsStillFatal(t *testing.T) {
+	// Most resolution failures are not source faults. A network error or a
+	// missing toolchain is not something a model can repair, and pretending
+	// otherwise spends calls to produce the same failure.
+	for _, output := range []string{
+		"go: github.com/x/y@v1.0.0: dial tcp: lookup proxy.golang.org: no such host",
+		"go: updates to go.mod needed; to update it:\n\tgo mod tidy",
+		"go: go.mod file not found in current directory or any parent directory",
+	} {
+		if got := filesWithBadImports(output, map[string]string{"a.go": "package main\n"}); len(got) != 0 {
+			t.Errorf("a non-source resolver failure was treated as repairable: %q -> %v", output, got)
+		}
+	}
+}
+
+func TestTheImportRepairAsksForNothingElse(t *testing.T) {
+	// A wrong import is a one-token fault. Inviting a rewrite of a file that is
+	// otherwise correct is how a repair becomes a regression.
+	p := importRepairPrompt(
+		PlannedFile{Path: "internal/identity/keys.go", Purpose: "ML-DSA-65 keys"},
+		"package identity\n\nfunc Generate() {}\n",
+		"does not contain package github.com/cloudflare/circl/sign/mldsa65",
+		"PLATFORM")
+	for _, want := range []string{"NOTHING else changed", "Primitive Mapping", "does not contain package", "func Generate()"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the import-repair prompt is missing %q", want)
+		}
+	}
+}
