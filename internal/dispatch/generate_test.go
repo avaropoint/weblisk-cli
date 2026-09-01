@@ -327,3 +327,67 @@ func TestMethodNotationStillRequiresTheRightReceiver(t *testing.T) {
 		t.Error("a method on the wrong type was accepted")
 	}
 }
+
+func TestTheInvariantPrefixIsIdenticalAcrossFiles(t *testing.T) {
+	// Prompt caching works on a PREFIX. The per-file ask used to come first, so
+	// the very first bytes differed on every call and nothing was cacheable —
+	// twenty-seven files each reprocessed the same ~52,000 tokens of
+	// specification.
+	//
+	// This asserts the shape that makes caching possible: everything invariant
+	// comes first, byte for byte, and only the tail varies.
+	plan := &Plan{Root: "server", Files: []PlannedFile{
+		{Path: "a.go", Purpose: "first", Declares: []string{"Alpha"}},
+		{Path: "b.go", Purpose: "second", Declares: []string{"Beta"}},
+	}}
+	bps := map[string]string{"protocol/types.md": strings.Repeat("TYPE SPECIFICATION\n", 200)}
+	order := []string{"protocol/types.md"}
+	checklist := []ChecklistItem{{Source: "protocol/types.md", Text: "every type round-trips"}}
+	bindings := []Binding{{From: "protocol/types", Type: "Alpha", FieldsUsed: []string{"id"}}}
+
+	a := filePrompt(plan.Files[0], plan, "go", bps, order, "PLATFORM GUIDE", nil, nil, checklist, bindings)
+	b := filePrompt(plan.Files[1], plan, "go", bps, order, "PLATFORM GUIDE", nil, nil, checklist, bindings)
+
+	// Find how much of the two prompts is byte-identical from the start.
+	shared := 0
+	for shared < len(a) && shared < len(b) && a[shared] == b[shared] {
+		shared++
+	}
+	// The specification is the bulk of the prompt; nearly all of it must be
+	// shared, or the ordering has regressed.
+	if ratio := float64(shared) / float64(len(a)); ratio < 0.9 {
+		t.Errorf("only %.0f%% of the prompt is a shared prefix (%d of %d bytes) — "+
+			"the invariant block is no longer first and caching is defeated",
+			ratio*100, shared, len(a))
+	}
+	// And the ask must still be present, at the end, or the model has no task.
+	if !strings.Contains(a, "Generate exactly one file: a.go") {
+		t.Error("the file-specific ask is missing")
+	}
+	if strings.Index(a, "--- YOUR TASK ---") < strings.Index(a, "--- BLUEPRINTS ---") {
+		t.Error("the ask precedes the specification — the prefix is not invariant")
+	}
+	// Nothing may be lost by reordering: every element still appears.
+	for _, want := range []string{"TYPE SPECIFICATION", "PLATFORM GUIDE", "every type round-trips", "Alpha", "It MUST define"} {
+		if !strings.Contains(a, want) {
+			t.Errorf("reordering dropped %q from the prompt", want)
+		}
+	}
+}
+
+func TestAccumulatedDeclarationsStayInTheVariableTail(t *testing.T) {
+	// The already-generated block grows with each file, so it cannot sit in the
+	// cacheable prefix — putting it there would break the prefix on file two.
+	plan := &Plan{Root: "server", Files: []PlannedFile{{Path: "b.go", Purpose: "second"}}}
+	bps := map[string]string{"x.md": "SPEC"}
+	decls := map[string][]Declaration{"a.go": {{Name: "Alpha", Signature: "type Alpha struct{}", Package: "main"}}}
+
+	p := filePrompt(plan.Files[0], plan, "go", bps, []string{"x.md"}, "PLAT",
+		[]string{"a.go"}, decls, nil, nil)
+	if strings.Index(p, "ALREADY EXIST") < strings.Index(p, "--- BLUEPRINTS ---") {
+		t.Error("accumulated declarations precede the specification — the prefix breaks on every file")
+	}
+	if !strings.Contains(p, "Alpha") {
+		t.Error("accumulated declarations were dropped")
+	}
+}

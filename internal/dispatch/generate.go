@@ -285,7 +285,51 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 	bpOrder []string, platBP string, written []string, decls map[string][]Declaration,
 	checklist []ChecklistItem, bindings []Binding) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Generate exactly one file: %s\n\n", f.Path)
+
+	// INVARIANT PREFIX — identical for every file in a run.
+	//
+	// This block used to be last. The per-file ask was first, so the very first
+	// bytes of the prompt differed on every call and the cacheable prefix was
+	// nothing. Twenty-seven files each reprocessed the same ~52,000 tokens of
+	// specification from scratch.
+	//
+	// Nothing here is changed in content — the model receives exactly what it
+	// received before, in the order that lets a cache work on it. The specific
+	// ask moves to the end, where an instruction belongs anyway.
+	b.WriteString("--- BLUEPRINTS ---\n")
+	b.WriteString(joinBlueprints(relevantBlueprints(f, blueprints), bpOrder))
+	b.WriteString("\n\n--- PLATFORM BLUEPRINT ---\n")
+	b.WriteString(platBP)
+	if c := FormatChecklist(checklist); c != "" {
+		b.WriteString("\n\n--- ACCEPTANCE CRITERIA ---\n")
+		b.WriteString(c)
+	}
+	if bd := FormatBindings(bindings); bd != "" {
+		b.WriteString("\n" + bd)
+	}
+	fmt.Fprintf(&b, "\nPlatform: %s\nTarget directory: %s\n", platform, plan.Root)
+	b.WriteString("\nThe complete file set for this target is: ")
+	for i, pf := range plan.Order() {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(pf.Path)
+	}
+	b.WriteString("\n")
+
+	// VARIABLE SUFFIX — grows as files are written, then the ask itself.
+	if len(written) > 0 {
+		fmt.Fprintf(&b, "\nAlready generated in this package: %s\n", strings.Join(written, ", "))
+		if d := FormatDeclarations(decls, written); d != "" {
+			b.WriteString("\nThese symbols ALREADY EXIST. Do not redeclare them, and call them " +
+				"with exactly these signatures:\n")
+			b.WriteString(d)
+			b.WriteString("\nIf this file needs a helper that is not listed above, declare it HERE " +
+				"rather than assuming it exists.\n")
+		}
+	}
+
+	fmt.Fprintf(&b, "\n--- YOUR TASK ---\nGenerate exactly one file: %s\n\n", f.Path)
 	fmt.Fprintf(&b, "Purpose: %s\n", f.Purpose)
 	if len(f.Declares) > 0 {
 		fmt.Fprintf(&b, "It MUST define: %s\n", strings.Join(f.Declares, ", "))
@@ -293,36 +337,6 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 	if len(f.Serves) > 0 {
 		fmt.Fprintf(&b, "It MUST serve these endpoints: %s\n", strings.Join(f.Serves, ", "))
 	}
-	if bd := FormatBindings(bindings); bd != "" {
-		b.WriteString("\n" + bd)
-	}
-	fmt.Fprintf(&b, "\nPlatform: %s\nTarget directory: %s\n", platform, plan.Root)
-	if len(written) > 0 {
-		fmt.Fprintf(&b, "\nAlready generated in this package: %s\n", strings.Join(written, ", "))
-		if d := FormatDeclarations(decls, written); d != "" {
-			b.WriteString("\nThese symbols ALREADY EXIST. Do not redeclare them, and call them " +
-				"exactly as declared:\n")
-			b.WriteString(d)
-			b.WriteString("\nIf this file needs a helper that is not listed above, declare it HERE " +
-				"rather than assuming it exists elsewhere.\n")
-		}
-	}
-	fmt.Fprintf(&b, "\nThe complete file set for this target is: ")
-	for i, mf := range plan.Files {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(mf.Path)
-	}
-	if c := FormatChecklist(checklist); c != "" {
-		b.WriteString("\n--- ACCEPTANCE CRITERIA ---\n")
-		b.WriteString(c)
-	}
-	b.WriteString("\n\n--- PLATFORM BLUEPRINT ---\n")
-	b.WriteString(platBP)
-	// Only the blueprints this file needs. go.mod does not need the ML-DSA
-	// specification, and sending it ten times is most of the run's cost.
-	b.WriteString(joinBlueprints(relevantBlueprints(f, blueprints), bpOrder))
 	return b.String()
 }
 
