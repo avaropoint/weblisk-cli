@@ -134,7 +134,14 @@ func ServerInit(root, platform string) error {
 		// Layer 2: build, and feed failures back. Generating blind and reporting
 		// success is how eleven files that do not compile get called finished.
 		if plan.Build != "" {
-			result, repaired, rerr := BuildAndRepair(provider, plan, root, platBP, files, printProgress, req.Checklist, graph.Map)
+			result, repaired, rerr := BuildAndRepair(provider, plan, root, platBP, files, printProgress, req.Checklist, graph.Map,
+				func(current []GeneratedFile) ([]ConformanceResult, string, error) {
+					bin := builtBinary(root, plan.Build)
+					if bin == "" {
+						return nil, "", nil
+					}
+					return RunConformance(root, bin, "orchestrator", printProgress)
+				})
 			if rerr != nil {
 				return rerr
 			}
@@ -147,12 +154,10 @@ func ServerInit(root, platform string) error {
 			}
 			fmt.Printf("  [ok] builds with %q\n\n", plan.Build)
 
-			// Layer 4: run it. Compiling is not running — the previous hub passed
-			// every gate and died two seconds into startup on a namespace guard
-			// that rejected its owner. A compiler cannot see that; starting the
-			// binary sees it immediately.
+			// Layer 4's final word. The loop has already run the component and
+			// repaired what it could; this is the report of where it ended.
 			if bin := builtBinary(root, plan.Build); bin != "" {
-				results, output, cerr := RunConformance(root, bin, "orchestrator", printProgress)
+				results, output, cerr := RunConformance(root, bin, "orchestrator", nil)
 				reportConformance(results, output, cerr)
 			}
 		}

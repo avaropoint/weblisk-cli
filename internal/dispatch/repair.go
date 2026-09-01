@@ -208,7 +208,8 @@ func repairPrompt(f PlannedFile, plan *Plan, current string, errs, general []str
 //
 // root is where the build command runs; the files live at root/plan.Root.
 func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []GeneratedFile,
-	onProgress ProgressFunc, checklist []ChecklistItem, spec map[string]string) (BuildResult, []GeneratedFile, error) {
+	onProgress ProgressFunc, checklist []ChecklistItem, spec map[string]string,
+	conformance func([]GeneratedFile) ([]ConformanceResult, string, error)) (BuildResult, []GeneratedFile, error) {
 	dir := filepath.Join(root, plan.Root)
 	if onProgress == nil {
 		onProgress = func(Progress) {}
@@ -246,6 +247,12 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 	// the more interesting half of its job.
 	previousDefects := -1
 	defectStall := 0
+
+	// Runtime failures get their own counters. A component that will not start
+	// is a different question from one whose source violates an assertion, and
+	// one counter would read the transition between them as a regression.
+	previousRuntime := -1
+	runtimeStall := 0
 
 	var result BuildResult
 	for round := 1; round <= repairRoundCeiling; round++ {
@@ -303,6 +310,55 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 		result = RunBuild(root, plan.Build)
 		if result.OK {
 			onProgress(Progress{Path: "build", Status: "built", Attempt: round})
+
+			// Compiling is not running. Before asking whether the source
+			// satisfies the assertions, find out whether the thing starts —
+			// a hub once passed every gate and died two seconds in on a
+			// namespace guard that rejected its owner.
+			if conformance != nil {
+				results, startupOut, cerr := conformance(rebuildList(content, order))
+				if cerr != nil {
+					targets := FilesBehindRuntimeFailure(startupOut, content)
+					if len(targets) == 0 {
+						onProgress(Progress{Path: "run", Status: "failed", Attempt: round,
+							Detail: "does not run, and the failure names nothing in this plan: " + cerr.Error()})
+						return result, rebuildList(content, order), nil
+					}
+					if previousRuntime >= 0 && len(targets) >= previousRuntime {
+						runtimeStall++
+					} else {
+						runtimeStall = 0
+					}
+					if runtimeStall >= 2 {
+						onProgress(Progress{Path: "run", Status: "failed", Attempt: round,
+							Detail: "does not run, and two rounds of repair changed nothing"})
+						return result, rebuildList(content, order), nil
+					}
+					previousRuntime = len(targets)
+
+					for _, path := range targets {
+						f := byPath[path]
+						onProgress(Progress{Path: path, Status: "repairing", Attempt: round,
+							Detail: firstLine(strings.Split(strings.TrimSpace(startupOut), "\n"))})
+						accepted, aerr := askForFile(provider,
+							runtimeRepairPrompt(f, content[path], startupOut, platBP, plan.Module), f)
+						if aerr != nil {
+							return result, rebuildList(content, order), fmt.Errorf("repairing %s: %w", path, aerr)
+						}
+						if accepted != "" {
+							content[path] = accepted
+						}
+					}
+					if err := writeContent(dir, content, order); err != nil {
+						return result, rebuildList(content, order), err
+					}
+					continue
+				}
+				if bad := FailedConformance(results); len(bad) > 0 {
+					onProgress(Progress{Path: "run", Status: "progress", Attempt: round,
+						Detail: fmt.Sprintf("runs, %d conformance test(s) failing", len(bad))})
+				}
+			}
 
 			// Compiling is not conforming, and the blueprints say what conforming
 			// means.

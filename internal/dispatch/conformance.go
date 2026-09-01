@@ -40,6 +40,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -327,4 +328,105 @@ func FailedConformance(rs []ConformanceResult) []ConformanceResult {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// reQuotedRun matches a quoted value inside a rendered error message.
+var reQuotedRun = regexp.MustCompile(`"[^"]*"`)
+
+// FilesBehindRuntimeFailure finds the generated files a startup failure is about.
+//
+// A runtime failure names no file. This one —
+//
+//	orchestrator: startup: reserve namespace "system": namespace "system" is reserved
+//
+// is a sentence assembled from format strings in two different files: server.go
+// asks for the namespace and namespaces.go refuses it. The fix could belong to
+// either, so a repair shown only one would be guessing.
+//
+// # Turning a rendered message back into its format string
+//
+// Searching the source for the rendered text finds nothing, because the source
+// holds `namespace %q is reserved` and the output holds `namespace "system" is
+// reserved`. So each quoted run is substituted with the verbs that could have
+// produced it — %q, %s, %v, %d — and the candidates are matched literally. A
+// file either contains that format string or it does not.
+func FilesBehindRuntimeFailure(output string, content map[string]string) []string {
+	var candidates []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) < 16 {
+			continue
+		}
+		// Each colon-separated clause is usually one Errorf. Wrapping means one
+		// line carries several, and the clause is the unit that matches.
+		for _, clause := range strings.Split(line, ": ") {
+			clause = strings.TrimSpace(clause)
+			if len(clause) < 12 {
+				continue
+			}
+			if !reQuotedRun.MatchString(clause) {
+				candidates = append(candidates, clause)
+				continue
+			}
+			for _, verb := range []string{"%q", "%s", "%v", "%d"} {
+				candidates = append(candidates, reQuotedRun.ReplaceAllString(clause, verb))
+			}
+			// And the literal parts either side of the quotes, which survive any
+			// verb choice.
+			for _, part := range reQuotedRun.Split(clause, -1) {
+				if part = strings.TrimSpace(part); len(part) >= 12 {
+					candidates = append(candidates, part)
+				}
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	var out []string
+	for path, body := range content {
+		if !strings.HasSuffix(path, ".go") {
+			continue
+		}
+		for _, c := range candidates {
+			if strings.Contains(body, c) {
+				if !containsString(out, path) {
+					out = append(out, path)
+				}
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// runtimeRepairPrompt asks for a file back, given what happened when the
+// component was started.
+func runtimeRepairPrompt(f PlannedFile, current, startupOutput, platBP, module string) string {
+	var b strings.Builder
+	b.WriteString("The component compiles but does not run. It was started and failed.\\n\\n")
+	b.WriteString("What it printed:\\n\\n")
+	b.WriteString(indentBlock(startupOutput, "    "))
+	b.WriteString("\\n\\nThis is a logic fault, not a compile error — two requirements " +
+		"implemented in two places without agreeing. Read the message and the " +
+		"blueprints, and correct whichever side of the contradiction is wrong.\\n\\n")
+	fmt.Fprintf(&b, "File: %s\\nPurpose: %s\\n", f.Path, f.Purpose)
+	if module != "" {
+		fmt.Fprintf(&b, "Module path: %s\\n", module)
+	}
+	if keep := currentDeclarations(f.Path, current); keep != "" {
+		b.WriteString("\\nThis file currently declares the following, and other files call " +
+			"them. Keep every one:\\n")
+		b.WriteString(keep)
+	}
+	b.WriteString("\\nCurrent content:\\n\\n")
+	b.WriteString(current)
+	b.WriteString("\\n\\nReturn the corrected file and nothing else.\\n")
+	if platBP != "" {
+		b.WriteString("\\nPlatform blueprint:\\n\\n")
+		b.WriteString(platBP)
+	}
+	return b.String()
 }

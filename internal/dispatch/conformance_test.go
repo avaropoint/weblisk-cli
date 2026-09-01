@@ -164,3 +164,61 @@ func TestUnrunIsNeverCountedAsPassed(t *testing.T) {
 		t.Errorf("failed set = %+v; unrun must not appear", f)
 	}
 }
+
+func TestARuntimeFailureIsAttributedToBothSidesOfTheContradiction(t *testing.T) {
+	// The real one. The message is assembled from format strings in two files:
+	// server.go asks for the namespace, namespaces.go refuses it. The fix could
+	// belong to either, so a repair shown only one would be guessing.
+	output := `[dev] using in-memory storage — data will not survive restart
+orchestrator: startup: reserve namespace "system": namespace "system" is reserved`
+
+	content := map[string]string{
+		"internal/orchestrator/server.go": "package orchestrator\n\n" +
+			"// return fmt.Errorf(\"reserve namespace %q: %w\", protocol.NamespaceSystem, err)\n",
+		"internal/storage/namespaces.go": "package storage\n\n" +
+			"// return protocol.NewErrorf(code, \"namespace %q is reserved\", namespace)\n",
+		"internal/protocol/types.go": "package protocol\n\ntype AgentManifest struct{}\n",
+		"go.mod":                     "module tenant\n",
+	}
+	got := FilesBehindRuntimeFailure(output, content)
+	for _, want := range []string{"internal/orchestrator/server.go", "internal/storage/namespaces.go"} {
+		if !containsString(got, want) {
+			t.Errorf("%s is named in the failure and was not found: got %v", want, got)
+		}
+	}
+	// Files with nothing to do with it must be left alone.
+	if containsString(got, "internal/protocol/types.go") {
+		t.Errorf("an unrelated file was targeted: %v", got)
+	}
+	if containsString(got, "go.mod") {
+		t.Error("a non-Go file was targeted")
+	}
+}
+
+func TestAFailureMatchingNothingTargetsNothing(t *testing.T) {
+	// A component killed by the OS, or failing on something no generated file
+	// mentions. Repairing a file at random is worse than reporting the failure.
+	content := map[string]string{"a.go": "package main\n\nfunc main() {}\n"}
+	if got := FilesBehindRuntimeFailure("signal: killed", content); len(got) != 0 {
+		t.Errorf("targeted %v for a failure naming nothing", got)
+	}
+	if got := FilesBehindRuntimeFailure("exit status 1", content); len(got) != 0 {
+		t.Errorf("targeted %v for a bare exit status", got)
+	}
+}
+
+func TestTheRuntimeRepairPromptCarriesWhatItNeeds(t *testing.T) {
+	p := runtimeRepairPrompt(
+		PlannedFile{Path: "internal/storage/namespaces.go", Purpose: "namespace registry"},
+		"package storage\n\nfunc ClaimNamespace() {}\n",
+		`orchestrator: startup: reserve namespace "system": namespace "system" is reserved`,
+		"PLATFORM", "avaropoint")
+	for _, want := range []string{
+		"does not run", "reserve namespace", "logic fault, not a compile error",
+		"Module path: avaropoint", "ClaimNamespace", "Keep every one",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the runtime-repair prompt is missing %q", want)
+		}
+	}
+}
