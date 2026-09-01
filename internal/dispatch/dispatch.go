@@ -146,6 +146,15 @@ func ServerInit(root, platform string) error {
 				return fmt.Errorf("build failed: %s", plan.Build)
 			}
 			fmt.Printf("  [ok] builds with %q\n\n", plan.Build)
+
+			// Layer 4: run it. Compiling is not running — the previous hub passed
+			// every gate and died two seconds into startup on a namespace guard
+			// that rejected its owner. A compiler cannot see that; starting the
+			// binary sees it immediately.
+			if bin := builtBinary(root, plan.Build); bin != "" {
+				results, output, cerr := RunConformance(root, bin, "orchestrator", printProgress)
+				reportConformance(results, output, cerr)
+			}
 		}
 
 		// What the blueprints say, as read by the model — the authority.
@@ -994,4 +1003,59 @@ func moduleNameFor(root string) string {
 		return "tenant"
 	}
 	return out
+}
+
+// builtBinary reads the output path out of the plan's build command.
+//
+// `go build -o bin/orchestrator ./cmd/orchestrator` — the -o argument. Taken
+// from the command rather than assumed, because the command is the platform
+// blueprint's and this should not hold a second opinion about where the binary
+// lands.
+func builtBinary(root, buildCmd string) string {
+	fields := strings.Fields(buildCmd)
+	for i, f := range fields {
+		if f == "-o" && i+1 < len(fields) {
+			return filepath.Join(root, fields[i+1])
+		}
+	}
+	return ""
+}
+
+// reportConformance prints what running the component established.
+func reportConformance(results []ConformanceResult, output string, err error) {
+	if err != nil {
+		// It never answered. Its own output is the finding.
+		fmt.Printf("  [failed] the component does not run\n           %v\n\n", err)
+		if t := strings.TrimSpace(output); t != "" {
+			fmt.Println(indentBlock(lastLines(t, 12), "    "))
+			fmt.Println()
+		}
+		return
+	}
+	passed, failed, unrun := ConformanceSummary(results)
+	fmt.Printf("  Conformance L1: %d passed, %d failed, %d unrun\n", passed, failed, unrun)
+	for _, r := range results {
+		switch {
+		case r.Unrun:
+			fmt.Printf("    [unrun] %s %s — %s\n", r.ID, r.Name, r.Detail)
+		case r.Passed:
+			fmt.Printf("    [pass]  %s %s — %s\n", r.ID, r.Name, r.Evidence)
+		default:
+			fmt.Printf("    [FAIL]  %s %s\n            %s\n", r.ID, r.Name, r.Detail)
+		}
+	}
+	if unrun > 0 {
+		fmt.Printf("    %d test(s) have no harness yet — they are NOT passes\n", unrun)
+	}
+	fmt.Println()
+}
+
+// lastLines returns the tail of some output, which is where a startup failure
+// says what went wrong.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
