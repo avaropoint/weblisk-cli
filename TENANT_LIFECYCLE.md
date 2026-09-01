@@ -52,25 +52,38 @@ avaropoint/              the tenant IS the root — of the directory and of the 
     grants/              who may enter, one file per grant
     bootstrap            one-time secret; deleted the moment it is claimed
   blueprints/            the blueprints this tenant has adopted
+
   go.mod                 the tenant is one module
-  cmd/
-    orchestrator/        one directory per binary
-  internal/
-    protocol/            one definition of every wire type, imported not copied
-    identity/
-    storage/
-    observability/
-    orchestrator/
+  internal/              shared code — one definition, imported everywhere
+    protocol/            wire types and the error registry
+    identity/            keys, signing, tokens
+    storage/             the storage contract and its backends
+    observability/       logging, metrics, tracing
+    agent/               the agent framework
+    orchestrator/        registry, routing, channels, audit, admin
+
+  server/                the orchestrator binary
+  admin/                 the administrative service
+  agents/<component>/    one directory per agent adopted
+  domains/<component>/   one per domain controller adopted
+
   bin/                   build output, not source
 ```
 
-Everything a tenant owns is scoped to that one directory. There is no `server/`
-subdirectory and no module per component: the orchestrator is one binary among
-the tenant's binaries, not the thing the tenant is arranged around. The layout
-under `cmd/` and `internal/` is the platform's — see
-[`platforms/go.md`](../weblisk-blueprints/platforms/go.md) — and `domains/` and
-`agents/` are gone from this listing because a domain controller and an agent are
-each just another `cmd/<component>` in the same module.
+Everything a tenant owns is scoped to that one directory, and it is **one
+module**: shared code lives once in `internal/` and is imported, never copied
+between components. Each component is a `package main` in its own directory,
+which is what makes symbol collisions between them impossible.
+
+A **domain controller is an agent** — `architecture/domain` registers it with the
+same `AgentManifest`, distinguished by `type: "domain"`, serving the same six
+protocol endpoints — so both import `internal/agent`. `domains/` sits beside
+`agents/` because the two are operated differently, not because they are
+different species.
+
+The per-platform layout belongs to the platform blueprint; see
+[`platforms/go.md`](../weblisk-blueprints/platforms/go.md). A tenant with no
+agents has no `agents/` directory: the structure follows what has been adopted.
 
 Nothing here is a template. Every file is either generated (keys), written from
 answers (`config.yaml`, `entity.json`), or created empty (`grants/`). That is the

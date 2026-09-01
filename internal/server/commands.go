@@ -130,7 +130,7 @@ func handleInit(args []string, root string) error {
 // directory name.
 func generatedRootMarkers(root string) []string {
 	var found []string
-	for _, m := range []string{"go.mod", "cmd", "internal", "wrangler.toml", "package.json", "Cargo.toml"} {
+	for _, m := range []string{"go.mod", "internal", "server", "agents", "domains", "wrangler.toml", "package.json", "Cargo.toml"} {
 		if _, err := os.Stat(filepath.Join(root, m)); err == nil {
 			found = append(found, m)
 		}
@@ -150,13 +150,13 @@ func handleStart(args []string, root string) error {
 
 // startGoServer builds and runs the orchestrator binary.
 //
-// One module, so the binary is a package under cmd/ rather than the whole
-// directory. `go build .` at the tenant root would try to build the root
-// package, which under this layout has no main.
+// One module rooted at the tenant, so the orchestrator is the main package in
+// server/ rather than the whole directory. `go build .` at the tenant root would
+// try to build the root package, which under this layout has no main.
 func startGoServer(dir string, args []string) error {
 	fmt.Println("  Building orchestrator...")
 	bin := filepath.Join(dir, "bin", "orchestrator")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/orchestrator")
+	build := exec.Command("go", "build", "-o", bin, "./server")
 	build.Dir = dir
 	build.Stdout = os.Stdout
 	build.Stderr = os.Stderr
