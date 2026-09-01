@@ -159,6 +159,14 @@ func repairPrompt(f PlannedFile, plan *Plan, errs, general []string,
 		}
 	}
 	fmt.Fprintf(&b, "\nPurpose: %s\n", f.Purpose)
+	if plan.Module != "" {
+		// The repair loop needs the module path for the same reason generation
+		// does, and it did not have it. One file imported a module name from an
+		// earlier run; the loop rewrote it three times, each time guessing the
+		// same wrong prefix, and stalled on a fault it had no way to see.
+		fmt.Fprintf(&b, "Module path: %s — every import of this project's own "+
+			"packages begins with it.\n", plan.Module)
+	}
 	if len(f.Declares) > 0 {
 		fmt.Fprintf(&b, "It MUST still define: %s\n", strings.Join(f.Declares, ", "))
 	}
@@ -254,7 +262,7 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 					f := byPath[path]
 					onProgress(Progress{Path: path, Status: "repairing", Attempt: round,
 						Detail: firstLine([]string{importFaultLine(prep.Output)})})
-					prompt := importRepairPrompt(f, content[path], prep.Output, platBP)
+					prompt := importRepairPrompt(f, content[path], prep.Output, platBP, plan.Module)
 					accepted, aerr := askForFile(provider, prompt, f)
 					if aerr != nil {
 						return prep, files, fmt.Errorf("repairing imports in %s: %w", path, aerr)
@@ -334,7 +342,7 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 				f := byPath[path]
 				onProgress(Progress{Path: path, Status: "repairing", Attempt: round,
 					Detail: byFile[path][0].Item.Text})
-				accepted, aerr := askForFile(provider, conformancePrompt(f, content[path], byFile[path], platBP), f)
+				accepted, aerr := askForFile(provider, conformancePrompt(f, content[path], byFile[path], platBP, plan.Module), f)
 				if aerr != nil {
 					return result, rebuildList(content, order), fmt.Errorf("conforming %s: %w", path, aerr)
 				}
@@ -522,7 +530,7 @@ func sortedViolationKeys(m map[string][]Violation) []string {
 // paraphrase would be the tooling's opinion of a requirement standing in for the
 // requirement, which is the failure mode that produced four false positives in
 // the checking layer already.
-func conformancePrompt(f PlannedFile, current string, failures []Violation, platBP string) string {
+func conformancePrompt(f PlannedFile, current string, failures []Violation, platBP, module string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "The file %s compiles but violates verification assertions from the blueprints it implements.\n\n", f.Path)
 	fmt.Fprintf(&b, "Purpose: %s\n\n", f.Purpose)
@@ -532,6 +540,10 @@ func conformancePrompt(f PlannedFile, current string, failures []Violation, plat
 		if r.Evidence != "" {
 			fmt.Fprintf(&b, "    What was found: %s\n", r.Evidence)
 		}
+	}
+	if module != "" {
+		fmt.Fprintf(&b, "\nModule path: %s — every import of this project's own "+
+			"packages begins with it.\n", module)
 	}
 	b.WriteString("\nCurrent content of the file:\n\n")
 	b.WriteString(current)
@@ -601,14 +613,19 @@ func importFaultLine(output string) string {
 // change nothing else. A wrong import is a one-token fault, and inviting a
 // rewrite of a file that is otherwise correct is how a repair becomes a
 // regression.
-func importRepairPrompt(f PlannedFile, current, resolverOutput, platBP string) string {
+func importRepairPrompt(f PlannedFile, current, resolverOutput, platBP, module string) string {
 	var b strings.Builder
 	b.WriteString("The dependency resolver rejected an import in this file.\n\n")
 	b.WriteString("Resolver output:\n\n")
 	b.WriteString(indentBlock(resolverOutput, "    "))
 	b.WriteString("\n\nThe import path does not exist. The platform blueprint's Primitive " +
 		"Mapping table gives the exact package path for every required module — use it.\n\n")
-	fmt.Fprintf(&b, "File: %s\nPurpose: %s\n\nCurrent content:\n\n", f.Path, f.Purpose)
+	fmt.Fprintf(&b, "File: %s\nPurpose: %s\n", f.Path, f.Purpose)
+	if module != "" {
+		fmt.Fprintf(&b, "Module path: %s — every import of this project's own "+
+			"packages begins with it.\n", module)
+	}
+	b.WriteString("\nCurrent content:\n\n")
 	b.WriteString(current)
 	b.WriteString("\n\nReturn the file with its imports corrected and NOTHING else changed. " +
 		"Every declaration, signature and line of logic stays exactly as it is.\n")

@@ -62,35 +62,34 @@ func NewGenerationCache(root string) *GenerationCache {
 	return &GenerationCache{dir: dir, Enabled: true}
 }
 
-// cacheKey hashes everything that determined a file's content.
+// cacheKey hashes the prompt that would produce the file.
 //
-// Deliberately includes the system prompt: changing the instruction changes what
-// a model produces, and reusing a file generated under different instructions
-// would silently ship output nobody asked for.
-func cacheKey(f PlannedFile, sentBlueprints map[string]string, platBP, systemPrompt string) string {
+// # Why the prompt itself, and not a list of ingredients
+//
+// This used to hash a hand-listed set: the plan entry, the blueprints sent, the
+// platform blueprint, the system prompt. That list was a second statement of
+// what determines a file, and it drifted from the first the moment the prompt
+// gained an input nobody added to it.
+//
+// It did. The module path was added to the prompt — the fact that made forty-nine
+// files agree on their import paths — and the key did not change, so a later run
+// served forty-three files generated BEFORE that fix. They imported a module
+// name that no longer existed, and the build failed with "package
+// weblisk-server/internal/identity is not in std" in a file nobody had touched.
+//
+// Hashing the rendered prompt removes the possibility. Any change to what the
+// model is told changes the key, without anyone having to remember.
+//
+// # What is deliberately excluded
+//
+// The prompt is rendered with no accumulated declarations, so a file's key does
+// not depend on the siblings written before it. Including them would invalidate
+// every later file whenever any earlier one changed, which costs a full
+// regeneration for a change that usually affects nothing. That is the same
+// trade the previous key made, kept deliberately rather than by omission.
+func cacheKey(f PlannedFile, prompt, systemPrompt string) string {
 	h := sha256.New()
-
-	// The plan entry, canonically — field order must not change the key.
-	entry, _ := json.Marshal(struct {
-		Path     string   `json:"path"`
-		Purpose  string   `json:"purpose"`
-		Declares []string `json:"declares"`
-		Serves   []string `json:"serves"`
-	}{f.Path, f.Purpose, sortedCopy(f.Declares), sortedCopy(f.Serves)})
-	h.Write(entry)
-
-	// Only the blueprints this file was actually sent, in a stable order.
-	names := make([]string, 0, len(sentBlueprints))
-	for n := range sentBlueprints {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		h.Write([]byte(n))
-		h.Write([]byte(sentBlueprints[n]))
-	}
-
-	h.Write([]byte(platBP))
+	h.Write([]byte(prompt))
 	h.Write([]byte(systemPrompt))
 	return hex.EncodeToString(h.Sum(nil))
 }

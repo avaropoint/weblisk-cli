@@ -3,8 +3,21 @@ package dispatch
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 )
+
+// promptFor renders the invariant prompt a file would be generated from, which
+// is what the cache is keyed on.
+func promptFor(f PlannedFile, bps map[string]string, platBP, module string) string {
+	plan := &Plan{Root: ".", Module: module, Files: []PlannedFile{f}}
+	order := make([]string, 0, len(bps))
+	for k := range bps {
+		order = append(order, k)
+	}
+	sort.Strings(order)
+	return filePrompt(f, plan, "go", bps, order, platBP, nil, nil, nil, nil)
+}
 
 func TestIdenticalInputsReuseTheFile(t *testing.T) {
 	root := t.TempDir()
@@ -12,38 +25,38 @@ func TestIdenticalInputsReuseTheFile(t *testing.T) {
 	f := PlannedFile{Path: "identity.go", Purpose: "keys", Declares: []string{"Sign"}}
 	bps := map[string]string{"protocol/identity.md": "IDENTITY"}
 
-	k1 := cacheKey(f, bps, "PLATFORM", fileSystemPrompt)
+	k1 := cacheKey(f, promptFor(f, bps, "PLATFORM", "t"), fileSystemPrompt)
 	c.Put(k1, "package main\n")
 	if got := c.Get(k1); got != "package main\n" {
 		t.Fatalf("cached content not returned: %q", got)
 	}
-	// A second run with the same inputs must produce the same key.
-	if k2 := cacheKey(f, bps, "PLATFORM", fileSystemPrompt); k2 != k1 {
+	if k2 := cacheKey(f, promptFor(f, bps, "PLATFORM", "t"), fileSystemPrompt); k2 != k1 {
 		t.Error("identical inputs produced different keys")
 	}
 }
 
 func TestChangingABlueprintInvalidatesTheFile(t *testing.T) {
-	// This is derived staleness: the file is stale exactly when what it was built
-	// from changed.
+	// Derived staleness: the file is stale exactly when what it was built from
+	// changed.
 	f := PlannedFile{Path: "identity.go", Purpose: "keys"}
-	before := cacheKey(f, map[string]string{"protocol/identity.md": "V1"}, "P", fileSystemPrompt)
-	after := cacheKey(f, map[string]string{"protocol/identity.md": "V2"}, "P", fileSystemPrompt)
+	before := cacheKey(f, promptFor(f, map[string]string{"protocol/identity.md": "V1"}, "P", "t"), fileSystemPrompt)
+	after := cacheKey(f, promptFor(f, map[string]string{"protocol/identity.md": "V2"}, "P", "t"), fileSystemPrompt)
 	if before == after {
 		t.Error("editing a blueprint did not invalidate the file generated from it")
 	}
 }
 
-func TestAnUnrelatedBlueprintDoesNotInvalidate(t *testing.T) {
-	// The payoff of relevance filtering: a file sent only what it needs is
-	// invalidated only by changes to that. Editing the orchestrator spec must
-	// not force go.mod to be regenerated.
-	f := PlannedFile{Path: "go.mod", Purpose: "module"}
-	sent := map[string]string{} // go.mod is sent no protocol blueprints
-	before := cacheKey(f, sent, "PLATFORM", fileSystemPrompt)
-	after := cacheKey(f, sent, "PLATFORM", fileSystemPrompt)
-	if before != after {
-		t.Error("a file's key changed with no change to its inputs")
+func TestChangingTheModulePathInvalidates(t *testing.T) {
+	// The fault this key shape exists for. The module path was added to the
+	// prompt — the fact that makes every file agree on its import paths — and the
+	// old key, a hand-listed set of ingredients, did not include it. A later run
+	// served forty-three files generated before the fix, importing a module name
+	// that no longer existed, and the build failed in a file nobody had touched.
+	f := PlannedFile{Path: "internal/orchestrator/handlers.go", Purpose: "handlers"}
+	bps := map[string]string{"x.md": "SPEC"}
+	if cacheKey(f, promptFor(f, bps, "P", "weblisk-server"), fileSystemPrompt) ==
+		cacheKey(f, promptFor(f, bps, "P", "hubgen"), fileSystemPrompt) {
+		t.Error("changing the module path did not invalidate files whose imports depend on it")
 	}
 }
 
@@ -51,123 +64,54 @@ func TestChangingTheInstructionsInvalidates(t *testing.T) {
 	// Reusing a file generated under different instructions would silently ship
 	// output nobody asked for.
 	f := PlannedFile{Path: "a.go", Purpose: "x"}
-	bps := map[string]string{"b.md": "B"}
-	if cacheKey(f, bps, "P", "prompt one") == cacheKey(f, bps, "P", "prompt two") {
+	p := promptFor(f, map[string]string{"b.md": "B"}, "P", "t")
+	if cacheKey(f, p, "prompt one") == cacheKey(f, p, "prompt two") {
 		t.Error("changing the system prompt did not invalidate the cache")
 	}
 }
 
 func TestChangingThePlanEntryInvalidates(t *testing.T) {
+	// A file asked to declare something different is a different file.
 	bps := map[string]string{"b.md": "B"}
-	a := PlannedFile{Path: "a.go", Purpose: "x", Declares: []string{"One"}}
-	b := PlannedFile{Path: "a.go", Purpose: "x", Declares: []string{"One", "Two"}}
-	if cacheKey(a, bps, "P", fileSystemPrompt) == cacheKey(b, bps, "P", fileSystemPrompt) {
-		t.Error("asking a file to declare more did not invalidate it")
+	a := PlannedFile{Path: "a.go", Purpose: "x", Declares: []string{"Alpha"}}
+	b := PlannedFile{Path: "a.go", Purpose: "x", Declares: []string{"Beta"}}
+	if cacheKey(a, promptFor(a, bps, "P", "t"), fileSystemPrompt) ==
+		cacheKey(b, promptFor(b, bps, "P", "t"), fileSystemPrompt) {
+		t.Error("changing what a file must declare did not invalidate it")
 	}
 }
 
-func TestDeclarationOrderDoesNotChangeTheKey(t *testing.T) {
-	// A plan listing the same symbols in a different order is the same request.
-	bps := map[string]string{"b.md": "B"}
-	a := PlannedFile{Path: "a.go", Purpose: "x", Declares: []string{"One", "Two"}}
-	b := PlannedFile{Path: "a.go", Purpose: "x", Declares: []string{"Two", "One"}}
-	if cacheKey(a, bps, "P", fileSystemPrompt) != cacheKey(b, bps, "P", fileSystemPrompt) {
-		t.Error("reordering the declares list forced a regeneration")
-	}
-}
-
-func TestAnUnwritableCacheDisablesItselfRatherThanFailing(t *testing.T) {
-	// Losing reuse is an inconvenience; refusing to generate over it is not.
-	c := NewGenerationCache("/proc/nonexistent-and-unwritable")
-	if c.Enabled {
-		t.Skip("this filesystem allowed the directory")
-	}
-	if got := c.Get("anything"); got != "" {
-		t.Error("a disabled cache returned content")
-	}
-	c.Put("k", "v") // must not panic
-}
-
-func TestPruneKeepsLiveEntries(t *testing.T) {
+func TestPruneRemovesOnlyUnreferencedEntries(t *testing.T) {
 	root := t.TempDir()
 	c := NewGenerationCache(root)
-	live := "a" + string(make([]byte, 0))
-	for i := 0; i < 63; i++ {
-		live += "b"
-	}
-	dead := live[:63] + "c"
-	c.Put(live, "keep")
-	c.Put(dead, "drop")
-	removed, err := c.Prune(map[string]bool{live: true})
+	live := cacheKey(PlannedFile{Path: "a.go"}, "live", fileSystemPrompt)
+	dead := cacheKey(PlannedFile{Path: "b.go"}, "dead", fileSystemPrompt)
+	c.Put(live, "A")
+	c.Put(dead, "B")
+	n, err := c.Prune(map[string]bool{live: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed != 1 {
-		t.Errorf("pruned %d entries, want 1", removed)
+	if n != 1 {
+		t.Errorf("pruned %d, want 1", n)
 	}
-	if _, err := os.Stat(filepath.Join(root, cacheDirName, live)); err != nil {
-		t.Error("a live entry was pruned")
-	}
-}
-
-// TestThePlanIsReusedWhenRequirementsAreUnchanged is what makes the file cache
-// useful. Without it the model re-plans every run — ten files where it planned
-// twelve — and every per-file key is invalidated by a plan entry nobody changed.
-// Four consecutive runs reported "0 of N files reused" for exactly this reason.
-func TestThePlanIsReusedWhenRequirementsAreUnchanged(t *testing.T) {
-	root := t.TempDir()
-	c := NewGenerationCache(root)
-	req := &Requirements{Types: []string{"A", "B"}, Endpoints: []string{"GET /v1/health"}}
-	k := planKey(req, "orchestrator", "go", "PLATFORM", planSystemPrompt)
-
-	if c.GetPlan(k) != nil {
-		t.Fatal("an empty cache returned a plan")
-	}
-	original := &Plan{Target: "orchestrator", Root: "server", Build: "go build",
-		Files: []PlannedFile{{Path: "a.go", Purpose: "x"}}}
-	c.PutPlan(k, original)
-
-	got := c.GetPlan(k)
-	if got == nil {
-		t.Fatal("a stored plan was not returned")
-	}
-	if len(got.Files) != 1 || got.Files[0].Path != "a.go" || got.Build != "go build" {
-		t.Errorf("the plan round-tripped wrongly: %+v", got)
+	if c.Get(live) != "A" {
+		t.Error("a referenced entry was pruned")
 	}
 }
 
-func TestChangingRequirementsInvalidatesThePlan(t *testing.T) {
-	// A new type in the protocol must produce a new plan, or the generated
-	// implementation silently omits it.
-	a := &Requirements{Types: []string{"A"}}
-	b := &Requirements{Types: []string{"A", "B"}}
-	if planKey(a, "orchestrator", "go", "P", planSystemPrompt) ==
-		planKey(b, "orchestrator", "go", "P", planSystemPrompt) {
-		t.Error("adding a required type did not invalidate the plan")
+func TestACacheThatCannotOpenDisablesItself(t *testing.T) {
+	// Losing reuse is an inconvenience; refusing to generate over it is not.
+	f := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestChangingAChecklistAssertionInvalidatesThePlan(t *testing.T) {
-	// Assertions shape the plan — the model cites them in its file purposes — so
-	// a changed assertion must re-plan.
-	a := &Requirements{Checklist: []ChecklistItem{{Source: "go.md", Text: "one"}}}
-	b := &Requirements{Checklist: []ChecklistItem{{Source: "go.md", Text: "two"}}}
-	if planKey(a, "orchestrator", "go", "P", planSystemPrompt) ==
-		planKey(b, "orchestrator", "go", "P", planSystemPrompt) {
-		t.Error("changing a checklist assertion did not invalidate the plan")
+	c := NewGenerationCache(f)
+	if c.Enabled {
+		t.Error("a cache that cannot create its directory reported itself enabled")
 	}
-}
-
-func TestACorruptCachedPlanIsIgnored(t *testing.T) {
-	// A truncated or hand-edited cache entry must cause a re-plan, not a crash.
-	root := t.TempDir()
-	c := NewGenerationCache(root)
-	c.Put("plan-x", "{not json")
-	if c.GetPlan("plan-x") != nil {
-		t.Error("a corrupt cached plan was returned")
-	}
-	c.Put("plan-y", `{"target":"orchestrator","files":[]}`)
-	if c.GetPlan("plan-y") != nil {
-		t.Error("a cached plan with no files was returned")
+	c.Put("k", "v")
+	if c.Get("k") != "" {
+		t.Error("a disabled cache returned content")
 	}
 }

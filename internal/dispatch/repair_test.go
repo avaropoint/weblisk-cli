@@ -532,8 +532,8 @@ func TestTheImportRepairAsksForNothingElse(t *testing.T) {
 		PlannedFile{Path: "internal/identity/keys.go", Purpose: "ML-DSA-65 keys"},
 		"package identity\n\nfunc Generate() {}\n",
 		"does not contain package github.com/cloudflare/circl/sign/mldsa65",
-		"PLATFORM")
-	for _, want := range []string{"NOTHING else changed", "Primitive Mapping", "does not contain package", "func Generate()"} {
+		"PLATFORM", "avaropoint")
+	for _, want := range []string{"NOTHING else changed", "Primitive Mapping", "does not contain package", "func Generate()", "Module path: avaropoint"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("the import-repair prompt is missing %q", want)
 		}

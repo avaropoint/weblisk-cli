@@ -421,8 +421,11 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 		// Reuse when every input that produced this file is unchanged: the plan
 		// entry, the blueprints it was sent, and the instructions. Regenerating
 		// an identical file costs two minutes and produces the same bytes.
-		sent := relevantBlueprints(f, blueprints)
-		key := cacheKey(f, sent, platBP, fileSystemPrompt)
+		// The prompt IS the key: rendered without accumulated declarations, so it
+		// covers every input that shapes this file and nothing that merely
+		// precedes it.
+		invariant := filePrompt(f, plan, platform, blueprints, bpOrder, platBP, nil, nil, checklist, bindings)
+		key := cacheKey(f, invariant, fileSystemPrompt)
 		if cached := cache.Get(key); cached != "" {
 			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path, Status: "reused"})
 			generated = append(generated, GeneratedFile{Path: f.Path, Content: cached, Lang: inferLang(f.Path)})
