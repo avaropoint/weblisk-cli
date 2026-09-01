@@ -82,6 +82,11 @@ func ServerInit(root, platform string) error {
 			}
 			cache.PutPlan(pk, plan)
 		}
+		// The tenant's name is the module path — platforms/go states it as
+		// "module <tenant>". Set here rather than asked of the model, because a
+		// fact two files must agree on should not be guessed twice.
+		plan.Module = moduleNameFor(root)
+
 		fmt.Printf("\n  Plan accepted: %d files in %s/\n", len(plan.Files), plan.Root)
 		for _, f := range plan.Order() {
 			fmt.Printf("    %s — %s\n", f.Path, f.Purpose)
@@ -953,4 +958,34 @@ func indentBlock(s, prefix string) string {
 		lines[i] = prefix + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+// moduleNameFor is the import-path prefix for a tenant's own packages.
+//
+// The tenant directory's name, per platforms/go: "module <tenant>". A name Go
+// will not accept as a module path is replaced rather than passed through, since
+// an unusable module path fails at `go mod tidy` with an error about a file
+// nobody wrote.
+func moduleNameFor(root string) string {
+	name := filepath.Base(filepath.Clean(root))
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		if wd, err := os.Getwd(); err == nil {
+			name = filepath.Base(wd)
+		}
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-_")
+	if out == "" {
+		return "tenant"
+	}
+	return out
 }

@@ -308,6 +308,19 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 		b.WriteString("\n" + bd)
 	}
 	fmt.Fprintf(&b, "\nPlatform: %s\nTarget directory: %s\n", platform, plan.Root)
+	if mod := plan.Module; mod != "" {
+		// The module path is a fact every file needs and nothing used to carry.
+		//
+		// With one flat package there were no import paths, so this could not go
+		// wrong. The multi-package layout created the requirement: go.mod is
+		// generated first and declares the module, then fifty-two later files
+		// each have to name it in every import. In one run go.mod said
+		// "module weblisk" and all fifty-two imported "weblisk-server/internal/…"
+		// — consistent with each other, and wrong.
+		fmt.Fprintf(&b, "Module path: %s\n"+
+			"Every import of this project's own packages begins with it, "+
+			"and go.mod declares exactly this module.\n", mod)
+	}
 	b.WriteString("\nThe complete file set for this target is: ")
 	for i, pf := range plan.Order() {
 		if i > 0 {

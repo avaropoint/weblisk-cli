@@ -31,6 +31,12 @@ type PlannedFile struct {
 type Plan struct {
 	Target string `json:"target"`
 	Root   string `json:"root"`
+	// Module is the import path prefix for this project's own packages.
+	//
+	// Not asked of the model: it is the tenant's name, which the platform
+	// blueprint already states ("module <tenant>"), and a fact two files must
+	// agree on is not something to have guessed twice.
+	Module string `json:"-"`
 	// Prepare resolves dependencies before the build — "go mod tidy" and its
 	// equivalents. Writing source cannot produce a lockfile, and a build without
 	// one fails naming a source file that has nothing wrong with it.

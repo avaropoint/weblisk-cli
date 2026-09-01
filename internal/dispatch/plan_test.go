@@ -167,3 +167,34 @@ func TestAnEmptyPlanIsRejected(t *testing.T) {
 		t.Error("a plan with no files was accepted")
 	}
 }
+
+func TestTheModulePathIsStatedOncePerRun(t *testing.T) {
+	// go.mod declared "module weblisk" and all fifty-two other files imported
+	// "weblisk-server/internal/…" — consistent with each other and wrong. With
+	// one flat package there were no import paths and this could not happen; the
+	// multi-package layout created the requirement and nothing carried it.
+	for _, tc := range []struct{ root, want string }{
+		{"/tmp/avaropoint", "avaropoint"},
+		{"/tmp/Acme Corp", "acme-corp"},
+		{"/tmp/weblisk_hub", "weblisk_hub"},
+	} {
+		if got := moduleNameFor(tc.root); got != tc.want {
+			t.Errorf("moduleNameFor(%q) = %q, want %q", tc.root, got, tc.want)
+		}
+	}
+
+	plan := &Plan{Root: ".", Module: "avaropoint",
+		Files: []PlannedFile{{Path: "cmd/orchestrator/main.go", Purpose: "entry"}}}
+	p := filePrompt(plan.Files[0], plan, "go", map[string]string{"x.md": "SPEC"},
+		[]string{"x.md"}, "PLAT", nil, nil, nil, nil)
+	if !strings.Contains(p, "Module path: avaropoint") {
+		t.Error("the module path is not stated in the prompt")
+	}
+	if !strings.Contains(p, "go.mod declares exactly this module") {
+		t.Error("nothing ties go.mod to the imports, which is the fault this prevents")
+	}
+	// It is invariant, so it must sit in the cacheable prefix.
+	if strings.Index(p, "Module path:") > strings.Index(p, "--- YOUR TASK ---") {
+		t.Error("the module path is in the variable tail — it is the same for every file")
+	}
+}
