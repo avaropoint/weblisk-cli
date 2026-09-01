@@ -53,27 +53,29 @@ avaropoint/              the tenant IS the root — of the directory and of the 
     bootstrap            one-time secret; deleted the moment it is claimed
   blueprints/            the blueprints this tenant has adopted
 
-  go.mod                 the tenant is one module
-  internal/              shared code — one definition, imported everywhere
-    protocol/            wire types and the error registry
-    identity/            keys, signing, tokens
-    storage/             the storage contract and its backends
-    observability/       logging, metrics, tracing
-    agent/               the agent framework
-    orchestrator/        registry, routing, channels, audit, admin
-
-  server/                the orchestrator binary
-  admin/                 the administrative service
-  agents/<component>/    one directory per agent adopted
-  domains/<component>/   one per domain controller adopted
-
+  go.mod                 the tenant is one module, rooted here
+  cmd/                   one directory per binary
+    orchestrator/        <- architecture/orchestrator
+    admin/               <- architecture/admin
+    <name>/              <- agents/<name>
+  internal/              one directory per library, named after its blueprint
+    protocol/  identity/  storage/  observability/
+    orchestrator/  admin/
+    agent/               the framework every agent imports
+    domain/              the workflow engine
+    agents/<name>/       one agent's own logic
   bin/                   build output, not source
 ```
 
 Everything a tenant owns is scoped to that one directory, and it is **one
 module**: shared code lives once in `internal/` and is imported, never copied
-between components. Each component is a `package main` in its own directory,
-which is what makes symbol collisions between them impossible.
+between components.
+
+**Every package is named after the blueprint that specifies it.** That is what
+makes the layout derivable rather than a matter of taste — and it is why there is
+no `server/`: the artifact is an *orchestrator*, which is the blueprint's name
+and the binary's name, while `server` corresponds to no blueprint and so traces
+back to nothing.
 
 A **domain controller is an agent** — `architecture/domain` registers it with the
 same `AgentManifest`, distinguished by `type: "domain"`, serving the same six
