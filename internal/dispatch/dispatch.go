@@ -415,6 +415,12 @@ func PatternApply(root, pattern, resource string) error {
 // RequireProvider creates and validates an AI provider.
 func RequireProvider() (Provider, error) {
 	provider, err := NewProvider()
+	if err == nil {
+		// Every path that talks to a model retries a failure that calls itself
+		// temporary. Two runs died on "529 Overloaded … usually temporary — try
+		// again in a moment", one of them on file 49 of 49.
+		provider = WithTransientRetry(provider)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("AI provider required for code generation\n\n"+
 			"  Configure an AI provider:\n"+
