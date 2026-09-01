@@ -42,19 +42,35 @@ it is the verb that puts them in order.
 Taken from `weblisk/.weblisk/`, which is a real instance, rather than invented:
 
 ```
-avaropoint/
+avaropoint/              the tenant IS the root — of the directory and of the module
   .weblisk/
-    config.yaml        hub name, orchestrator port, platform
-    entity.json        what this tenant IS — name, type, description
+    config.yaml          hub name, orchestrator port, platform
+    entity.json          what this tenant IS — name, type, description
     keys/
-      orchestrator.key ML-DSA-65 private key, argon2id at rest
-      orchestrator.pub the hub's identity, published
-    grants/            who may enter, one file per grant
-    bootstrap          one-time secret; deleted the moment it is claimed
-  domains/
-  agents/
-  blueprints/
+      orchestrator.key   ML-DSA-65 private key, argon2id at rest
+      orchestrator.pub   the hub's identity, published
+    grants/              who may enter, one file per grant
+    bootstrap            one-time secret; deleted the moment it is claimed
+  blueprints/            the blueprints this tenant has adopted
+  go.mod                 the tenant is one module
+  cmd/
+    orchestrator/        one directory per binary
+  internal/
+    protocol/            one definition of every wire type, imported not copied
+    identity/
+    storage/
+    observability/
+    orchestrator/
+  bin/                   build output, not source
 ```
+
+Everything a tenant owns is scoped to that one directory. There is no `server/`
+subdirectory and no module per component: the orchestrator is one binary among
+the tenant's binaries, not the thing the tenant is arranged around. The layout
+under `cmd/` and `internal/` is the platform's — see
+[`platforms/go.md`](../weblisk-blueprints/platforms/go.md) — and `domains/` and
+`agents/` are gone from this listing because a domain controller and an agent are
+each just another `cmd/<component>` in the same module.
 
 Nothing here is a template. Every file is either generated (keys), written from
 answers (`config.yaml`, `entity.json`), or created empty (`grants/`). That is the

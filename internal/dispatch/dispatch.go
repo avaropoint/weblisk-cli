@@ -159,7 +159,7 @@ func ServerInit(root, platform string) error {
 
 	fmt.Println("  Generating orchestrator code (no manifest for this platform)...")
 	fmt.Printf("  Platform: %s\n", platform)
-	fmt.Printf("  Target:   %s/server/\n", root)
+	fmt.Printf("  Target:   %s\n", root)
 	fmt.Println()
 
 	response, err := provider.Chat([]Message{
@@ -175,13 +175,15 @@ func ServerInit(root, platform string) error {
 		return fmt.Errorf("AI returned no code files — try a different model or check the response")
 	}
 
-	targetDir := filepath.Join(root, "server")
+	// The tenant folder is the target. A component's own directory comes from the
+	// plan; this fallback path has no plan, so it writes at the tenant root.
+	targetDir := root
 	written, err := writeGeneratedFiles(targetDir, files)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("  [ok] Generated %d files in server/\n", written)
+	fmt.Printf("  [ok] Generated %d files\n", written)
 	for _, f := range files {
 		fmt.Printf("    %s\n", f.Path)
 	}

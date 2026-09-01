@@ -51,7 +51,7 @@ Output rules, which are absolute:
 Shape:
 {
   "target": "orchestrator",
-  "root": "server",
+  "root": ".",
   "prepare": "<the dependency-resolution command from the platform blueprint, if it has one>",
   "build": "<the build command from the platform blueprint>",
   "files": [
@@ -64,6 +64,11 @@ Shape:
     }
   ]
 }
+
+"root" is the directory the target is generated into, relative to the project
+root — and the project root IS the tenant. Everything a tenant owns is scoped to
+that one directory, so unless the platform blueprint says otherwise, "root" is
+".": the module, its binaries and its packages sit directly under the tenant.
 
 "declares" means TOP-LEVEL symbols only — types, functions, methods, constants
 and package-level variables. Do NOT list struct fields, local variables, or

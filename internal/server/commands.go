@@ -100,11 +100,13 @@ func handleInit(args []string, root string) error {
 	//
 	// --resume continues into the existing directory. Without it the guard stands,
 	// because silently writing over somebody's edited hub is a different mistake.
-	serverDir := filepath.Join(root, "server")
-	if _, err := os.Stat(serverDir); err == nil && !resume {
-		return fmt.Errorf("server/ directory already exists at %s\n"+
+	// The tenant folder IS the module root. Everything a tenant owns is scoped to
+	// that one directory, so there is no server/ subdirectory to guard — the
+	// question is whether this tenant already has generated code in it.
+	if existing := generatedRootMarkers(root); len(existing) > 0 && !resume {
+		return fmt.Errorf("this tenant already contains generated code (%s)\n"+
 			"  Use --resume to continue generating into it (cached files are reused),\n"+
-			"  or remove it to start from nothing", serverDir)
+			"  or remove them to start from nothing", strings.Join(existing, ", "))
 	}
 
 	fmt.Println()
@@ -116,30 +118,45 @@ func handleInit(args []string, root string) error {
 		fmt.Println("  Keys:      encrypted at rest")
 	}
 	if resume {
-		fmt.Println("  Mode:      resuming into the existing server/ directory")
+		fmt.Println("  Mode:      resuming into the existing tenant")
 	}
 	fmt.Println()
 
 	return dispatch.ServerInit(root, platform)
 }
 
-func handleStart(args []string, root string) error {
-	serverDir := filepath.Join(root, "server")
-
-	if _, err := os.Stat(filepath.Join(serverDir, "go.mod")); err == nil {
-		return startGoServer(serverDir, args)
+// generatedRootMarkers reports the generated artifacts already present in a
+// tenant, so "is there code here" is answered by what exists rather than by one
+// directory name.
+func generatedRootMarkers(root string) []string {
+	var found []string
+	for _, m := range []string{"go.mod", "cmd", "internal", "wrangler.toml", "package.json", "Cargo.toml"} {
+		if _, err := os.Stat(filepath.Join(root, m)); err == nil {
+			found = append(found, m)
+		}
 	}
-
-	if _, err := os.Stat(filepath.Join(serverDir, "wrangler.toml")); err == nil {
-		return startCFServer(serverDir, args)
-	}
-
-	return fmt.Errorf("no server found in %s\n  Run 'weblisk server init' first", serverDir)
+	return found
 }
 
+func handleStart(args []string, root string) error {
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+		return startGoServer(root, args)
+	}
+	if _, err := os.Stat(filepath.Join(root, "wrangler.toml")); err == nil {
+		return startCFServer(root, args)
+	}
+	return fmt.Errorf("no generated hub found in %s\n  Run 'weblisk server init' first", root)
+}
+
+// startGoServer builds and runs the orchestrator binary.
+//
+// One module, so the binary is a package under cmd/ rather than the whole
+// directory. `go build .` at the tenant root would try to build the root
+// package, which under this layout has no main.
 func startGoServer(dir string, args []string) error {
-	fmt.Println("  Building server...")
-	build := exec.Command("go", "build", "-o", "server", ".")
+	fmt.Println("  Building orchestrator...")
+	bin := filepath.Join(dir, "bin", "orchestrator")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/orchestrator")
 	build.Dir = dir
 	build.Stdout = os.Stdout
 	build.Stderr = os.Stderr
@@ -147,8 +164,7 @@ func startGoServer(dir string, args []string) error {
 		return fmt.Errorf("build failed: %w", err)
 	}
 
-	cmdArgs := append([]string{filepath.Join(dir, "server")}, args...)
-	run := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	run := exec.Command(bin, args...)
 	run.Stdout = os.Stdout
 	run.Stderr = os.Stderr
 	run.Stdin = os.Stdin

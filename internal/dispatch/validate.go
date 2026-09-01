@@ -49,10 +49,10 @@ func Validate(root string, args []string) error {
 		passed++
 	}
 
-	// Check server directory structure
-	serverDir := filepath.Join(root, "server")
-	if _, err := os.Stat(serverDir); err == nil {
-		p, f := validateComponent(serverDir, "orchestrator")
+	// The tenant folder is the module root, so the orchestrator is validated
+	// where it lives rather than in a server/ subdirectory that no longer exists.
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+		p, f := validateComponent(root, "orchestrator")
 		passed += p
 		issues += f
 	}
