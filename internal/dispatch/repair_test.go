@@ -539,3 +539,52 @@ func TestTheImportRepairAsksForNothingElse(t *testing.T) {
 		}
 	}
 }
+
+func TestARepairKeepsHelpersOtherFilesCallOn(t *testing.T) {
+	// The stall in gen15. Repairing manifest.go fixed its own two errors and
+	// dropped ValidateIdentifier and manifestMaxIdentifierLen — helpers it had
+	// invented during generation, which four other files had come to call. Six
+	// errors became eleven and the loop stalled fixing a file that was no longer
+	// the problem.
+	//
+	// The plan's `declares` cannot cover this: a helper invented while writing
+	// the file was never in the plan.
+	current := `package protocol
+
+const manifestMaxIdentifierLen = 64
+
+func ValidateIdentifier(s string) error { return nil }
+
+type AgentManifest struct{ Name string }
+`
+	f := PlannedFile{Path: "internal/protocol/manifest.go", Purpose: "manifests",
+		Declares: []string{"AgentManifest"}} // the plan named only the type
+	plan := &Plan{Root: ".", Module: "tenant"}
+
+	p := repairPrompt(f, plan, current,
+		[]string{"internal/protocol/manifest.go:12:10: cannot use e.Error as string"},
+		nil, nil, nil, "PLAT")
+
+	for _, want := range []string{"ValidateIdentifier", "manifestMaxIdentifierLen"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the repair prompt does not mention %q, so a repair may drop it", want)
+		}
+	}
+	if !strings.Contains(p, "Keep every one unless an error above says to remove it") {
+		t.Error("nothing instructs the repair to preserve what the file declares")
+	}
+	// And the plan's own declares must still be stated.
+	if !strings.Contains(p, "It MUST still define: AgentManifest") {
+		t.Error("the plan's declared symbols were lost from the prompt")
+	}
+}
+
+func TestAFileThatDeclaresNothingAddsNothing(t *testing.T) {
+	// go.mod and the like: no declarations, no section, no noise.
+	f := PlannedFile{Path: "go.mod", Purpose: "module"}
+	p := repairPrompt(f, &Plan{Root: "."}, "module tenant\n\ngo 1.22\n",
+		[]string{"go.mod:1:1: bad"}, nil, nil, nil, "")
+	if strings.Contains(p, "currently declares") {
+		t.Error("a file with no declarations grew an empty preserve-these section")
+	}
+}

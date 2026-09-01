@@ -141,7 +141,7 @@ func filesToRepair(byFile map[string][]string, plan *Plan) []string {
 }
 
 // repairPrompt asks for one file again, with what the compiler said about it.
-func repairPrompt(f PlannedFile, plan *Plan, errs, general []string,
+func repairPrompt(f PlannedFile, plan *Plan, current string, errs, general []string,
 	decls map[string][]Declaration, order []string, platBP string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Rewrite %s so the implementation builds.\n\n", f.Path)
@@ -172,6 +172,22 @@ func repairPrompt(f PlannedFile, plan *Plan, errs, general []string,
 	}
 	if len(f.Serves) > 0 {
 		fmt.Fprintf(&b, "It MUST still serve: %s\n", strings.Join(f.Serves, ", "))
+	}
+	if keep := currentDeclarations(f.Path, current); keep != "" {
+		// Everything the file declares TODAY, not just what the plan named.
+		//
+		// A repair of manifest.go fixed its own two errors and dropped
+		// ValidateIdentifier and manifestMaxIdentifierLen — helpers it had added
+		// during generation, which four other files had come to call. Six errors
+		// became eleven, and the loop stalled fixing a file that was no longer
+		// the problem.
+		//
+		// The plan's `declares` cannot cover this: a helper invented while
+		// writing the file was never in the plan. What the file actually declares
+		// is read from the file.
+		b.WriteString("\nThis file currently declares the following, and other files call them. " +
+			"Keep every one unless an error above says to remove it:\n")
+		b.WriteString(keep)
 	}
 	if d := FormatDeclarations(decls, order); d != "" {
 		b.WriteString("\nSymbols declared by the OTHER files. Do not redeclare them, " +
@@ -412,7 +428,7 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 			// that came back as prose cost the whole ROUND for that file — and the
 			// next round then re-read the same unrepaired errors. Three files were
 			// lost that way in one run.
-			prompt := repairPrompt(f, plan, byFile[path], byFile[""], others, otherOrder, platBP)
+			prompt := repairPrompt(f, plan, content[path], byFile[path], byFile[""], others, otherOrder, platBP)
 			accepted, aerr := askForFile(provider, prompt, f)
 			if aerr != nil {
 				return result, rebuildList(content, order), fmt.Errorf("repairing %s: %w", path, aerr)
@@ -632,6 +648,24 @@ func importRepairPrompt(f PlannedFile, current, resolverOutput, platBP, module s
 	if platBP != "" {
 		b.WriteString("\nPlatform blueprint:\n\n")
 		b.WriteString(platBP)
+	}
+	return b.String()
+}
+
+// currentDeclarations renders what a file declares right now.
+//
+// Read from the file rather than taken from the plan, because the plan lists
+// what the model promised and a file also contains what it invented on the way —
+// and the invented helpers are exactly the ones a repair drops, because nothing
+// told it they mattered.
+func currentDeclarations(path, content string) string {
+	decls := ExtractDeclarations(path, content)
+	if len(decls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, d := range decls {
+		b.WriteString("  " + d.String() + "\n")
 	}
 	return b.String()
 }
