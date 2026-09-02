@@ -82,6 +82,13 @@ func protectedPaths(component string) []string {
 	return []string{"/v1/services", "/v1/audit", "/v1/admin/overview"}
 }
 
+// reCapabilityBullet matches a standard-capability bullet in protocol/types.md,
+// so the capability vocabulary is read from the blueprint rather than copied
+// into the tooling:
+//
+//   - `content:read` — read entries and list a content repository
+var reCapabilityBullet = regexp.MustCompile("(?m)^-\\s+`([a-z][a-z0-9]*:[a-z*][a-z0-9-]*)`")
+
 // startupTimeout bounds how long a component may take to answer.
 //
 // Generous for a cold start that generates a key pair; finite because a

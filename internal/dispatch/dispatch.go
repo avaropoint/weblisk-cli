@@ -191,7 +191,16 @@ func ComponentInit(root, target, platform string) error {
 					if bin == "" {
 						return nil, "", nil
 					}
-					return RunConformance(root, bin, target, printProgress)
+					res, out, err := RunConformance(root, bin, target, printProgress)
+					if err != nil {
+						return res, out, err
+					}
+					// Interop faults are repairable faults. Feeding them back is the
+					// whole point: found by hand they cost eight rounds of patching,
+					// and every one of them is a wrong constant or a wrong order in
+					// a generated file.
+					ires, iout, ierr := RunInterop(root, bin, target, graph.Map, printProgress)
+					return append(res, ires...), out + iout, ierr
 				})
 			if rerr != nil {
 				return rerr
@@ -210,6 +219,14 @@ func ComponentInit(root, target, platform string) error {
 			if bin := builtBinary(root, plan.Build); bin != "" {
 				results, output, cerr := RunConformance(root, bin, target, nil)
 				reportConformance(results, output, cerr)
+
+				// Interoperability, against the real orchestrator of this tenant.
+				// A component can satisfy every assertion about itself and be
+				// unable to register — eight faults were found that way by hand.
+				iresults, ioutput, ierr := RunInterop(root, bin, target, graph.Map, nil)
+				if len(iresults) > 0 {
+					reportConformance(iresults, ioutput, ierr)
+				}
 			}
 		}
 
