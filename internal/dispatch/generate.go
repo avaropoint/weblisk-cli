@@ -411,7 +411,8 @@ are silent, they are silent — this prompt adds no requirements of its own.`
 // repeat.
 func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints map[string]string,
 	bpOrder []string, platBP, root string, onProgress ProgressFunc,
-	checklist []ChecklistItem, bindings []Binding, st *TenantState) ([]GeneratedFile, error) {
+	checklist []ChecklistItem, bindings []Binding, st *TenantState,
+	keep map[string]bool) ([]GeneratedFile, error) {
 	cache := NewGenerationCache(root)
 	if onProgress == nil {
 		onProgress = func(Progress) {}
@@ -424,6 +425,21 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 	for i, f := range ordered {
 		var content string
 		var lastViolation string
+
+		// Decided KEEP by the rebuild table. The file on disk is the output —
+		// read it so later files still see its declarations, and so the returned
+		// set is the whole component rather than only what changed.
+		if keep[f.Path] {
+			body, rerr := os.ReadFile(filepath.Join(root, plan.Root, f.Path))
+			if rerr != nil {
+				return nil, fmt.Errorf("keeping %s: %w", f.Path, rerr)
+			}
+			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path, Status: "kept"})
+			generated = append(generated, GeneratedFile{Path: f.Path, Content: string(body), Lang: inferLang(f.Path)})
+			written = append(written, f.Path)
+			decls[f.Path] = ExtractDeclarations(f.Path, string(body))
+			continue
+		}
 
 		// Reuse when every input that produced this file is unchanged: the plan
 		// entry, the blueprints it was sent, and the instructions. Regenerating

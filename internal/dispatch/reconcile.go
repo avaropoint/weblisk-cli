@@ -60,6 +60,34 @@ type writtenManifest struct {
 	Target string   `json:"target"`
 	Root   string   `json:"root"`
 	Files  []string `json:"files"`
+	// Records is what each file was built FROM, at the granularity a change can
+	// be assessed against — see rebuild.go. Files above stays as the flat list
+	// reconcile needs; records answer a different question and a manifest
+	// written before they existed simply has none.
+	Records []FileRecord `json:"records,omitempty"`
+}
+
+// PriorRecords returns the previous run's per-file records for a component.
+//
+// Absent or unreadable yields an empty map, which DecideRebuild reads as "no
+// record" — and a file present with no record is refused, not overwritten.
+func PriorRecords(root, target string) map[string]FileRecord {
+	b, err := os.ReadFile(manifestName(root, target))
+	if err != nil {
+		return nil // no previous run at all
+	}
+	var m writtenManifest
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	if len(m.Records) == 0 {
+		return nil // a manifest from before records existed
+	}
+	out := make(map[string]FileRecord, len(m.Records))
+	for _, r := range m.Records {
+		out[r.Path] = r
+	}
+	return out
 }
 
 // RecordWritten saves the paths generation produced for a target.
@@ -68,12 +96,26 @@ type writtenManifest struct {
 // clean up, and refusing to finish a successful generation over it would cost
 // more.
 func RecordWritten(root string, plan *Plan, files []GeneratedFile) {
+	RecordWrittenWith(root, plan, files, nil)
+}
+
+// RecordWrittenWith also persists what each file was generated from.
+func RecordWrittenWith(root string, plan *Plan, files []GeneratedFile, blueprints map[string]string) {
 	paths := make([]string, 0, len(files))
 	for _, f := range files {
 		paths = append(paths, f.Path)
 	}
 	sort.Strings(paths)
-	b, err := json.Marshal(writtenManifest{Target: plan.Target, Root: plan.Root, Files: paths})
+	var recs []FileRecord
+	if blueprints != nil {
+		byPath := BuildFileRecords(plan, files, blueprints)
+		for _, p := range paths {
+			if r, ok := byPath[p]; ok {
+				recs = append(recs, r)
+			}
+		}
+	}
+	b, err := json.Marshal(writtenManifest{Target: plan.Target, Root: plan.Root, Files: paths, Records: recs})
 	if err != nil {
 		return
 	}

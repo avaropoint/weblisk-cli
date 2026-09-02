@@ -145,13 +145,42 @@ func ComponentInit(root, target, platform string) error {
 			}
 		}
 
+		// architecture/generation: a rebuild is a decision per file and the
+		// default answer is keep. Run BEFORE generation, so a refusal stops the
+		// run rather than being discovered after files are written.
+		decisions := DecideRebuild(root, plan, PriorRecords(root, target), graph.Map)
+		if rep := ReportDecisions(decisions); rep != "" {
+			fmt.Print(rep)
+			fmt.Println()
+		}
+		var edited []string
+		keep := map[string]bool{}
+		for _, d := range decisions {
+			if d.RebuildVerdict == RebuildEdited {
+				edited = append(edited, d.Path)
+				continue
+			}
+			if !d.RebuildVerdict.Generates() {
+				keep[d.Path] = true
+			}
+		}
+		if len(edited) > 0 {
+			// Refused, not overwritten. Adopting the edit or discarding it is a
+			// decision for whoever made it; generation's job is to ask.
+			return fmt.Errorf("%d file(s) cannot be safely regenerated: %s\n"+
+				"  Nothing was written. See the reasons above.\n"+
+				"  Fold the change into the blueprints and delete the file to have it\n"+
+				"  generated again, or keep the file and leave it out of the plan",
+				len(edited), strings.Join(edited, ", "))
+		}
+
 		files, gerr := GenerateTarget(provider, plan, platform, graph.Map, graph.Order, platBP, root,
-			printProgress, req.Checklist, req.Bindings, st)
+			printProgress, req.Checklist, req.Bindings, st, keep)
 		if gerr != nil {
 			return gerr
 		}
 		fmt.Printf("\n  [ok] Generated %d files in %s/\n\n", len(files), plan.Root)
-		RecordWritten(root, plan, files)
+		RecordWrittenWith(root, plan, files, graph.Map)
 
 		// Layer 2: build, and feed failures back. Generating blind and reporting
 		// success is how eleven files that do not compile get called finished.
