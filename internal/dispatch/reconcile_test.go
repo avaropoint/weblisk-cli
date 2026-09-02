@@ -31,7 +31,7 @@ func TestResumeRemovesTheLastPlansLeftovers(t *testing.T) {
 
 	// The new plan splits the registry differently.
 	secondPlan := &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go"}, {Path: "registry.go"}}}
-	rec, err := ReconcileTarget(root, secondPlan)
+	rec, err := ReconcileTarget(root, secondPlan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestWithoutARecordNothingIsDeleted(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "old.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rec, err := ReconcileTarget(root, &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go"}}})
+	rec, err := ReconcileTarget(root, &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go"}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,11 +83,56 @@ func TestWithoutARecordNothingIsDeleted(t *testing.T) {
 func TestAMissingTargetIsNotAnError(t *testing.T) {
 	// The ordinary first run: nothing to reconcile.
 	root := t.TempDir()
-	rec, err := ReconcileTarget(root, &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go"}}})
+	rec, err := ReconcileTarget(root, &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go"}}}, nil)
 	if err != nil {
 		t.Fatalf("a first run must not fail reconciliation: %v", err)
 	}
 	if len(rec.Stale) != 0 || len(rec.Foreign) != 0 {
 		t.Errorf("unexpected reconciliation on a fresh target: %+v", rec)
+	}
+}
+
+// A file the planner was TOLD to omit is not stale.
+//
+// Two correct rules contradicted each other. FormatTenantState tells a planner
+// "do NOT plan go.mod — it exists, and renaming the module breaks every package
+// in the tenant". The planner complied. Reconcile then read the omission as a
+// deliberate drop and deleted go.mod from a working tenant, because nothing
+// carried the fact that the omission had been requested.
+func TestAnInstructedOmissionIsNotStale(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".")
+	for _, f := range []string{"go.mod", "old_registry.go", "main.go"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("package main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := &Plan{Target: "orchestrator", Root: ".", Files: []PlannedFile{
+		{Path: "go.mod"}, {Path: "old_registry.go"}, {Path: "main.go"},
+	}}
+	RecordWritten(root, first, []GeneratedFile{
+		{Path: "go.mod"}, {Path: "old_registry.go"}, {Path: "main.go"},
+	})
+
+	// The new plan omits go.mod because it was instructed to, and drops
+	// old_registry.go because it genuinely re-decomposed.
+	second := &Plan{Target: "orchestrator", Root: ".", Files: []PlannedFile{{Path: "main.go"}}}
+	st := &TenantState{Module: "hubgen", Owned: map[string]string{}}
+
+	rec, err := ReconcileTarget(root, second, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		t.Fatalf("go.mod was deleted from a working tenant: %v", err)
+	}
+	if len(rec.Retained) != 1 || rec.Retained[0] != "go.mod" {
+		t.Errorf("Retained = %v, want [go.mod]", rec.Retained)
+	}
+	if len(rec.Stale) != 1 || rec.Stale[0] != "old_registry.go" {
+		t.Errorf("Stale = %v, want [old_registry.go] — a real re-decomposition must still be cleaned", rec.Stale)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old_registry.go")); err == nil {
+		t.Error("a genuinely stale file survived; protection is now too broad")
 	}
 }

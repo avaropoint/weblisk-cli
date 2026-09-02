@@ -126,7 +126,7 @@ func ComponentInit(root, target, platform string) error {
 		// registry differently left routing.go beside a new registry.go, and every
 		// symbol in it was declared twice — nine correct files and one leftover,
 		// producing a build no repair could fix because no file was wrong.
-		if rec, rerr := ReconcileTarget(root, plan); rerr != nil {
+		if rec, rerr := ReconcileTarget(root, plan, st); rerr != nil {
 			return fmt.Errorf("reconciling %s: %w", plan.Root, rerr)
 		} else {
 			for _, f := range rec.Stale {
@@ -137,7 +137,10 @@ func ComponentInit(root, target, platform string) error {
 				fmt.Printf("  [note] left in place, not written by generation: %s\n",
 					strings.Join(rec.Foreign, ", "))
 			}
-			if len(rec.Stale) > 0 || len(rec.Foreign) > 0 {
+			for _, f := range rec.Retained {
+				fmt.Printf("  Kept %s — this plan was told not to write it\n", f)
+			}
+			if len(rec.Stale) > 0 || len(rec.Foreign) > 0 || len(rec.Retained) > 0 {
 				fmt.Println()
 			}
 		}

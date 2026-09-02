@@ -90,11 +90,16 @@ type Reconciliation struct {
 	// Foreign are files in the target that generation never wrote. They are left
 	// alone, and reported.
 	Foreign []string
+	// Retained are files a previous run wrote that this plan omits BECAUSE it was
+	// told to. Kept, and reported separately from Foreign so a reader can tell
+	// "generation never owned this" from "generation owns it and was asked to
+	// leave it alone".
+	Retained []string
 }
 
 // ReconcileTarget removes files a previous generation wrote that the current plan
 // does not include, and reports anything it did not write.
-func ReconcileTarget(root string, plan *Plan) (Reconciliation, error) {
+func ReconcileTarget(root string, plan *Plan, st *TenantState) (Reconciliation, error) {
 	var rec Reconciliation
 	dir := filepath.Join(root, plan.Root)
 
@@ -112,6 +117,11 @@ func ReconcileTarget(root string, plan *Plan) (Reconciliation, error) {
 			}
 		}
 	}
+
+	// Paths this run told the planner to omit. An omission that was requested is
+	// not a deletion, and deleting go.mod out of a working tenant is how that
+	// distinction announced itself.
+	protected := st.Protected()
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -133,6 +143,10 @@ func ReconcileTarget(root string, plan *Plan) (Reconciliation, error) {
 			rec.Foreign = append(rec.Foreign, name)
 			continue
 		}
+		if protected[clean] {
+			rec.Retained = append(rec.Retained, name)
+			continue
+		}
 		// Written by a previous generation, absent from this plan.
 		if err := os.Remove(filepath.Join(dir, name)); err != nil {
 			return rec, err
@@ -141,5 +155,6 @@ func ReconcileTarget(root string, plan *Plan) (Reconciliation, error) {
 	}
 	sort.Strings(rec.Stale)
 	sort.Strings(rec.Foreign)
+	sort.Strings(rec.Retained)
 	return rec, nil
 }

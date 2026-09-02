@@ -346,3 +346,32 @@ func (st *TenantState) FormatTenantPackages() string {
 	}
 	return b.String()
 }
+
+// Protected are paths this run INSTRUCTED the planner to leave out, which must
+// therefore never be treated as stale.
+//
+// Reconcile's premise is that a plan is a complete statement of what a target
+// consists of, so anything the last run wrote and this one omits was dropped
+// deliberately. Tenant awareness broke that premise: the prompt now tells the
+// planner "do NOT plan go.mod — it exists", the planner correctly omits it, and
+// reconcile then read the omission as a deletion and removed go.mod from a
+// working tenant.
+//
+// Both rules were right. Nothing carried the fact that an omission had been
+// requested, so the second rule could not tell a dropped file from an excluded
+// one.
+func (st *TenantState) Protected() map[string]bool {
+	out := map[string]bool{}
+	if st == nil {
+		return out
+	}
+	if st.Module != "" {
+		// The exact instruction given in FormatTenantState. These two must not
+		// drift: a path excluded there and not protected here is deleted.
+		out["go.mod"] = true
+	}
+	for path := range st.Owned {
+		out[path] = true
+	}
+	return out
+}
