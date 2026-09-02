@@ -57,11 +57,11 @@ func (v RebuildVerdict) Generates() bool {
 // FileRecord is what one generated file was built from, at the granularity a
 // change can be assessed against.
 type FileRecord struct {
-	Path     string            `json:"path"`
-	Digest   string            `json:"digest"`
-	Declares []string          `json:"declares,omitempty"`
-	Serves   []string          `json:"serves,omitempty"`
-	Purpose  string            `json:"purpose,omitempty"`
+	Path     string   `json:"path"`
+	Digest   string   `json:"digest"`
+	Declares []string `json:"declares,omitempty"`
+	Serves   []string `json:"serves,omitempty"`
+	Purpose  string   `json:"purpose,omitempty"`
 	// Blueprints maps blueprint path → the digest of the copy this file was
 	// generated from. Per blueprint, not one digest over the corpus, so a change
 	// can be attributed to the blueprint it happened in.
@@ -70,7 +70,7 @@ type FileRecord struct {
 
 // Decision is the outcome for one planned file.
 type Decision struct {
-	Path    string
+	Path           string
 	RebuildVerdict RebuildVerdict
 	// Detail names what decided it — the blueprint that changed, the symbol that
 	// went missing. Present so a report says why, not merely what.

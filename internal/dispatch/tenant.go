@@ -19,8 +19,8 @@ package dispatch
 // in order to have one".
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
