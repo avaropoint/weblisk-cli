@@ -129,6 +129,14 @@ func ExcludedSummary(others []ChecklistItem) string {
 	sort.Strings(order)
 	parts := make([]string, 0, len(order))
 	for _, owner := range order {
+		if owner == "" {
+			// Set aside by binding rather than by group heading: an assertion
+			// about a type this component's contract does not claim. It has no
+			// owning component, and "22 for the " is what printing one anyway
+			// looked like.
+			parts = append(parts, itoa(byOwner[owner])+" about types this component binds nothing from")
+			continue
+		}
 		parts = append(parts, itoa(byOwner[owner])+" for the "+owner)
 	}
 	return strings.Join(parts, ", ")

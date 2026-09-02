@@ -177,3 +177,28 @@ func TestRebuildFirstBuildRefusesNothing(t *testing.T) {
 		}
 	}
 }
+
+// A repair is generation's own work, not an edit.
+//
+// The manifest was recorded straight after generation and build-and-repair then
+// rewrote files, so every repaired file differed from its record and the next
+// run refused seven of them as hand-edited. Only a change generation did not
+// make is an edit, so the record must describe what is on disk when the run
+// ends.
+func TestARepairedFileIsNotReportedAsEdited(t *testing.T) {
+	root, plan, bps := rebuildFixture(t)
+
+	// Generated, recorded, then repaired — and re-recorded, as the pipeline now
+	// does after BuildAndRepair returns.
+	_ = writeAndRecord(t, root, plan, bps, compliantFile)
+	repaired := compliantFile + "\n// fixed by the repair loop\n"
+	prior := writeAndRecord(t, root, plan, bps, repaired)
+
+	d := onlyDecision(t, DecideRebuild(root, plan, prior, bps))
+	if d.RebuildVerdict == RebuildEdited {
+		t.Fatalf("a repaired file was refused as hand-edited: %s", d.Detail)
+	}
+	if d.RebuildVerdict != RebuildUnchanged {
+		t.Errorf("got %q, want unchanged", d.RebuildVerdict)
+	}
+}

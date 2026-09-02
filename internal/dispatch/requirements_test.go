@@ -83,3 +83,22 @@ func texts(items []ChecklistItem) []string {
 	}
 	return out
 }
+
+// The excluded summary must not print "22 for the " when the exclusion came
+// from a binding rather than a group heading.
+func TestExcludedSummaryNamesWhyNotJustHowMany(t *testing.T) {
+	got := ExcludedSummary([]ChecklistItem{
+		{Group: "Agent Protocol", Text: "a"},
+		{Text: "TaskRequest requires id"},
+		{Text: "DeadLetterEntry requires attempts"},
+	})
+	if strings.Contains(got, "for the ,") || strings.HasSuffix(got, "for the ") {
+		t.Errorf("empty owner printed as a component: %q", got)
+	}
+	if !strings.Contains(got, "binds nothing from") {
+		t.Errorf("summary does not say why they were set aside: %q", got)
+	}
+	if !strings.Contains(got, "1 for the agent") {
+		t.Errorf("group-owned exclusions lost their owner: %q", got)
+	}
+}

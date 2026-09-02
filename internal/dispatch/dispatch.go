@@ -206,6 +206,12 @@ func ComponentInit(root, target, platform string) error {
 				return rerr
 			}
 			files = repaired
+			// Re-record AFTER repair. The manifest is a record of what is ON DISK,
+			// and repair rewrites files — so recording only after generation made
+			// every repaired file differ from its record, and the next run refused
+			// seven of them as hand-edited. A repair is generation's own work; only
+			// a change generation did not make is an edit.
+			RecordWrittenWith(root, plan, files, graph.Map)
 			if !result.OK {
 				reportChecklist(EvaluateChecklistAgainst(req.Checklist, files, graph.Map))
 				fmt.Printf("  [failed] the implementation does not build\n\n")
