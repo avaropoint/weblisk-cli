@@ -16,7 +16,7 @@ func promptFor(f PlannedFile, bps map[string]string, platBP, module string) stri
 		order = append(order, k)
 	}
 	sort.Strings(order)
-	return filePrompt(f, plan, "go", bps, order, platBP, nil, nil, nil, nil)
+	return filePrompt(f, plan, "go", bps, order, platBP, nil, nil, nil, nil, nil)
 }
 
 func TestIdenticalInputsReuseTheFile(t *testing.T) {

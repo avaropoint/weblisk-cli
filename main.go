@@ -92,6 +92,12 @@ func main() {
 
 	// ── Server Commands ──────────────────────────────────────
 
+	case "component":
+		cwd, _ := os.Getwd()
+		config.Load(cwd)
+		if err := server.HandleComponent(rest, cwd); err != nil {
+			fatal("component: %v", err)
+		}
 	case "server":
 		cwd, _ := os.Getwd()
 		config.Load(cwd)

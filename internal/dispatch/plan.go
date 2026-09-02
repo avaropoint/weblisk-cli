@@ -112,8 +112,29 @@ func ParsePlan(raw string) (*Plan, error) {
 //
 // Returns the gaps, so the model can be asked for a revision naming exactly what
 // is missing rather than being told to try again.
-func ValidatePlan(p *Plan, req *Requirements) []string {
+func ValidatePlan(p *Plan, req *Requirements, st *TenantState) []string {
 	var gaps []string
+
+	// Ownership, enforced rather than requested.
+	//
+	// The prompt already tells the model which files belong to another component.
+	// A plan that ignores it must still be rejected here — an instruction the
+	// model may decline is not a guard, and the file it declines about is a
+	// running component's entry point.
+	if st != nil {
+		for _, f := range p.Files {
+			clean := filepath.Clean(f.Path)
+			if owner, taken := st.Owned[clean]; taken {
+				gaps = append(gaps, fmt.Sprintf("%q belongs to the %s component — import it, do not re-plan it", f.Path, owner))
+			}
+			if clean == "go.mod" && st.Module != "" {
+				gaps = append(gaps, fmt.Sprintf("go.mod already exists and declares module %s — do not plan it", st.Module))
+			}
+			if dir := filepath.ToSlash(filepath.Dir(clean)); strings.HasPrefix(dir, "cmd/") && dir != "cmd/"+p.Target {
+				gaps = append(gaps, fmt.Sprintf("%q is in another component's command directory — your entry point is cmd/%s/main.go", f.Path, p.Target))
+			}
+		}
+	}
 
 	declaredBy := map[string][]string{} // package-qualified — collisions
 	placedAt := map[string][]string{}   // bare name — placement
@@ -253,9 +274,14 @@ func (p *Plan) Order() []PlannedFile {
 }
 
 // planPrompt asks for a plan.
-func planPrompt(req *Requirements, target, platform, specs, platBP string) string {
+func planPrompt(req *Requirements, target, platform, specs, platBP string, st *TenantState) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Plan a %s implementation for the %s platform.\n\n", target, platform)
+	// Before the requirements, because it changes what satisfying them means: a
+	// type the tenant already declares is satisfied by importing it.
+	if ts := st.FormatTenantState(target); ts != "" {
+		b.WriteString(ts)
+	}
 	b.WriteString("REQUIREMENTS — every one of these must be placed in your plan.\n\n")
 	if bd := FormatBindings(req.Bindings); bd != "" {
 		// The blueprint's declared consumption, with fields. Not every type the
@@ -284,7 +310,7 @@ func planPrompt(req *Requirements, target, platform, specs, platBP string) strin
 // MakePlan asks the model for a structure and validates it, re-planning with the
 // specific gaps when it does not satisfy the blueprints.
 func MakePlan(provider Provider, req *Requirements, target, platform, specs, platBP string,
-	onProgress ProgressFunc) (*Plan, error) {
+	st *TenantState, onProgress ProgressFunc) (*Plan, error) {
 	if onProgress == nil {
 		onProgress = func(Progress) {}
 	}
@@ -300,7 +326,7 @@ func MakePlan(provider Provider, req *Requirements, target, platform, specs, pla
 		}
 		onProgress(Progress{Path: "plan", Status: status, Attempt: attempt, Detail: detail})
 
-		prompt := planPrompt(req, target, platform, specs, platBP)
+		prompt := planPrompt(req, target, platform, specs, platBP, st)
 		if len(lastGaps) > 0 {
 			prompt = "Your previous plan was rejected:\n  - " + strings.Join(lastGaps, "\n  - ") +
 				"\n\nProduce a corrected plan.\n\n" + prompt
@@ -317,7 +343,14 @@ func MakePlan(provider Provider, req *Requirements, target, platform, specs, pla
 			lastGaps = []string{perr.Error()}
 			continue
 		}
-		if gaps := ValidatePlan(plan, req); len(gaps) > 0 {
+		// The target is the CALLER's, not the model's. It was being set after
+		// MakePlan returned, so validation read whatever the model had put in the
+		// JSON — "orchestrator" — and told a content build its entry point was
+		// cmd/orchestrator/main.go. The model complied, and the ownership check
+		// then rejected the file the same guard had just demanded. A guard reading
+		// a value the thing it guards supplied can enforce the bug.
+		plan.Target = target
+		if gaps := ValidatePlan(plan, req, st); len(gaps) > 0 {
 			lastGaps = gaps
 			continue
 		}

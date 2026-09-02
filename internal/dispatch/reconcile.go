@@ -38,15 +38,28 @@ import (
 	"strings"
 )
 
-// manifestName is the record of what generation wrote into one target root.
-func manifestName(root, planRoot string) string {
-	h := sha256.Sum256([]byte(filepath.Clean(planRoot)))
+// manifestName is the record of what generation wrote for one COMPONENT.
+//
+// Keyed by target, not by the plan's root directory. A tenant root is the Go
+// module root, so every component of a tenant plans into "." — and keying by
+// that meant the orchestrator and the content service shared one manifest. The
+// second build then read the first's 49 files as "written by a previous run and
+// absent from this plan" and deleted go.mod out from under a working tenant.
+func manifestName(root, target string) string {
+	if target == "" {
+		target = "orchestrator" // manifests written before targets were recorded
+	}
+	h := sha256.Sum256([]byte(filepath.Clean(target)))
 	return filepath.Join(root, cacheDirName, "written-"+hex.EncodeToString(h[:6])+".json")
 }
 
 type writtenManifest struct {
-	Root  string   `json:"root"`
-	Files []string `json:"files"`
+	// Target is the component that wrote these files. Recorded, not derived from
+	// the filename, so another component reading this manifest can say WHOSE
+	// files these are rather than merely that they are somebody's.
+	Target string   `json:"target"`
+	Root   string   `json:"root"`
+	Files  []string `json:"files"`
 }
 
 // RecordWritten saves the paths generation produced for a target.
@@ -60,11 +73,11 @@ func RecordWritten(root string, plan *Plan, files []GeneratedFile) {
 		paths = append(paths, f.Path)
 	}
 	sort.Strings(paths)
-	b, err := json.Marshal(writtenManifest{Root: plan.Root, Files: paths})
+	b, err := json.Marshal(writtenManifest{Target: plan.Target, Root: plan.Root, Files: paths})
 	if err != nil {
 		return
 	}
-	name := manifestName(root, plan.Root)
+	name := manifestName(root, plan.Target)
 	_ = os.MkdirAll(filepath.Dir(name), 0o755)
 	_ = os.WriteFile(name, b, 0o644)
 }
@@ -91,7 +104,7 @@ func ReconcileTarget(root string, plan *Plan) (Reconciliation, error) {
 	}
 
 	previous := map[string]bool{}
-	if b, err := os.ReadFile(manifestName(root, plan.Root)); err == nil {
+	if b, err := os.ReadFile(manifestName(root, plan.Target)); err == nil {
 		var m writtenManifest
 		if json.Unmarshal(b, &m) == nil {
 			for _, p := range m.Files {

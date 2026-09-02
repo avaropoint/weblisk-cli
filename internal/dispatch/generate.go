@@ -283,7 +283,7 @@ func truncateLine(s string) string {
 // written.
 func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[string]string,
 	bpOrder []string, platBP string, written []string, decls map[string][]Declaration,
-	checklist []ChecklistItem, bindings []Binding) string {
+	checklist []ChecklistItem, bindings []Binding, st *TenantState) string {
 	var b strings.Builder
 
 	// INVARIANT PREFIX — identical for every file in a run.
@@ -306,6 +306,13 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 	}
 	if bd := FormatBindings(bindings); bd != "" {
 		b.WriteString("\n" + bd)
+	}
+	if tp := st.FormatTenantPackages(); tp != "" {
+		// In the invariant prefix: identical for every file in the run, so it is
+		// paid for once. A file that does not know internal/protocol exports
+		// ErrorResponse writes its own, and the duplicate is found by the build
+		// rather than by the prompt.
+		b.WriteString("\n\n" + tp)
 	}
 	fmt.Fprintf(&b, "\nPlatform: %s\nTarget directory: %s\n", platform, plan.Root)
 	if mod := plan.Module; mod != "" {
@@ -404,7 +411,7 @@ are silent, they are silent — this prompt adds no requirements of its own.`
 // repeat.
 func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints map[string]string,
 	bpOrder []string, platBP, root string, onProgress ProgressFunc,
-	checklist []ChecklistItem, bindings []Binding) ([]GeneratedFile, error) {
+	checklist []ChecklistItem, bindings []Binding, st *TenantState) ([]GeneratedFile, error) {
 	cache := NewGenerationCache(root)
 	if onProgress == nil {
 		onProgress = func(Progress) {}
@@ -424,7 +431,7 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 		// The prompt IS the key: rendered without accumulated declarations, so it
 		// covers every input that shapes this file and nothing that merely
 		// precedes it.
-		invariant := filePrompt(f, plan, platform, blueprints, bpOrder, platBP, nil, nil, checklist, bindings)
+		invariant := filePrompt(f, plan, platform, blueprints, bpOrder, platBP, nil, nil, checklist, bindings, st)
 		key := cacheKey(f, invariant, fileSystemPrompt)
 		if cached := cache.Get(key); cached != "" {
 			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path, Status: "reused"})
@@ -442,7 +449,7 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path,
 				Status: status, Attempt: attempt, Detail: lastViolation})
 
-			prompt := filePrompt(f, plan, platform, blueprints, bpOrder, platBP, written, decls, checklist, bindings)
+			prompt := filePrompt(f, plan, platform, blueprints, bpOrder, platBP, written, decls, checklist, bindings, st)
 			if lastViolation != "" {
 				prompt = "Your previous response was rejected: " + lastViolation +
 					"\nProduce the file again, correctly.\n\n" + prompt

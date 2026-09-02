@@ -21,6 +21,19 @@ type GeneratedFile struct {
 
 // ServerInit generates orchestrator code using the AI model.
 func ServerInit(root, platform string) error {
+	return ComponentInit(root, "orchestrator", platform)
+}
+
+// ComponentInit generates one component from the blueprints that declare it.
+//
+// The pipeline is not the orchestrator's — it is the same for every component
+// whose architecture blueprint states a contract: one resolved graph, a plan
+// validated against it, per-file generation, build-and-repair, and conformance.
+// The target names which blueprint is the root and which assertions are this
+// component's; nothing else in the loop varies. A second component built by a
+// second pipeline would drift from the first, and the divergence would show up
+// as a component that passes its own checks and fails the system's.
+func ComponentInit(root, target, platform string) error {
 	provider, err := RequireProvider()
 	if err != nil {
 		return err
@@ -29,7 +42,7 @@ func ServerInit(root, platform string) error {
 	// One resolution, before anything reads it. The plan, the checklist and the
 	// per-file prompts all come from THIS graph — see ResolveGraph for what went
 	// wrong when they each had their own list.
-	graph, err := ResolveGraph(root, "orchestrator", platform)
+	graph, err := ResolveGraph(root, target, platform)
 	if err != nil {
 		return fmt.Errorf("resolving blueprints: %w", err)
 	}
@@ -44,7 +57,7 @@ func ServerInit(root, platform string) error {
 	// decides how to arrange it, and the plan is validated against the
 	// requirements before a single file is generated. See
 	// architecture/generation.md.
-	req := GatherRequirements(graph, "orchestrator")
+	req := GatherRequirements(graph, target)
 	if len(req.Types) > 0 || len(req.Endpoints) > 0 {
 		fmt.Printf("  Platform: %s\n", platform)
 		fmt.Print(graph.Describe())
@@ -69,14 +82,17 @@ func ServerInit(root, platform string) error {
 		// Reuse the plan when the requirements have not changed. Without this the
 		// model re-plans every run — ten files where it planned twelve — and every
 		// per-file cache entry is invalidated by a plan entry nobody changed.
+		// What this tenant already contains, before anything is planned into it.
+		st := ReadTenantState(root, target)
+
 		cache := NewGenerationCache(root)
-		pk := planKey(req, "orchestrator", platform, platBP, planSystemPrompt)
+		pk := planKey(req, target, platform, platBP, planSystemPrompt+st.Shape())
 		plan := cache.GetPlan(pk)
 		if plan != nil {
 			fmt.Println("  Plan reused — requirements unchanged since the last run")
 		} else {
 			var perr error
-			plan, perr = MakePlan(provider, req, "orchestrator", platform, specs, platBP, printProgress)
+			plan, perr = MakePlan(provider, req, target, platform, specs, platBP, st, printProgress)
 			if perr != nil {
 				return perr
 			}
@@ -86,6 +102,9 @@ func ServerInit(root, platform string) error {
 		// "module <tenant>". Set here rather than asked of the model, because a
 		// fact two files must agree on should not be guessed twice.
 		plan.Module = moduleNameFor(root)
+		// Set here, not trusted from the model's JSON: the manifest that decides
+		// which files a rebuild may delete is keyed by it.
+		plan.Target = target
 
 		fmt.Printf("\n  Plan accepted: %d files in %s/\n", len(plan.Files), plan.Root)
 		for _, f := range plan.Order() {
@@ -124,7 +143,7 @@ func ServerInit(root, platform string) error {
 		}
 
 		files, gerr := GenerateTarget(provider, plan, platform, graph.Map, graph.Order, platBP, root,
-			printProgress, req.Checklist, req.Bindings)
+			printProgress, req.Checklist, req.Bindings, st)
 		if gerr != nil {
 			return gerr
 		}
@@ -140,7 +159,7 @@ func ServerInit(root, platform string) error {
 					if bin == "" {
 						return nil, "", nil
 					}
-					return RunConformance(root, bin, "orchestrator", printProgress)
+					return RunConformance(root, bin, target, printProgress)
 				})
 			if rerr != nil {
 				return rerr
@@ -157,7 +176,7 @@ func ServerInit(root, platform string) error {
 			// Layer 4's final word. The loop has already run the component and
 			// repaired what it could; this is the report of where it ended.
 			if bin := builtBinary(root, plan.Build); bin != "" {
-				results, output, cerr := RunConformance(root, bin, "orchestrator", nil)
+				results, output, cerr := RunConformance(root, bin, target, nil)
 				reportConformance(results, output, cerr)
 			}
 		}
@@ -172,6 +191,16 @@ func ServerInit(root, platform string) error {
 		// disagrees with the above.
 		reportChecklist(EvaluateChecklistAgainst(req.Checklist, files, graph.Map))
 		return nil
+	}
+
+	// Reached only when the graph states no types and no endpoints for this
+	// target. For the orchestrator that means a platform with no manifest, and
+	// the single-shot path below still produces something. For any other
+	// component it means its blueprint declared no contract, and generating
+	// from an empty specification would produce a file nobody can grade.
+	if target != "orchestrator" {
+		return fmt.Errorf("%s: its blueprint declares no types and no endpoints — "+
+			"nothing to build against. Check %s bindings", target, targetBlueprint(target))
 	}
 
 	prompt := buildOrchestratorPrompt(specs, platBP, platform)

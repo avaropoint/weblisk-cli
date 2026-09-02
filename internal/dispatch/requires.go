@@ -216,6 +216,8 @@ func GenerationRoots(target, platform string) []string {
 		return append(roots, "architecture/domain.md")
 	case "gateway":
 		return append(roots, "architecture/gateway.md")
+	case "content":
+		return append(roots, "architecture/content.md")
 	}
 	return roots
 }

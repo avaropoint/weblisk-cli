@@ -68,7 +68,7 @@ func goodPlan() *Plan {
 }
 
 func TestAValidPlanPasses(t *testing.T) {
-	if gaps := ValidatePlan(goodPlan(), minimalRequirements()); len(gaps) > 0 {
+	if gaps := ValidatePlan(goodPlan(), minimalRequirements(), nil); len(gaps) > 0 {
 		t.Errorf("a complete plan was rejected: %v", gaps)
 	}
 }
@@ -78,7 +78,7 @@ func TestAMissingTypeIsNamed(t *testing.T) {
 	// a guess.
 	p := goodPlan()
 	p.Files[0].Declares = []string{"AgentManifest"}
-	gaps := ValidatePlan(p, minimalRequirements())
+	gaps := ValidatePlan(p, minimalRequirements(), nil)
 	if len(gaps) == 0 {
 		t.Fatal("a plan omitting a required type was accepted")
 	}
@@ -90,7 +90,7 @@ func TestAMissingTypeIsNamed(t *testing.T) {
 func TestAMissingEndpointIsNamed(t *testing.T) {
 	p := goodPlan()
 	p.Files[1].Serves = []string{"GET /v1/health"}
-	gaps := ValidatePlan(p, minimalRequirements())
+	gaps := ValidatePlan(p, minimalRequirements(), nil)
 	if !strings.Contains(strings.Join(gaps, " "), "/v1/register") {
 		t.Errorf("the gap does not name the unserved endpoint: %v", gaps)
 	}
@@ -102,7 +102,7 @@ func TestAMissingEndpointIsNamed(t *testing.T) {
 func TestASymbolInTwoFilesIsRejectedBeforeGenerating(t *testing.T) {
 	p := goodPlan()
 	p.Files[1].Declares = []string{"AgentManifest"}
-	gaps := ValidatePlan(p, minimalRequirements())
+	gaps := ValidatePlan(p, minimalRequirements(), nil)
 	if !strings.Contains(strings.Join(gaps, " "), "more than one file") {
 		t.Errorf("a duplicate declaration was not caught in the plan: %v", gaps)
 	}
@@ -135,7 +135,7 @@ func TestOrderPutsDependenciesFirst(t *testing.T) {
 func TestACycleIsRejected(t *testing.T) {
 	p := goodPlan()
 	p.Files[0].DependsOn = []string{"orchestrator.go"}
-	gaps := ValidatePlan(p, minimalRequirements())
+	gaps := ValidatePlan(p, minimalRequirements(), nil)
 	if !strings.Contains(strings.Join(gaps, " "), "cycle") {
 		t.Errorf("a dependency cycle was accepted: %v", gaps)
 	}
@@ -144,7 +144,7 @@ func TestACycleIsRejected(t *testing.T) {
 func TestAnEscapingPathIsRejectedInThePlan(t *testing.T) {
 	p := goodPlan()
 	p.Files[0].Path = "../../etc/passwd"
-	gaps := ValidatePlan(p, minimalRequirements())
+	gaps := ValidatePlan(p, minimalRequirements(), nil)
 	if len(gaps) == 0 {
 		t.Error("a traversing path was accepted in a plan")
 	}
@@ -186,7 +186,7 @@ func TestTheModulePathIsStatedOncePerRun(t *testing.T) {
 	plan := &Plan{Root: ".", Module: "avaropoint",
 		Files: []PlannedFile{{Path: "cmd/orchestrator/main.go", Purpose: "entry"}}}
 	p := filePrompt(plan.Files[0], plan, "go", map[string]string{"x.md": "SPEC"},
-		[]string{"x.md"}, "PLAT", nil, nil, nil, nil)
+		[]string{"x.md"}, "PLAT", nil, nil, nil, nil, nil)
 	if !strings.Contains(p, "Module path: avaropoint") {
 		t.Error("the module path is not stated in the prompt")
 	}
@@ -196,5 +196,81 @@ func TestTheModulePathIsStatedOncePerRun(t *testing.T) {
 	// It is invariant, so it must sit in the cacheable prefix.
 	if strings.Index(p, "Module path:") > strings.Index(p, "--- YOUR TASK ---") {
 		t.Error("the module path is in the variable tail — it is the same for every file")
+	}
+}
+
+// A plan must not claim a file another component owns.
+//
+// The content service's first plan named cmd/orchestrator/main.go, go.mod, and
+// twelve files in packages the tenant already had. The prompt now says not to;
+// this asserts the plan is REJECTED when it does anyway, because an instruction
+// the model may decline is not a guard.
+func TestPlanCannotClaimAnotherComponentsFiles(t *testing.T) {
+	st := &TenantState{
+		Module: "hubgen",
+		Owned: map[string]string{
+			"cmd/orchestrator/main.go":   "orchestrator",
+			"go.mod":                     "orchestrator",
+			"internal/protocol/types.go": "orchestrator",
+		},
+	}
+	p := goodPlan()
+	p.Target = "content"
+	p.Files = append(p.Files,
+		PlannedFile{Path: "cmd/orchestrator/main.go", Purpose: "entry point"},
+		PlannedFile{Path: "go.mod", Purpose: "module"},
+		PlannedFile{Path: "internal/protocol/types.go", Purpose: "wire types"},
+	)
+
+	gaps := ValidatePlan(p, minimalRequirements(), st)
+	joined := strings.Join(gaps, "\n")
+	for _, want := range []string{
+		"cmd/orchestrator/main.go",
+		"go.mod already exists",
+		"internal/protocol/types.go",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("plan claiming another component's files was accepted for %s\ngaps:\n%s", want, joined)
+		}
+	}
+}
+
+// The same plan, in a tenant that does not have those files yet, is fine.
+func TestPlanOwnershipGuardIsQuietOnAnEmptyTenant(t *testing.T) {
+	p := goodPlan()
+	p.Target = "orchestrator"
+	if gaps := ValidatePlan(p, minimalRequirements(), &TenantState{Owned: map[string]string{}}); len(gaps) > 0 {
+		t.Errorf("ownership guard fired on an empty tenant: %v", gaps)
+	}
+}
+
+// The guard must judge against the CALLER's target, never the model's.
+//
+// plan.Target was set after MakePlan returned, so ValidatePlan read the model's
+// JSON. A content build was told "your entry point is cmd/orchestrator/main.go"
+// and then rejected for writing it — three attempts, no valid plan, and the
+// contradiction came from one guard reading an untrusted value.
+func TestPlanTargetComesFromTheCallerNotTheModel(t *testing.T) {
+	provider := &fakeProvider{responses: []string{`{
+      "target": "orchestrator",
+      "root": ".",
+      "prepare": "go mod tidy",
+      "build": "go build ./...",
+      "files": [
+        {"path": "internal/content/types.go", "purpose": "types",
+         "declares": ["AgentManifest", "ErrorResponse"]},
+        {"path": "cmd/content/main.go", "purpose": "entry point",
+         "serves": ["POST /v1/register", "GET /v1/health"],
+         "depends_on": ["internal/content/types.go"]}
+      ]
+    }`}}
+
+	st := &TenantState{Module: "hubgen", Owned: map[string]string{"cmd/orchestrator/main.go": "orchestrator"}}
+	plan, err := MakePlan(provider, minimalRequirements(), "content", "go", "SPEC", "PLAT", st, nil)
+	if err != nil {
+		t.Fatalf("a plan writing its own cmd/content/main.go was rejected: %v", err)
+	}
+	if plan.Target != "content" {
+		t.Errorf("plan.Target = %q, want the caller's target %q", plan.Target, "content")
 	}
 }
