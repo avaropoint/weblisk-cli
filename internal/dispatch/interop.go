@@ -361,16 +361,18 @@ func probeDirectory(orchBase string) ([]dirAgent, error) {
 			code, firstBodyLine(string(body)))
 	}
 	var reg struct {
-		Token    string `json:"token"`
+		Token string `json:"token"`
+		// ServiceDirectory.services, per protocol/types. Not "agents" — five
+		// blueprints bound it as agents and this probe copied the same error.
 		Services struct {
-			Agents []dirAgent `json:"agents"`
+			Services []dirAgent `json:"services"`
 		} `json:"services"`
 	}
 	if uerr := json.Unmarshal(body, &reg); uerr != nil {
 		return nil, fmt.Errorf("probe registration response: %w", uerr)
 	}
-	if len(reg.Services.Agents) > 0 {
-		return reg.Services.Agents, nil
+	if len(reg.Services.Services) > 0 {
+		return reg.Services.Services, nil
 	}
 	req, _ := http.NewRequest(http.MethodGet, orchBase+"/v1/services", nil)
 	req.Header.Set("Authorization", "Bearer "+reg.Token)
@@ -380,12 +382,12 @@ func probeDirectory(orchBase string) ([]dirAgent, error) {
 	}
 	defer resp.Body.Close()
 	var dir struct {
-		Agents []dirAgent `json:"agents"`
+		Services []dirAgent `json:"services"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&dir) != nil {
 		return nil, fmt.Errorf("service directory could not be read")
 	}
-	return dir.Agents, nil
+	return dir.Services, nil
 }
 
 // --- helpers ---------------------------------------------------------------
