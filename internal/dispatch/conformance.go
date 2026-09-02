@@ -112,6 +112,12 @@ func RunConformance(root, binary, component string, onProgress ProgressFunc) ([]
 		// The component never answered. Its own output is the finding — a
 		// startup failure explains itself in one line, and any test result here
 		// would be a guess dressed as a measurement.
+		//
+		// The error is enriched with what the component actually said, because
+		// "exit status 1" on its own is not a finding.
+		if fl := failureLines(out.String()); len(fl) > 0 {
+			err = fmt.Errorf("%v: %s", err, firstLine(fl))
+		}
 		return nil, out.String(), err
 	}
 

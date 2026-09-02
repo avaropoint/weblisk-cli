@@ -24,10 +24,17 @@ func Handle(args []string, root string) error {
 		return handleInit(args[1:], root)
 	case "start":
 		return handleStart(args[1:], root)
+	case "stop":
+		return handleStop(args[1:], root)
 	case "verify":
 		return handleVerify(args[1:])
 	case "status":
-		return handleStatus()
+		// A component's RUN state — is this hub's process alive, where, since
+		// when. Distinct from `weblisk status`, which asks a running
+		// orchestrator over HTTP what the agent network looks like.
+		return handleServerStatus(args[1:], root)
+	case "logs":
+		return handleLogs(args[1:], root)
 	case "help", "--help", "-h":
 		PrintHelp()
 		return nil
@@ -139,6 +146,41 @@ func generatedRootMarkers(root string) []string {
 }
 
 func handleStart(args []string, root string) error {
+	detach := false
+	port := 9800
+	var extra []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--detach", "-d":
+			detach = true
+		case "--port":
+			if i+1 < len(args) {
+				i++
+				if p, err := strconv.Atoi(args[i]); err == nil {
+					port = p
+				}
+			}
+		default:
+			extra = append(extra, args[i])
+		}
+	}
+
+	if detach {
+		// Detached is what every caller other than a terminal wants. Foreground
+		// ties the hub's life to whoever invoked it — for Studio that is an HTTP
+		// request, and the hub would die when the request ended.
+		st, err := StartDetached(root, "orchestrator", port, extra)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\n  [ok] orchestrator started\n")
+		fmt.Printf("    address   %s\n", st.Address)
+		fmt.Printf("    pid       %d\n", st.PID)
+		fmt.Printf("    log       %s\n", st.LogPath)
+		fmt.Printf("\n  weblisk server status    weblisk server logs -f    weblisk server stop\n\n")
+		return nil
+	}
+
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
 		return startGoServer(root, args)
 	}
@@ -233,15 +275,24 @@ func PrintHelp() {
       --resume continues into an existing server/ directory, reusing every
       cached file whose inputs have not changed.
 
-    weblisk server start [--port N]
+    weblisk server start [--port N] [--detach]
       Build and run the generated orchestrator.
+      --detach runs it in the background and records where it is, so
+      status, logs and stop can find it.
+
+    weblisk server stop
+      Ask a detached orchestrator to shut down, and insist if it will not.
+
+    weblisk server logs [--tail N] [--follow]
+      Stream a detached orchestrator's log.
 
     weblisk server verify [--url URL]
       Test a running orchestrator against the protocol specification.
       Default URL: http://localhost:9800
 
-    weblisk server status
-      Show AI provider configuration and readiness.
+    weblisk server status [--json]
+      Report whether this tenant's orchestrator is running, where, and
+      since when. --json is the interface Studio reads.
 
   Platforms:
     go           Go binary, runs locally (default)

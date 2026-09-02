@@ -339,7 +339,10 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 					for _, path := range targets {
 						f := byPath[path]
 						onProgress(Progress{Path: path, Status: "repairing", Attempt: round,
-							Detail: firstLine(strings.Split(strings.TrimSpace(startupOut), "\n"))})
+							// The FAILURE, not the first line of captured output —
+							// which is a startup warning and told a reader nothing
+							// about why the component died.
+							Detail: firstLine(failureLines(startupOut))})
 						accepted, aerr := askForFile(provider,
 							runtimeRepairPrompt(f, content[path], startupOut, platBP, plan.Module), f)
 						if aerr != nil {
