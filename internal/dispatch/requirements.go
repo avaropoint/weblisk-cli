@@ -153,8 +153,85 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 	for _, name := range g.Order {
 		all = append(all, ExtractChecklist(name, g.Map[name])...)
 	}
-	req.Checklist, req.Excluded = ScopeChecklist(all, target)
+	mine, others := ScopeChecklist(all, target)
+	// Then by BINDING, not only by group heading.
+	//
+	// A group heading scopes an assertion to a named component. It cannot scope
+	// one that is about a TYPE: "TaskRequest requires id, from, action..." is
+	// addressed to every implementation, so an orchestrator that binds nothing
+	// from TaskRequest was graded on it and reported unmet. A clean generation
+	// came back with fifteen such — WorkflowPhase, TaskResult, Finding,
+	// DeadLetterEntry, ScopeLevel, PolicyDecision, OperationIntent — none of
+	// which the orchestrator's own contract claims.
+	//
+	// That is the fifty-four-types fault in the grader rather than the planner:
+	// the same list the pipeline correctly reports as "defined but unbound" was
+	// being used to mark the component non-conformant.
+	kept, unbound := SplitByBoundTypes(mine, req.Types, req.UnboundTypes)
+	req.Checklist = kept
+	req.Excluded = append(others, unbound...)
 	return req
+}
+
+// SplitByBoundTypes separates assertions this component's contract answers for
+// from assertions about types it binds nothing from.
+//
+// Conservative on purpose: an assertion is set aside only when it names at
+// least one unbound type and no bound type. One naming both is kept, because a
+// sentence relating a bound type to an unbound one is still about the bound one.
+func SplitByBoundTypes(items []ChecklistItem, bound, unbound []string) (kept, setAside []ChecklistItem) {
+	if len(unbound) == 0 {
+		return items, nil
+	}
+	boundSet := make(map[string]bool, len(bound))
+	for _, t := range bound {
+		boundSet[t] = true
+	}
+	for _, it := range items {
+		namesUnbound, namesBound := false, false
+		for _, t := range unbound {
+			if boundSet[t] {
+				continue
+			}
+			if mentionsType(it.Text, t) {
+				namesUnbound = true
+			}
+		}
+		for _, t := range bound {
+			if mentionsType(it.Text, t) {
+				namesBound = true
+			}
+		}
+		if namesUnbound && !namesBound {
+			setAside = append(setAside, it)
+			continue
+		}
+		kept = append(kept, it)
+	}
+	return kept, setAside
+}
+
+// mentionsType reports whether an assertion names a type, on a word boundary so
+// "Observation" does not match inside "ObservationStore".
+func mentionsType(text, typeName string) bool {
+	for i := 0; ; {
+		j := strings.Index(text[i:], typeName)
+		if j < 0 {
+			return false
+		}
+		j += i
+		beforeOK := j == 0 || !isIdentRune(rune(text[j-1]))
+		end := j + len(typeName)
+		afterOK := end >= len(text) || !isIdentRune(rune(text[end]))
+		if beforeOK && afterOK {
+			return true
+		}
+		i = j + 1
+	}
+}
+
+func isIdentRune(r rune) bool {
+	return r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
 // Summary is a one-line description for progress output.
