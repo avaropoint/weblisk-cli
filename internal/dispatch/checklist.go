@@ -79,7 +79,7 @@ func ExtractChecklist(source, blueprint string) []ChecklistItem {
 //
 // A closed list, from schemas/common.md. Anything else — "Event Publishing",
 // "Cross-Cutting" — addresses every implementation.
-var componentGroups = []string{"agent", "orchestrator", "domain", "gateway"}
+var componentGroups = []string{"agent", "orchestrator", "domain", "gateway", "content"}
 
 // ScopeChecklist splits assertions into this target's obligations and another
 // component's.

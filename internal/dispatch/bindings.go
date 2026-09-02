@@ -55,18 +55,26 @@ import (
 	"strings"
 )
 
-// Binding is one declared consumption: a type, and the fields used from it.
+// Binding is one declared consumption from a dependency.
+//
+// Kind distinguishes a type this component implements from a behaviour it
+// inherits. Both are real consumption and both belong in the contract, but only
+// a type is something the model must define. Conflating them once made
+// `content-digest` and `read-without-mutation` — behaviour names — arrive at the
+// planner as types that must exist, which is the same fault as demanding all
+// fifty-four protocol types, in a smaller place.
 type Binding struct {
-	From       string   // blueprint the type comes from, e.g. "protocol/types"
-	Type       string   // type name
-	FieldsUsed []string // the fields this component actually consumes
+	From       string   // blueprint the consumption comes from, e.g. "protocol/types"
+	Kind       string   // "type" or "behavior"
+	Type       string   // type or behaviour name
+	FieldsUsed []string // the fields this component actually consumes (types only)
 }
 
 var (
 	reBindBlueprint = regexp.MustCompile(`^\s*-\s*blueprint:\s*(\S+)`)
 	reBindName      = regexp.MustCompile(`^\s*-\s*name:\s*(\S+)`)
 	reBindFields    = regexp.MustCompile(`^\s*fields_used:\s*\[([^\]]*)\]`)
-	reBindSection   = regexp.MustCompile(`^\s*(types|endpoints|events|config|patterns):\s*$`)
+	reBindSection   = regexp.MustCompile(`^\s*(types|behaviors|endpoints|events|config|patterns):\s*$`)
 )
 
 // ExtractBindings reads the Dependencies block's declared type bindings.
@@ -109,12 +117,16 @@ func ExtractBindings(blueprint string) []Binding {
 			section = m[1]
 			continue
 		}
-		if section != "types" {
+		if section != "types" && section != "behaviors" {
 			continue
 		}
 		if m := reBindName.FindStringSubmatch(line); m != nil {
 			flush()
-			pending = &Binding{From: currentBP, Type: m[1]}
+			kind := "type"
+			if section == "behaviors" {
+				kind = "behavior"
+			}
+			pending = &Binding{From: currentBP, Kind: kind, Type: m[1]}
 			continue
 		}
 		if m := reBindFields.FindStringSubmatch(line); m != nil && pending != nil {
@@ -134,6 +146,9 @@ func BoundTypes(bindings []Binding) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, b := range bindings {
+		if b.Kind == "behavior" {
+			continue // a behaviour is inherited, not defined
+		}
 		if !seen[b.Type] {
 			seen[b.Type] = true
 			out = append(out, b.Type)
@@ -172,6 +187,9 @@ func FormatBindings(bindings []Binding) string {
 			sb.WriteString("  " + b.Type)
 			if len(b.FieldsUsed) > 0 {
 				sb.WriteString("{" + strings.Join(b.FieldsUsed, ", ") + "}")
+			}
+			if b.Kind == "behavior" {
+				sb.WriteString("  (behaviour to follow, not a type to define)")
 			}
 			sb.WriteString("\n")
 		}

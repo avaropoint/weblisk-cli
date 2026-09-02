@@ -128,12 +128,18 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 			}
 		}
 	}
+	// Only the two components protocol/spec names have a section in it. A
+	// component the protocol does not describe declares its whole surface in its
+	// own blueprint — inheriting the orchestrator's section by default would
+	// require it to serve /v1/register and /v1/channel, which belong to the
+	// trust anchor and to nothing else.
 	if spec, ok := g.Map["protocol/spec.md"]; ok {
-		section := "Orchestrator Endpoints"
-		if target == "agent" {
-			section = "Agent Endpoints"
+		switch target {
+		case "orchestrator":
+			addEndpoints(ExtractEndpoints(spec, "Orchestrator Endpoints"))
+		case "agent":
+			addEndpoints(ExtractEndpoints(spec, "Agent Endpoints"))
 		}
-		addEndpoints(ExtractEndpoints(spec, section))
 	}
 	if body, ok := g.Map[targetBlueprint(target)]; ok {
 		addEndpoints(ExtractTableEndpoints(body))
@@ -195,7 +201,7 @@ func itoa(n int) string {
 // targetBlueprint is the architecture blueprint whose bindings describe a target.
 func targetBlueprint(target string) string {
 	switch target {
-	case "orchestrator", "agent", "domain", "gateway", "admin":
+	case "orchestrator", "agent", "domain", "gateway", "admin", "content":
 		return "architecture/" + target + ".md"
 	}
 	return ""

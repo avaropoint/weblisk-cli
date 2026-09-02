@@ -222,7 +222,6 @@ var knownBindingGaps = map[string]bool{
 	"architecture/gateway.md patterns/auth-token":                 true,
 	"architecture/gateway.md patterns/rate-limiting":              true,
 	"architecture/gateway.md patterns/user-management":            true,
-	"architecture/generation.md architecture/testing":             true,
 	"architecture/generation.md protocol/spec":                    true,
 	"architecture/lifecycle.md patterns/messaging":                true,
 	"architecture/storage.md architecture/gateway":                true,
@@ -329,5 +328,47 @@ func TestPlatformBlueprintsNameNoSpecificComponent(t *testing.T) {
 					e.Name(), i+1, m, strings.TrimSpace(line))
 			}
 		}
+	}
+}
+
+// A generation target must declare its HTTP surface where generation reads it.
+//
+// The schema template shows endpoints in the `## Interfaces` YAML block; the
+// pipeline reads them from a `## Endpoints` TABLE and nowhere else. So a
+// blueprint can state its whole surface, correctly, in the form a human reads
+// and state nothing at all to the planner — and the plan is then never
+// validated against a single endpoint.
+//
+// architecture/content.md was written that way first. It declared eight
+// endpoints in YAML and required zero, which the pipeline reported as a target
+// with no HTTP surface at all.
+func TestEveryGenerationTargetDeclaresEndpointsWhereGenerationReadsThem(t *testing.T) {
+	bps := readBlueprints(t, []string{"architecture", "protocol", "platforms", "patterns"})
+
+	for _, target := range []string{"orchestrator", "agent", "content"} {
+		file := targetBlueprint(target)
+		if _, ok := bps[file]; !ok {
+			t.Errorf("%s: %s is absent from this installation", target, file)
+			continue
+		}
+		// The outcome, not the mechanism. protocol/spec supplies the surface for
+		// the two components it names; every other component must supply its own
+		// in an `## Endpoints` table, because nothing else is read.
+		g := &BlueprintGraph{Map: bps, Order: []string{file, "protocol/spec.md"}}
+		req := GatherRequirements(g, target)
+		if len(req.Endpoints) == 0 {
+			t.Errorf("%s: generation requires ZERO endpoints of it.\n"+
+				"  An `## Endpoints` markdown table in %s is what the pipeline reads;\n"+
+				"  the `## Interfaces` YAML block is not. With neither, the plan is\n"+
+				"  validated against no HTTP surface and a missing endpoint is never\n"+
+				"  detected.", target, file)
+		}
+	}
+
+	// The component whose surface exists nowhere but its own blueprint. Asserted
+	// separately because for it the table is the ONLY source, so losing the
+	// table would silently drop all eight endpoints.
+	if got := ExtractTableEndpoints(bps["architecture/content.md"]); len(got) < 8 {
+		t.Errorf("architecture/content.md yields %d endpoints from its table, want its full surface", len(got))
 	}
 }

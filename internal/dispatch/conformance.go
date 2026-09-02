@@ -61,7 +61,25 @@ type conformanceTest struct {
 	id      string
 	name    string
 	applies map[string]bool // component kinds this test addresses
-	run     func(base string) (bool, string, string)
+	run     func(base, component string) (bool, string, string)
+}
+
+// protectedPaths are the endpoints a component serves that MUST refuse an
+// unauthenticated request.
+//
+// Per component, because the list is not a property of the protocol — it is a
+// property of what this component routes. Probing the orchestrator's surface
+// against a content service reports "no protected endpoint answered at all",
+// which is a correct implementation failing a test that asked the wrong
+// question.
+func protectedPaths(component string) []string {
+	switch component {
+	case "content":
+		return []string{"/v1/content", "/v1/content/repositories", "/v1/content/stat"}
+	case "agent":
+		return []string{"/v1/services", "/v1/execute", "/v1/message"}
+	}
+	return []string{"/v1/services", "/v1/audit", "/v1/admin/overview"}
 }
 
 // startupTimeout bounds how long a component may take to answer.
@@ -131,7 +149,7 @@ func RunConformance(root, binary, component string, onProgress ProgressFunc) ([]
 				Detail: "no harness yet — needs a signed registration and the mock agent"})
 			continue
 		}
-		ok, detail, evidence := t.run(base)
+		ok, detail, evidence := t.run(base, component)
 		results = append(results, ConformanceResult{ID: t.id, Name: t.name,
 			Passed: ok, Detail: detail, Evidence: evidence})
 		onProgress(Progress{Path: t.id, Status: map[bool]string{true: "passed", false: "failed"}[ok],
@@ -202,8 +220,8 @@ func get(base, path string) (int, []byte, error) {
 var l1Tests = []conformanceTest{
 	{
 		id: "L1-01", name: "Health Check",
-		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true},
-		run: func(base string) (bool, string, string) {
+		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true, "content": true},
+		run: func(base, component string) (bool, string, string) {
 			code, body, err := get(base, "/v1/health")
 			if err != nil {
 				return false, "no response: " + err.Error(), ""
@@ -237,12 +255,11 @@ var l1Tests = []conformanceTest{
 	},
 	{
 		id: "L1-07", name: "Protected Endpoints Require Auth",
-		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true},
-		run: func(base string) (bool, string, string) {
-			// The orchestrator's protected surface, per protocol/spec. Health is
-			// deliberately absent: it is the one endpoint that must answer
-			// without a token.
-			protected := []string{"/v1/services", "/v1/audit", "/v1/admin/overview"}
+		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true, "content": true},
+		run: func(base, component string) (bool, string, string) {
+			// This component's protected surface. Health is deliberately absent:
+			// it is the one endpoint that must answer without a token.
+			protected := protectedPaths(component)
 			var wrong []string
 			checked := 0
 			for _, p := range protected {
@@ -269,13 +286,13 @@ var l1Tests = []conformanceTest{
 	},
 	{
 		id: "L1-10", name: "Error Response Format",
-		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true},
-		run: func(base string) (bool, string, string) {
+		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true, "content": true},
+		run: func(base, component string) (bool, string, string) {
 			// Any 4xx must be JSON carrying `error`. Provoked with a protected
 			// endpoint and an unknown route, which every component has.
 			var faults []string
 			seen := 0
-			for _, p := range []string{"/v1/services", "/v1/audit"} {
+			for _, p := range protectedPaths(component) {
 				code, body, err := get(base, p)
 				if err != nil || code < 400 || code >= 600 {
 					continue
@@ -383,9 +400,48 @@ func failureLines(output string) []string {
 		}
 		// Not structured: a panic, a fatal, or the sentence a process prints as
 		// it exits. Those are the plain-text failures worth matching on.
+		//
+		// Except a line that marks its OWN severity as informational. The dev
+		// storage warning —
+		//
+		//	[dev] using in-memory storage — data will not survive restart
+		//
+		// is required by platforms/go, printed by every component under WL_DEV=1,
+		// and matched five files. So a build that had already succeeded was told
+		// to repair five working files against a line the blueprints mandate,
+		// while the actual failure — an empty orchestrator public key — sat two
+		// lines below it, unread.
+		//
+		// The structured branch above already respects level. This is the same
+		// rule for a component that marks its level in a prefix instead.
+		if isInformationalPrefix(line) {
+			continue
+		}
 		out = append(out, line)
 	}
 	return out
+}
+
+// isInformationalPrefix reports whether a plain-text line marks itself as
+// something other than a failure.
+//
+// Only a leading bracketed tag counts. A line is not excused for containing the
+// word "warning" somewhere — "startup failed: warning threshold exceeded" is a
+// failure — and a component that tags its own output has told us the severity
+// more reliably than any keyword search of the sentence would.
+func isInformationalPrefix(line string) bool {
+	if !strings.HasPrefix(line, "[") {
+		return false
+	}
+	end := strings.Index(line, "]")
+	if end < 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(line[1:end])) {
+	case "dev", "info", "warn", "warning", "note", "ok", "debug", "trace":
+		return true
+	}
+	return false
 }
 
 // FilesBehindRuntimeFailure finds the generated files a startup failure is about.

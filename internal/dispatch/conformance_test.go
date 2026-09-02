@@ -35,12 +35,16 @@ func conformantServer() *httptest.Server {
 }
 
 func runTest(t *testing.T, id, base string) ConformanceResult {
+	return runTestFor(t, id, base, "orchestrator")
+}
+
+func runTestFor(t *testing.T, id, base, component string) ConformanceResult {
 	t.Helper()
 	for _, tc := range l1Tests {
 		if tc.id != id {
 			continue
 		}
-		ok, detail, evidence := tc.run(base)
+		ok, detail, evidence := tc.run(base, component)
 		return ConformanceResult{ID: id, Passed: ok, Detail: detail, Evidence: evidence}
 	}
 	t.Fatalf("no test %s", id)
@@ -275,5 +279,36 @@ orchestrator: startup: reserve namespace "system": namespace "system" is reserve
 	}
 	if containsString(got, "internal/protocol/types.go") {
 		t.Errorf("an unrelated file was targeted: %v", got)
+	}
+}
+
+// A required warning is not a failure.
+//
+// platforms/go requires every component to print the dev-storage warning under
+// WL_DEV=1. It is plain text, so it reached failureLines as a candidate, matched
+// five files, and a build that had ALREADY SUCCEEDED was sent to repair them —
+// while the real message, an empty orchestrator public key, went unread.
+func TestRequiredWarningsAreNotTreatedAsFailures(t *testing.T) {
+	output := strings.Join([]string{
+		"[dev] using in-memory storage — data will not survive restart",
+		"[warn] no orchestrator configured; protected endpoints will refuse tokens",
+		`{"level":"warn","event":"security.key_unencrypted","msg":"signing key is stored unencrypted"}`,
+		"content: initialise service: build authenticator: orchestrator public key is empty",
+	}, "\n")
+
+	got := failureLines(output)
+	if len(got) != 1 {
+		t.Fatalf("want exactly the real failure, got %d lines: %q", len(got), got)
+	}
+	if !strings.Contains(got[0], "orchestrator public key is empty") {
+		t.Errorf("the failure attributed was not the failure: %q", got[0])
+	}
+}
+
+// A failure is not excused for containing a warning-ish word.
+func TestAFailureMentioningWarningIsStillAFailure(t *testing.T) {
+	got := failureLines("startup failed: warning threshold exceeded, refusing to serve")
+	if len(got) != 1 {
+		t.Fatalf("a real failure was discarded: %q", got)
 	}
 }
