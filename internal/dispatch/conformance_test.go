@@ -222,3 +222,58 @@ func TestTheRuntimeRepairPromptCarriesWhatItNeeds(t *testing.T) {
 		}
 	}
 }
+
+func TestANormalStartupWarningIsNotAFailure(t *testing.T) {
+	// The fault that made one run spend thirty-three repair calls. This line is
+	// ordinary dev-mode output, and its fragments — component_type, log_type —
+	// appear in every file that emits a structured log, so matching on it
+	// rewrote seven innocent files per round.
+	output := `{"component":"identity","component_type":"library","event":"security.key_unencrypted","level":"warn","log_type":"security","msg":"private key is protected by file permissions alone — development only","ts":"2026-09-01T22:52:47.940Z"}
+{"component":"orchestrator","level":"info","msg":"orchestrator listening","port":9800}
+[dev] using in-memory storage — data will not survive restart`
+
+	content := map[string]string{
+		"internal/observability/log.go":   "package observability\n// \"component_type\":\"library\"\n// \"log_type\":\"security\"\n",
+		"internal/orchestrator/audit.go":  "package orchestrator\n// \"component_type\":\"library\"\n",
+		"internal/orchestrator/config.go": "package orchestrator\n// \"log_type\":\"security\"\n",
+	}
+	if got := FilesBehindRuntimeFailure(output, content); len(got) != 0 {
+		t.Errorf("a startup that logged only warnings and info targeted %v", got)
+	}
+}
+
+func TestAnErrorLevelLogIsAFailure(t *testing.T) {
+	// The component marks its own severity. An error entry is a finding, and it
+	// is the message that matters — not the JSON envelope around it.
+	output := `{"component":"orchestrator","level":"warn","msg":"private key is protected by file permissions alone"}
+{"component":"orchestrator","level":"error","msg":"reserve namespace \"system\": namespace \"system\" is reserved"}`
+
+	content := map[string]string{
+		"internal/storage/namespaces.go": "package storage\n// \"namespace %q is reserved\"\n",
+		"internal/observability/log.go":  "package observability\n// private key is protected by file permissions alone\n",
+	}
+	got := FilesBehindRuntimeFailure(output, content)
+	if !containsString(got, "internal/storage/namespaces.go") {
+		t.Errorf("the error-level failure was not attributed: %v", got)
+	}
+	if containsString(got, "internal/observability/log.go") {
+		t.Errorf("a warn-level line was matched as a failure: %v", got)
+	}
+}
+
+func TestAPlainTextDeathIsAFailure(t *testing.T) {
+	// A process dying prints a sentence, not JSON. That sentence is the finding.
+	output := `{"level":"info","msg":"starting"}
+orchestrator: startup: reserve namespace "system": namespace "system" is reserved`
+	content := map[string]string{
+		"internal/orchestrator/server.go": "package orchestrator\n// \"reserve namespace %q: %w\"\n",
+		"internal/protocol/types.go":      "package protocol\ntype X struct{}\n",
+	}
+	got := FilesBehindRuntimeFailure(output, content)
+	if !containsString(got, "internal/orchestrator/server.go") {
+		t.Errorf("a plain-text death was not attributed: %v", got)
+	}
+	if containsString(got, "internal/protocol/types.go") {
+		t.Errorf("an unrelated file was targeted: %v", got)
+	}
+}

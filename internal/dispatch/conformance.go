@@ -333,6 +333,55 @@ func FailedConformance(rs []ConformanceResult) []ConformanceResult {
 // reQuotedRun matches a quoted value inside a rendered error message.
 var reQuotedRun = regexp.MustCompile(`"[^"]*"`)
 
+// failureLines reduces captured output to the lines that are actually a failure.
+//
+// # Why this is not just "every line"
+//
+// A component logs while starting. This is normal dev-mode output:
+//
+//	{"level":"warn","event":"security.key_unencrypted","msg":"private key is
+//	 protected by file permissions alone — development only"}
+//
+// Treated as the failure, its fragments — "component_type":"library",
+// "log_type":"security" — match every file that emits a structured log. One run
+// made thirty-three repair calls off that line and rewrote seven innocent files
+// per round. It converged by brute force, which is not the same as working.
+//
+// A component marks its own severity, so use it: a JSON line at info, warn or
+// debug is context. What counts is a line the component called an error, or a
+// line that is not structured logging at all — a panic, a fatal, the sentence a
+// process prints as it dies.
+func failureLines(output string) []string {
+	var out []string
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		if len(line) < 16 {
+			continue
+		}
+		var entry map[string]any
+		if json.Unmarshal([]byte(line), &entry) == nil {
+			// Structured log. Only an error-level entry is a failure, and then
+			// it is the message that matters, not the envelope.
+			level, _ := entry["level"].(string)
+			switch strings.ToLower(level) {
+			case "error", "fatal", "panic":
+			default:
+				continue
+			}
+			for _, field := range []string{"msg", "message", "error", "err"} {
+				if v, ok := entry[field].(string); ok && len(v) >= 12 {
+					out = append(out, v)
+				}
+			}
+			continue
+		}
+		// Not structured: a panic, a fatal, or the sentence a process prints as
+		// it exits. Those are the plain-text failures worth matching on.
+		out = append(out, line)
+	}
+	return out
+}
+
 // FilesBehindRuntimeFailure finds the generated files a startup failure is about.
 //
 // A runtime failure names no file. This one —
@@ -352,11 +401,7 @@ var reQuotedRun = regexp.MustCompile(`"[^"]*"`)
 // file either contains that format string or it does not.
 func FilesBehindRuntimeFailure(output string, content map[string]string) []string {
 	var candidates []string
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if len(line) < 16 {
-			continue
-		}
+	for _, line := range failureLines(output) {
 		// Each colon-separated clause is usually one Errorf. Wrapping means one
 		// line carries several, and the clause is the unit that matches.
 		for _, clause := range strings.Split(line, ": ") {
