@@ -61,7 +61,7 @@ type conformanceTest struct {
 	id      string
 	name    string
 	applies map[string]bool // component kinds this test addresses
-	run     func(base, component string) (bool, string, string)
+	run     func(base, component string, blueprints map[string]string) (bool, string, string)
 }
 
 // protectedPaths are the endpoints a component serves that MUST refuse an
@@ -72,22 +72,16 @@ type conformanceTest struct {
 // against a content service reports "no protected endpoint answered at all",
 // which is a correct implementation failing a test that asked the wrong
 // question.
-func protectedPaths(component string) []string {
-	switch component {
-	case "content":
-		return []string{"/v1/content", "/v1/content/repositories", "/v1/content/stat"}
-	case "agent":
-		return []string{"/v1/services", "/v1/execute", "/v1/message"}
+func protectedPaths(component string, blueprints map[string]string) []string {
+	if got := ProtectedGETsFor(component, blueprints); len(got) > 0 {
+		return got
 	}
+	// No corpus supplied, or a component whose blueprint states no Auth column.
+	// The orchestrator's surface is the fallback rather than nothing, because a
+	// probe of nothing reports "no protected endpoint answered" — a correct
+	// implementation failing for want of a list.
 	return []string{"/v1/services", "/v1/audit", "/v1/admin/overview"}
 }
-
-// reCapabilityBullet matches a standard-capability bullet in protocol/types.md,
-// so the capability vocabulary is read from the blueprint rather than copied
-// into the tooling:
-//
-//   - `content:read` — read entries and list a content repository
-var reCapabilityBullet = regexp.MustCompile("(?m)^-\\s+`([a-z][a-z0-9]*:[a-z*][a-z0-9-]*)`")
 
 // startupTimeout bounds how long a component may take to answer.
 //
@@ -102,7 +96,7 @@ const startupTimeout = 20 * time.Second
 // The binary is started on a port nobody else holds, probed, and killed. Its
 // output is captured, because a component that fails to start says why on
 // stderr and that sentence is the whole finding.
-func RunConformance(root, binary, component string, onProgress ProgressFunc) ([]ConformanceResult, string, error) {
+func RunConformance(root, binary, component string, blueprints map[string]string, onProgress ProgressFunc) ([]ConformanceResult, string, error) {
 	if onProgress == nil {
 		onProgress = func(Progress) {}
 	}
@@ -156,7 +150,7 @@ func RunConformance(root, binary, component string, onProgress ProgressFunc) ([]
 				Detail: "no harness yet — needs a signed registration and the mock agent"})
 			continue
 		}
-		ok, detail, evidence := t.run(base, component)
+		ok, detail, evidence := t.run(base, component, blueprints)
 		results = append(results, ConformanceResult{ID: t.id, Name: t.name,
 			Passed: ok, Detail: detail, Evidence: evidence})
 		onProgress(Progress{Path: t.id, Status: map[bool]string{true: "passed", false: "failed"}[ok],
@@ -228,7 +222,7 @@ var l1Tests = []conformanceTest{
 	{
 		id: "L1-01", name: "Health Check",
 		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true, "content": true},
-		run: func(base, component string) (bool, string, string) {
+		run: func(base, component string, blueprints map[string]string) (bool, string, string) {
 			code, body, err := get(base, "/v1/health")
 			if err != nil {
 				return false, "no response: " + err.Error(), ""
@@ -263,10 +257,10 @@ var l1Tests = []conformanceTest{
 	{
 		id: "L1-07", name: "Protected Endpoints Require Auth",
 		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true, "content": true},
-		run: func(base, component string) (bool, string, string) {
+		run: func(base, component string, blueprints map[string]string) (bool, string, string) {
 			// This component's protected surface. Health is deliberately absent:
 			// it is the one endpoint that must answer without a token.
-			protected := protectedPaths(component)
+			protected := protectedPaths(component, blueprints)
 			var wrong []string
 			checked := 0
 			for _, p := range protected {
@@ -294,12 +288,12 @@ var l1Tests = []conformanceTest{
 	{
 		id: "L1-10", name: "Error Response Format",
 		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true, "content": true},
-		run: func(base, component string) (bool, string, string) {
+		run: func(base, component string, blueprints map[string]string) (bool, string, string) {
 			// Any 4xx must be JSON carrying `error`. Provoked with a protected
 			// endpoint and an unknown route, which every component has.
 			var faults []string
 			seen := 0
-			for _, p := range protectedPaths(component) {
+			for _, p := range protectedPaths(component, blueprints) {
 				code, body, err := get(base, p)
 				if err != nil || code < 400 || code >= 600 {
 					continue

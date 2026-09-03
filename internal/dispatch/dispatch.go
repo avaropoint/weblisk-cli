@@ -191,7 +191,7 @@ func ComponentInit(root, target, platform string) error {
 					if bin == "" {
 						return nil, "", nil
 					}
-					res, out, err := RunConformance(root, bin, target, printProgress)
+					res, out, err := RunConformance(root, bin, target, graph.Map, printProgress)
 					if err != nil {
 						return res, out, err
 					}
@@ -223,7 +223,7 @@ func ComponentInit(root, target, platform string) error {
 			// Layer 4's final word. The loop has already run the component and
 			// repaired what it could; this is the report of where it ended.
 			if bin := builtBinary(root, plan.Build); bin != "" {
-				results, output, cerr := RunConformance(root, bin, target, nil)
+				results, output, cerr := RunConformance(root, bin, target, graph.Map, nil)
 				reportConformance(results, output, cerr)
 
 				// Interoperability, against the real orchestrator of this tenant.

@@ -44,7 +44,7 @@ func runTestFor(t *testing.T, id, base, component string) ConformanceResult {
 		if tc.id != id {
 			continue
 		}
-		ok, detail, evidence := tc.run(base, component)
+		ok, detail, evidence := tc.run(base, component, nil)
 		return ConformanceResult{ID: id, Passed: ok, Detail: detail, Evidence: evidence}
 	}
 	t.Fatalf("no test %s", id)

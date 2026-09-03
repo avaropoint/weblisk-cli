@@ -55,6 +55,10 @@ type interopEnv struct {
 	// file. The vocabulary is the blueprint's, and hardcoding it here would put
 	// the tooling back in charge of what a component may ask for.
 	standardCapabilities map[string]bool
+	// blueprints is the corpus, so a test reads what a component declares rather
+	// than what this file assumes about it.
+	blueprints map[string]string
+	component  string
 }
 
 // RunInterop starts a real orchestrator and the component under test against it.
@@ -126,6 +130,7 @@ func RunInterop(root, binary, component string, blueprints map[string]string,
 		} else {
 			ok, detail, evidence := t.run(interopEnv{
 				componentBase: base, orchBase: orchBase, standardCapabilities: caps,
+				blueprints: blueprints, component: component,
 			})
 			res.Passed, res.Detail, res.Evidence = ok, detail, evidence
 		}
@@ -252,7 +257,7 @@ func l4Tests(component string) []interopTest {
 				}
 				var wrong []string
 				checked := 0
-				for _, p := range protectedPaths(componentOf(e)) {
+				for _, p := range protectedPaths(e.component, e.blueprints) {
 					c, b2, e2 := get(e.componentBase, p)
 					if e2 != nil || c == 404 {
 						continue
@@ -278,10 +283,6 @@ func l4Tests(component string) []interopTest {
 		},
 	}
 }
-
-// componentOf is a seam for protectedPaths until the auth column of a
-// component's Endpoints table is read directly. See the note in conformance.go.
-func componentOf(interopEnv) string { return "content" }
 
 // --- the probe -------------------------------------------------------------
 

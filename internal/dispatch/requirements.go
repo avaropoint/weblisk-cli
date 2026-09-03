@@ -29,6 +29,12 @@ import (
 
 // Requirements is what any conformant implementation must contain.
 type Requirements struct {
+	// FieldFaults are bindings in this component's own contract that name a
+	// field the type does not define. Generation MUST NOT proceed with one:
+	// FormatBindings passes fields_used to the model verbatim, so a fault here
+	// instructs it to implement something the protocol has no name for — and it
+	// complies. See architecture/generation, "A binding is not a wish".
+	FieldFaults []FieldBindingFault
 	// Types are what the TARGET's blueprint declares it consumes, from its
 	// binding contracts — not every type the protocol defines.
 	Types []string
@@ -111,6 +117,11 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 	if body, ok := g.Map[targetBlueprint(target)]; ok {
 		req.Bindings = ExtractBindings(body)
 		req.Types = BoundTypes(req.Bindings)
+		// Only this blueprint's own bindings reach the model, so only its own
+		// faults can misinstruct it. Scoping the check here is what makes it
+		// actionable: "your contract names a field that does not exist" rather
+		// than a hundred findings in blueprints this component never binds.
+		req.FieldFaults = CheckFieldBindings(map[string]string{targetBlueprint(target): body}, g.Map)
 	}
 	if types, ok := g.Map["protocol/types.md"]; ok {
 		req.UnboundTypes = UnboundTypes(ExtractTypes(types), req.Types)

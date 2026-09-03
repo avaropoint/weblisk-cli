@@ -13,20 +13,31 @@ import (
 // component and its absence means there is no tenant yet. Everything after it
 // is an amendment to a tenant that already exists, which is a different act and
 // reads better as one.
-var buildableComponents = map[string]string{
-	"content": "content repository service — custody-classified document storage",
+// Descriptions only. WHICH components exist is read from the corpus by
+// dispatch.BuildableComponents — a blueprint stating an HTTP surface and its
+// bindings IS a buildable component, and needing a Go edit as well meant the
+// corpus could describe something the tool refused to build.
+var componentDescriptions = map[string]string{
+	"content":      "content repository service — custody-classified document storage",
+	"orchestrator": "the trust anchor and agent registry (see `weblisk server init`)",
 }
 
 // HandleComponent dispatches `weblisk component <name> <verb>`.
 func HandleComponent(args []string, root string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		PrintComponentHelp()
+		PrintComponentHelpFor(root)
 		return nil
 	}
 
 	name := args[0]
-	if _, ok := buildableComponents[name]; !ok {
-		return fmt.Errorf("unknown component: %s\n  Known: %s", name, strings.Join(componentNames(), ", "))
+	known := componentNames(root)
+	if !containsStr(known, name) {
+		return fmt.Errorf("unknown component: %s\n  Buildable from this installation's blueprints: %s",
+			name, strings.Join(known, ", "))
+	}
+	if name == "orchestrator" {
+		return fmt.Errorf("the orchestrator is a tenant's first component, not an amendment to one\n" +
+			"  Use: weblisk server init")
 	}
 	rest := args[1:]
 	if len(rest) == 0 {
@@ -61,22 +72,41 @@ func HandleComponent(args []string, root string) error {
 	}
 }
 
-func componentNames() []string {
-	var out []string
-	for k := range buildableComponents {
-		out = append(out, k)
+// componentNames reads the buildable set from the installation's blueprints.
+func componentNames(root string) []string {
+	if got := dispatch.BuildableComponents(dispatch.LoadArchitectureCorpus(root)); len(got) > 0 {
+		return got
 	}
-	return out
+	return nil
+}
+
+func containsStr(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // PrintComponentHelp prints usage for the component command.
-func PrintComponentHelp() {
+func PrintComponentHelp() { PrintComponentHelpFor("") }
+
+// PrintComponentHelpFor lists what this installation's blueprints can build.
+func PrintComponentHelpFor(root string) {
 	fmt.Println()
 	fmt.Println("  Usage: weblisk component <name> init [--platform go]")
 	fmt.Println()
-	fmt.Println("  Components:")
-	for _, n := range componentNames() {
-		fmt.Printf("    %-10s %s\n", n, buildableComponents[n])
+	names := componentNames(root)
+	if len(names) == 0 {
+		fmt.Println("  No blueprints found. A component is an architecture blueprint that")
+		fmt.Println("  states an Endpoints table and declares its bindings.")
+		fmt.Println()
+		return
+	}
+	fmt.Println("  Components, from this installation's blueprints:")
+	for _, n := range names {
+		fmt.Printf("    %-14s %s\n", n, componentDescriptions[n])
 	}
 	fmt.Println()
 }
