@@ -50,7 +50,6 @@ package dispatch
 // component needs.
 
 import (
-	"regexp"
 	"sort"
 	"strings"
 )
@@ -70,75 +69,21 @@ type Binding struct {
 	FieldsUsed []string // the fields this component actually consumes (types only)
 }
 
-var (
-	reBindBlueprint = regexp.MustCompile(`^\s*-\s*blueprint:\s*(\S+)`)
-	reBindName      = regexp.MustCompile(`^\s*-\s*name:\s*(\S+)`)
-	reBindFields    = regexp.MustCompile(`^\s*fields_used:\s*\[([^\]]*)\]`)
-	reBindSection   = regexp.MustCompile(`^\s*(types|behaviors|endpoints|events|config|patterns):\s*$`)
-)
-
-// ExtractBindings reads the Dependencies block's declared type bindings.
+// ExtractBindings reads a blueprint's declared dependency contract.
 //
-// Parsed line-wise rather than as YAML: the block is fenced markdown inside a
-// document, the surrounding text is not YAML, and a full parse would fail on the
-// file rather than on the block. Only the `types:` section is read — endpoints,
-// events and config bindings describe consumption this generator does not yet
-// act on, and inventing meaning for them would be the same overreach in a new
-// place.
+// Delegates to a real YAML parser. It previously walked the block line-wise,
+// and the reason recorded here was that the file is not YAML — true, and the
+// answer was to parse the BLOCK rather than to stop parsing. See yamlblock.go
+// for what the line-wise reader could not see, including a `fields_used` list
+// wrapped across two lines, which it returned as EMPTY so the fields of
+// MetricsInfo, SearchQuery and DataContract reached generation as nothing.
+//
+// Errors are dropped here, for callers that want only what parsed. Generation
+// uses ParseBindings and refuses on error: an unparsed contract is one nobody
+// read.
 func ExtractBindings(blueprint string) []Binding {
-	i := strings.Index(blueprint, "## Dependencies")
-	if i < 0 {
-		return nil
-	}
-	rest := blueprint[i:]
-	if end := strings.Index(rest[len("## Dependencies"):], "\n## "); end >= 0 {
-		rest = rest[:end+len("## Dependencies")]
-	}
-
-	var out []Binding
-	currentBP := ""
-	section := ""
-	var pending *Binding
-	flush := func() {
-		if pending != nil {
-			out = append(out, *pending)
-			pending = nil
-		}
-	}
-	for _, line := range strings.Split(rest, "\n") {
-		if m := reBindBlueprint.FindStringSubmatch(line); m != nil {
-			flush()
-			currentBP = m[1]
-			section = ""
-			continue
-		}
-		if m := reBindSection.FindStringSubmatch(line); m != nil {
-			flush()
-			section = m[1]
-			continue
-		}
-		if section != "types" && section != "behaviors" {
-			continue
-		}
-		if m := reBindName.FindStringSubmatch(line); m != nil {
-			flush()
-			kind := "type"
-			if section == "behaviors" {
-				kind = "behavior"
-			}
-			pending = &Binding{From: currentBP, Kind: kind, Type: m[1]}
-			continue
-		}
-		if m := reBindFields.FindStringSubmatch(line); m != nil && pending != nil {
-			for _, f := range strings.Split(m[1], ",") {
-				if f = strings.TrimSpace(f); f != "" {
-					pending.FieldsUsed = append(pending.FieldsUsed, f)
-				}
-			}
-		}
-	}
-	flush()
-	return out
+	bs, _ := ParseBindings("", blueprint)
+	return bs
 }
 
 // BoundTypes returns the distinct type names a blueprint declares it consumes.
