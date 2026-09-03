@@ -17,10 +17,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/term"
 )
 
 // Handle dispatches operator subcommands.
@@ -251,30 +253,39 @@ func handleRegister(args []string) error {
 		Status  string `json:"status"`
 		Expires string `json:"expires"`
 	}
-	if err := json.Unmarshal(body, &result); err == nil && result.Token != "" {
-		// Store token
-		tokenPath := tokenFilePath()
-		tokenData, _ := json.Marshal(map[string]string{
-			"token":   result.Token,
-			"orch":    orchURL,
-			"role":    result.Role,
-			"expires": result.Expires,
-		})
-		os.MkdirAll(filepath.Dir(tokenPath), 0700)
-		os.WriteFile(tokenPath, tokenData, 0600)
+	_ = json.Unmarshal(body, &result)
 
+	// architecture/admin, "The registration response": a token comes back only
+	// when registration also APPROVED the operator — the first-operator
+	// bootstrap. A client MUST NOT infer a token from a successful
+	// registration, which is how "[ok] Registered" came to be printed beside an
+	// empty token file, after which every /v1/admin call answered 401.
+	if result.Token != "" {
+		saveToken(orchURL, name, result.Token, 0)
 		fmt.Printf("  [ok] Registered as %s\n", result.Role)
-		fmt.Printf("  Token stored: %s\n", tokenPath)
-		if result.Expires != "" {
-			fmt.Printf("  Expires: %s\n", result.Expires)
-		}
-	} else if result.Status == "pending" {
-		fmt.Println("  Registration pending admin approval.")
-	} else {
-		fmt.Println("  [ok] Registered.")
+		fmt.Printf("  Token stored: %s\n", tokenFilePath())
+		fmt.Println()
+		return nil
 	}
+	if result.Status == "pending" {
+		fmt.Println("  [ok] Registered — pending approval by an existing admin.")
+		fmt.Println("      No token is issued until approved.")
+		fmt.Println()
+		return nil
+	}
+	// Approved but no token in the response: ask the endpoint that issues them.
+	tok, exp, terr := RequestToken(orchURL, name)
+	if terr != nil {
+		fmt.Println("  [ok] Registered, and no token was issued.")
+		fmt.Printf("      %v\n", terr)
+		fmt.Println("      Run 'weblisk operator token --refresh' once approved.")
+		fmt.Println()
+		return nil
+	}
+	saveToken(orchURL, name, tok, exp)
+	fmt.Println("  [ok] Registered.")
+	fmt.Printf("  Token stored: %s\n", tokenFilePath())
 	fmt.Println()
-
 	return nil
 }
 
@@ -515,7 +526,26 @@ func tokenFilePath() string {
 	return filepath.Join(home, ".weblisk", "token")
 }
 
+// cachedKey holds the decrypted operator key for the life of the process.
+//
+// protocol/identity rule 4 says the PASSPHRASE is never stored and exists only
+// in memory during the decrypt operation. It does not say the decrypted key must
+// be thrown away and the human asked again: decrypting per call made a command
+// that needs two key operations prompt twice, and with input piped — Studio's
+// password field, a container, CI — the second read found stdin exhausted and
+// reported "wrong passphrase" for a correct one.
+var (
+	cachedKey  *mldsa65.PrivateKey
+	cachedKeyE error
+	cachedOnce sync.Once
+)
+
 func loadPrivateKey() (*mldsa65.PrivateKey, error) {
+	cachedOnce.Do(func() { cachedKey, cachedKeyE = decryptPrivateKey() })
+	return cachedKey, cachedKeyE
+}
+
+func decryptPrivateKey() (*mldsa65.PrivateKey, error) {
 	privPath := filepath.Join(keysDirectory(), "operator.key")
 	data, err := os.ReadFile(privPath)
 	if err != nil {
@@ -586,63 +616,119 @@ func TokenExpiry() time.Time {
 }
 
 // RefreshToken attempts to refresh the operator token with the orchestrator.
+// RefreshToken obtains a fresh operator token from the orchestrator.
+//
+// architecture/admin, "Obtaining a token": the operator's private key IS the
+// credential. Sign {name, timestamp}, POST it, receive a token. The same call
+// issues and refreshes.
+//
+// # What this replaces
+//
+// The previous implementation posted to /v1/admin/operators/refresh — an
+// endpoint no blueprint declares, so no orchestrator serves it. It sent the
+// EXPIRED token as a bearer credential, which fails precisely when a refresh is
+// needed. It sent the public key in an X-Public-Key header, which the
+// orchestrator must not trust: admin.md requires it to look the operator up in
+// its OWN records, because accepting a key from the request makes any caller
+// able to present any identity. And having loaded the private key, it signed
+// nothing at all.
 func RefreshToken() (string, error) {
 	data, err := os.ReadFile(tokenFilePath())
 	if err != nil {
-		return "", fmt.Errorf("no token file")
+		return "", fmt.Errorf("no token file — run 'weblisk operator register --orch <url>' first")
 	}
 	var info map[string]string
 	if json.Unmarshal(data, &info) != nil {
 		return "", fmt.Errorf("invalid token file")
 	}
-
 	orchURL := info["orch"]
 	if orchURL == "" {
 		return "", fmt.Errorf("no orchestrator URL in token file")
 	}
+	name := info["name"]
+	if name == "" {
+		name = loadOperatorName()
+	}
+	token, expires, err := RequestToken(orchURL, name)
+	if err != nil {
+		return "", err
+	}
+	saveToken(orchURL, name, token, expires)
+	return token, nil
+}
 
+// RequestToken signs the challenge architecture/admin specifies and exchanges
+// it for a token. Exported so a caller that holds no token file — a first
+// connection from a console — can obtain one.
+func RequestToken(orchURL, name string) (token string, expiresAt int64, err error) {
 	privKey, err := loadPrivateKey()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("POST", orchURL+"/v1/admin/operators/refresh", nil)
+	// canonicalize({name, timestamp}): a Go map marshals with sorted keys, which
+	// is the ordering RFC 8785 requires.
+	challenge, err := json.Marshal(map[string]any{
+		"name":      name,
+		"timestamp": time.Now().Unix(),
+	})
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+info["token"])
+	var payload map[string]any
+	if err := json.Unmarshal(challenge, &payload); err != nil {
+		return "", 0, err
+	}
+	var sig [mldsa65.SignatureSize]byte
+	if err := mldsa65.SignTo(privKey, challenge, nil, false, sig[:]); err != nil {
+		return "", 0, fmt.Errorf("signing the challenge: %w", err)
+	}
+	payload["signature"] = base64.RawURLEncoding.EncodeToString(sig[:])
 
-	pubKey := privKey.Public().(*mldsa65.PublicKey)
-	pubBytes, _ := pubKey.MarshalBinary()
-	req.Header.Set("X-Public-Key", base64.RawURLEncoding.EncodeToString(pubBytes))
-
-	resp, err := client.Do(req)
+	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("connection failed: %w", err)
+		return "", 0, err
+	}
+	req, err := http.NewRequest("POST", strings.TrimRight(orchURL, "/")+"/v1/admin/operators/token",
+		strings.NewReader(string(body)))
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("connection failed: %w", err)
 	}
 	defer resp.Body.Close()
-
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("refresh failed (HTTP %d)", resp.StatusCode)
+		return "", 0, fmt.Errorf("token request refused (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Token   string `json:"token"`
-		Expires string `json:"expires"`
+	var out struct {
+		Token     string `json:"token"`
+		ExpiresAt int64  `json:"expires_at"`
 	}
-	if json.Unmarshal(body, &result) != nil || result.Token == "" {
-		return "", fmt.Errorf("invalid refresh response")
+	if json.Unmarshal(raw, &out) != nil || out.Token == "" {
+		return "", 0, fmt.Errorf("orchestrator returned no token")
 	}
+	return out.Token, out.ExpiresAt, nil
+}
 
-	// Update stored token
-	info["token"] = result.Token
-	info["expires"] = result.Expires
-	newData, _ := json.Marshal(info)
-	os.WriteFile(tokenFilePath(), newData, 0600)
-
-	return result.Token, nil
+// saveToken persists a token beside the operator identity, 0600.
+//
+// The token is stored; the PASSPHRASE never is — protocol/identity rule 4.
+func saveToken(orchURL, name, token string, expiresAt int64) {
+	b, err := json.Marshal(map[string]string{
+		"token":      token,
+		"orch":       orchURL,
+		"name":       name,
+		"expires_at": fmt.Sprintf("%d", expiresAt),
+	})
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(tokenFilePath()), 0o700)
+	_ = os.WriteFile(tokenFilePath(), b, 0o600)
 }
 
 func resolveOrchURL(args []string) string {
@@ -746,12 +832,12 @@ const (
 )
 
 type keyFile struct {
-	Header    string    `json:"header"`
-	Algorithm string    `json:"algorithm"`
-	KDF       string    `json:"kdf"`
-	KDFParams kdfParams `json:"kdf_params"`
-	Nonce     string    `json:"nonce"`
-	Ciphertext string   `json:"ciphertext"`
+	Header     string    `json:"header"`
+	Algorithm  string    `json:"algorithm"`
+	KDF        string    `json:"kdf"`
+	KDFParams  kdfParams `json:"kdf_params"`
+	Nonce      string    `json:"nonce"`
+	Ciphertext string    `json:"ciphertext"`
 }
 
 type kdfParams struct {
@@ -858,21 +944,48 @@ func decryptKey(data []byte, passphrase string) ([]byte, error) {
 	return plaintext, nil
 }
 
-// readPassphrase reads a passphrase from stdin without echoing.
+// stdinReader is shared across passphrase reads.
+//
+// A new bufio.Reader per call reads ahead and discards what it buffered when it
+// goes out of scope. On a terminal that is invisible — a human types one line,
+// waits, types the next. Piped, the first read swallows BOTH lines and the
+// second gets nothing, so `operator init` reported "passphrases do not match"
+// for two identical lines and headless key generation could never work.
+//
+// protocol/identity requires this to work without a terminal: "A runtime with a
+// terminal will prompt; a runtime without one — a Worker, a container, a
+// scheduled task — cannot, and a specification that says prompt has excluded
+// it." Studio's password field is such a channel.
+var (
+	stdinOnce   sync.Once
+	stdinShared *bufio.Reader
+)
+
+func sharedStdin() *bufio.Reader {
+	stdinOnce.Do(func() { stdinShared = bufio.NewReader(os.Stdin) })
+	return stdinShared
+}
+
+// readPassphrase reads one line from stdin without echoing it.
+//
+// Echo suppression is best-effort: `stty -echo` fails harmlessly when stdin is
+// not a terminal, which is the case this function must also serve. The
+// passphrase is never echoed, never logged and never written to disk, and it is
+// never accepted as a command-line argument — argv is readable by any process
+// on the machine.
 func readPassphrase() (string, error) {
-	// Disable echo
-	stty := exec.Command("stty", "-echo")
-	stty.Stdin = os.Stdin
-	stty.Run()
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		stty := exec.Command("stty", "-echo")
+		stty.Stdin = os.Stdin
+		_ = stty.Run()
+		defer func() {
+			restore := exec.Command("stty", "echo")
+			restore.Stdin = os.Stdin
+			_ = restore.Run()
+		}()
+	}
 
-	defer func() {
-		restore := exec.Command("stty", "echo")
-		restore.Stdin = os.Stdin
-		restore.Run()
-	}()
-
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
+	line, err := sharedStdin().ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", err
 	}
