@@ -306,14 +306,14 @@ func handleMockOrchestrator(args []string) error {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{
-			"agents_online":      len(registrations),
-			"agents_degraded":    0,
-			"agents_offline":     0,
-			"domains_online":     0,
-			"workflows_today":    0,
-			"approvals_pending":  0,
-			"federation_peers":   0,
-			"health_score":       100,
+			"agents_online":     len(registrations),
+			"agents_degraded":   0,
+			"agents_offline":    0,
+			"domains_online":    0,
+			"workflows_today":   0,
+			"approvals_pending": 0,
+			"federation_peers":  0,
+			"health_score":      100,
 		})
 	})
 

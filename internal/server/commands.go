@@ -35,6 +35,11 @@ func Handle(args []string, root string) error {
 		return handleServerStatus(args[1:], root)
 	case "logs":
 		return handleLogs(args[1:], root)
+	case "provision":
+		// Establish the first operator against a running tenant, in one action.
+		// architecture/admin's bootstrap tells a person to run two commands; a
+		// console has no shell to run them in.
+		return HandleProvision(args[1:], root)
 	case "help", "--help", "-h":
 		PrintHelp()
 		return nil

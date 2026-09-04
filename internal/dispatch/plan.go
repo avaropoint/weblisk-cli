@@ -86,7 +86,30 @@ Requirements on the plan:
 - No symbol may be declared by two files.
 - depends_on must be acyclic and may only name files in this plan.
 - Order files so dependencies come before the files that use them. An entry point
-  depends on what it constructs, so it comes last.`
+  depends on what it constructs, so it comes last.
+
+Naming. Read this twice; it decides whether the plan can be applied at all.
+
+You do NOT choose names. The blueprints declare them and the requirements below
+list them. Use each declared name EXACTLY as written — do not shorten it, drop
+its noun, add a qualifier, expand an abbreviation or substitute a synonym.
+
+- Endpoints arrive with a declared operation. The platform blueprint states how
+  an operation is spelled in this language — path constant, handler, request
+  type, response type — and that mapping is the only permitted spelling.
+- Store operations arrive named. GetAgent is not Get. AppendObservation is not
+  Add. ClaimNamespace is not Claim.
+- A required type keeps the exact spelling of the type table.
+- Where the tenant ALREADY declares a name that satisfies a requirement, keep
+  it. A plan may only change what the blueprints changed.
+
+If a name you need is in none of this, say so in "purpose" and use the closest
+declared name — do NOT invent one. A missing name is a gap in the blueprint and
+it will be fixed there.
+
+Renaming a symbol nothing asked you to rename makes every file that used the
+old name stale, and they will all be regenerated. Assume the tenant listed
+below is correct unless a requirement contradicts it.`
 
 var reJSONObject = regexp.MustCompile(`(?s)\{.*\}`)
 
@@ -168,6 +191,14 @@ func ValidatePlan(p *Plan, req *Requirements, st *TenantState) []string {
 			// symbols, and a plan naming both was rejected as incoherent when it
 			// was correct.
 			placedAt[d] = append(placedAt[d], f.Path)
+			// Also under the bare name, so a declared operation is found
+			// whether the plan writes it as "GetAgent" or as
+			// "(*Registry).GetAgent". A store operation is nearly always a
+			// method, and looking it up only under the plan's exact spelling
+			// would report every one of them missing.
+			if bare := bareSymbol(d); bare != d {
+				placedAt[bare] = append(placedAt[bare], f.Path)
+			}
 			key := planPackage(f.Path) + "." + d
 			declaredBy[key] = append(declaredBy[key], f.Path)
 		}
@@ -198,6 +229,28 @@ func ValidatePlan(p *Plan, req *Requirements, st *TenantState) []string {
 	if len(missingEndpoints) > 0 {
 		gaps = append(gaps, fmt.Sprintf("no file serves these endpoints: %s",
 			strings.Join(missingEndpoints, ", ")))
+	}
+
+	// Every store operation the blueprint declares for this component is
+	// declared by some file, under the declared NAME.
+	//
+	// Validated rather than requested. The plan prompt asks for these names and
+	// a plan that renames one is not a worse plan — it is a plan that cannot be
+	// applied to the existing tenant, because every caller is written against
+	// the name the blueprint states. This is the check that turns
+	// schemas/common's "a declared name is binding" into something the pipeline
+	// enforces instead of hoping for.
+	var missingOps []string
+	for _, op := range req.Operations {
+		if len(placedAt[op]) == 0 {
+			missingOps = append(missingOps, op)
+		}
+	}
+	if len(missingOps) > 0 {
+		gaps = append(gaps, fmt.Sprintf(
+			"architecture/storage declares these operations for this component and no file declares them "+
+				"under that name (they are binding — do not shorten, requalify or rename): %s",
+			strings.Join(missingOps, ", ")))
 	}
 
 	// No symbol declared twice — the coherence failure, caught before generating.
@@ -292,9 +345,35 @@ func planPrompt(req *Requirements, target, platform, specs, platBP string, st *T
 		fmt.Fprintf(&b, "Types this component consumes (%d). Every one must be declared by exactly one file:\n%s\n\n",
 			len(req.Types), strings.Join(req.Types, ", "))
 	}
-	if len(req.Endpoints) > 0 {
+	// Endpoints with their DECLARED operation, so the plan spells its symbols
+	// from the blueprint's name rather than from the path. Falls back to the
+	// wire list for a blueprint written before the Operation column existed.
+	if len(req.EndpointOps) > 0 {
+		fmt.Fprintf(&b, "Endpoints this target must serve (%d). The operation is the DECLARED\n"+
+			"NAME — spell every symbol for this endpoint from it, using the platform\n"+
+			"blueprint's mapping. Do not name anything from the path:\n", len(req.EndpointOps))
+		for _, e := range req.EndpointOps {
+			fmt.Fprintf(&b, "  %-7s %-38s operation: %s\n", e.Method, e.Path, e.Operation)
+		}
+		b.WriteString("\n")
+	} else if len(req.Endpoints) > 0 {
 		fmt.Fprintf(&b, "Endpoints this target must serve (%d):\n  %s\n\n",
 			len(req.Endpoints), strings.Join(req.Endpoints, "\n  "))
+	}
+	if len(req.Operations) > 0 {
+		fmt.Fprintf(&b, "Store operations this component owns (%d), named as architecture/storage\n"+
+			"declares them. Use these names EXACTLY — they are what every caller is\n"+
+			"written against:\n  %s\n\n",
+			len(req.Operations), wrapList(req.Operations, 70, "  "))
+	}
+	if len(req.UnnamedEndpoints) > 0 {
+		// Stated, never guessed. schemas/architecture requires the Operation
+		// column; a row without one is a gap in the blueprint, and filling it
+		// in here is how a pipeline becomes the specification.
+		fmt.Fprintf(&b, "These endpoints have NO declared operation in their blueprint (%d).\n"+
+			"Name them from the nearest declared vocabulary and say in \"purpose\" that\n"+
+			"the blueprint does not name them:\n  %s\n\n",
+			len(req.UnnamedEndpoints), strings.Join(req.UnnamedEndpoints, "\n  "))
 	}
 	if c := FormatChecklist(req.Checklist); c != "" {
 		b.WriteString(c)

@@ -66,7 +66,7 @@ func HandleComponent(args []string, root string) error {
 		// No generatedRootMarkers guard here. A component is generated INTO a
 		// tenant that already has code by definition, and the manifest — keyed
 		// per component — is what decides which files this build may replace.
-		return dispatch.ComponentInit(root, name, platform)
+		return dispatch.SupervisedComponentInit(root, name, platform)
 	default:
 		return fmt.Errorf("unknown verb for component %s: %s", name, rest[0])
 	}

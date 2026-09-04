@@ -43,8 +43,29 @@ type Requirements struct {
 	// UnboundTypes are types the sent blueprints define that no binding claims.
 	// Reported as a gap in the blueprint's contract, never added to Types.
 	UnboundTypes []string
-	Endpoints    []string        // from protocol/spec.md, for this target
-	Checklist    []ChecklistItem // from every blueprint being read, scoped to this target
+	Endpoints    []string // from protocol/spec.md, for this target
+	// EndpointOps are those endpoints with the name their blueprint declares
+	// for them, from the Operation column of the serving component's
+	// `## Endpoints` table.
+	//
+	// The wire fact and the name are different things. "POST /v1/register" is
+	// what a client sends; "Register" is what every symbol in the generated
+	// artifact is spelled from. Without the second, a generator names the
+	// endpoint from its path and names it differently every run.
+	EndpointOps []EndpointOperation
+	// Operations are store operations this component owns, exactly as
+	// architecture/storage declares them.
+	//
+	// These were never read. The blueprint said PutAgent, GetAgent,
+	// DeleteAgent, ListAgents all along, and one plan used Get, Put and List
+	// instead — no file wrong, every file stale.
+	Operations []string
+	// UnnamedEndpoints are endpoints whose blueprint has no Operation for
+	// them. A gap in the blueprint, reported as one: schemas/architecture
+	// requires the column, and inventing the missing name here is how a
+	// pipeline quietly becomes the specification.
+	UnnamedEndpoints []string
+	Checklist        []ChecklistItem // from every blueprint being read, scoped to this target
 	// Excluded are assertions a blueprint addresses to a DIFFERENT component.
 	//
 	// Kept rather than dropped so they can be reported. An assertion left out
@@ -153,9 +174,54 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 		}
 	}
 	if body, ok := g.Map[targetBlueprint(target)]; ok {
+		// The declared name of each endpoint, alongside the wire fact.
+		for _, e := range ExtractEndpointOperations(body) {
+			if e.Operation == "" {
+				req.UnnamedEndpoints = append(req.UnnamedEndpoints, e.Wire())
+				continue
+			}
+			req.EndpointOps = append(req.EndpointOps, e)
+		}
 		addEndpoints(ExtractTableEndpoints(body))
 	}
 	sort.Strings(req.Endpoints)
+
+	// Every REQUIRED endpoint must have a declared operation — including one
+	// the component's table does not mention at all.
+	//
+	// UnnamedEndpoints was populated only from rows present in the table with
+	// an empty Operation cell, which is the narrower fault. The one that
+	// actually occurred was wider: protocol/spec declares POST /v1/rotate-key
+	// and architecture/orchestrator's Endpoints table omitted it entirely, so
+	// it was required, had no name, and nothing said so — the model planned no
+	// file for it and the plan was rejected with "no file serves these
+	// endpoints" three steps later, naming the symptom rather than the cause.
+	//
+	// A check that reports a narrower thing than its name suggests is the same
+	// hazard as a check that cannot read the artifact: it is silent exactly
+	// where it is needed.
+	named := map[string]bool{}
+	for _, e := range req.EndpointOps {
+		named[e.Wire()] = true
+	}
+	for _, e := range req.Endpoints {
+		if !named[e] && !containsString(req.UnnamedEndpoints, e) {
+			req.UnnamedEndpoints = append(req.UnnamedEndpoints, e)
+		}
+	}
+	sort.Strings(req.UnnamedEndpoints)
+
+	// Store operations this component owns, named as architecture/storage names
+	// them. Read from whichever storage blueprint is in the graph rather than
+	// from a fixed path, because a component may be specified against a
+	// different storage contract.
+	for _, name := range g.Order {
+		if !strings.HasSuffix(name, "storage.md") {
+			continue
+		}
+		req.Operations = append(req.Operations,
+			OperationsOwnedBy(ExtractStoreContracts(g.Map[name]), target)...)
+	}
 
 	// Every blueprint in the graph, in the graph's order — then scoped to this
 	// target, because a protocol blueprint's checklist covers both ends of the
@@ -256,6 +322,14 @@ func (r *Requirements) Summary() string {
 	}
 	if n := len(r.Endpoints); n > 0 {
 		parts = append(parts, plural(n, "endpoint"))
+	}
+	if n := len(r.Operations); n > 0 {
+		parts = append(parts, plural(n, "declared operation"))
+	}
+	if n := len(r.UnnamedEndpoints); n > 0 {
+		// Surfaced in the run's own header, because it is a gap in a blueprint
+		// and the person reading the output is the one who can fix it.
+		parts = append(parts, itoa(n)+" endpoint(s) with no declared Operation")
 	}
 	if n := len(r.Checklist); n > 0 {
 		parts = append(parts, plural(n, "checklist assertion"))

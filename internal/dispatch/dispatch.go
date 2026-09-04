@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // GeneratedFile represents a single file extracted from AI output.
@@ -21,7 +22,38 @@ type GeneratedFile struct {
 
 // ServerInit generates orchestrator code using the AI model.
 func ServerInit(root, platform string) error {
-	return ComponentInit(root, "orchestrator", platform)
+	return SupervisedComponentInit(root, "orchestrator", platform)
+}
+
+// SupervisedComponentInit runs a component build and resumes it across provider
+// outages.
+//
+// Generation is cache-backed per file, so a run that died at file 32 has banked
+// 31 and resuming costs only what remains. Five separate tenant builds died to
+// provider instability and each one needed a person to notice and retype the
+// command; this is that person.
+func SupervisedComponentInit(root, target, platform string) error {
+	err := Supervise(
+		func(attempt int) error {
+			if attempt > 1 {
+				fmt.Printf("  Resuming (attempt %d) — completed files are reused from cache\n\n", attempt)
+			}
+			return ComponentInit(root, target, platform)
+		},
+		func(attempt int, wait time.Duration, err error) {
+			fmt.Printf("\n  [wait] the AI provider is failing; resuming in %s (attempt %d)\n        %s\n\n",
+				wait.Round(time.Second), attempt+1, firstLine([]string{err.Error()}))
+		},
+	)
+	// A quota or session limit is the one provider failure no amount of waiting
+	// inside a build can absorb — it is measured in hours, not seconds. It is
+	// not retried, and the operator is told the thing they actually need to
+	// know: nothing generated so far has been lost.
+	if f := FaultOf(err); f != nil && f.Class() == FaultPermanent && permanentMessage(f.Message) {
+		fmt.Printf("\n  Nothing generated so far is lost — every completed file is cached.\n" +
+			"  Re-run with --resume when the limit clears and only what remains is generated.\n\n")
+	}
+	return err
 }
 
 // ComponentInit generates one component from the blueprints that declare it.
@@ -153,25 +185,44 @@ func ComponentInit(root, target, platform string) error {
 			fmt.Print(rep)
 			fmt.Println()
 		}
-		var edited []string
+		var edited, unowned []string
 		keep := map[string]bool{}
 		for _, d := range decisions {
-			if d.RebuildVerdict == RebuildEdited {
+			switch d.RebuildVerdict {
+			case RebuildEdited:
 				edited = append(edited, d.Path)
+				continue
+			case RebuildUnowned:
+				unowned = append(unowned, d.Path)
 				continue
 			}
 			if !d.RebuildVerdict.Generates() {
 				keep[d.Path] = true
 			}
 		}
-		if len(edited) > 0 {
-			// Refused, not overwritten. Adopting the edit or discarding it is a
-			// decision for whoever made it; generation's job is to ask.
-			return fmt.Errorf("%d file(s) cannot be safely regenerated: %s\n"+
-				"  Nothing was written. See the reasons above.\n"+
-				"  Fold the change into the blueprints and delete the file to have it\n"+
-				"  generated again, or keep the file and leave it out of the plan",
-				len(edited), strings.Join(edited, ", "))
+		// Refused, not overwritten. Adopting the change or discarding it is a
+		// decision for whoever made it; generation's job is to ask — and to ask
+		// the right question, which is not the same one in both cases.
+		if len(edited) > 0 || len(unowned) > 0 {
+			var b strings.Builder
+			fmt.Fprintf(&b, "%d file(s) cannot be safely regenerated. Nothing was written.\n",
+				len(edited)+len(unowned))
+			if len(edited) > 0 {
+				fmt.Fprintf(&b, "\n  Changed since generation wrote them: %s\n"+
+					"  Fold the change into the blueprints and delete the file to have it\n"+
+					"  generated again, or keep the file and leave it out of the plan.\n",
+					strings.Join(edited, ", "))
+			}
+			if len(unowned) > 0 {
+				// A distinct fact and a distinct remedy. Reporting this as an
+				// edit sends somebody looking for a change nobody made.
+				fmt.Fprintf(&b, "\n  Present with no record of generation writing them: %s\n"+
+					"  Generation will not overwrite a file it cannot show it authored.\n"+
+					"  If these are a previous run's output, delete them and they will be\n"+
+					"  generated again. If they are hand-written, leave them out of the plan.\n",
+					strings.Join(unowned, ", "))
+			}
+			return fmt.Errorf("%s", strings.TrimRight(b.String(), "\n"))
 		}
 
 		files, gerr := GenerateTarget(provider, plan, platform, graph.Map, graph.Order, platBP, root,
@@ -181,6 +232,10 @@ func ComponentInit(root, target, platform string) error {
 		}
 		fmt.Printf("\n  [ok] Generated %d files in %s/\n\n", len(files), plan.Root)
 		RecordWrittenWith(root, plan, files, graph.Map)
+
+		// Whether running the component found a fault. Held rather than returned
+		// at once so the full report is printed first.
+		var conformanceFault error
 
 		// Layer 2: build, and feed failures back. Generating blind and reporting
 		// success is how eleven files that do not compile get called finished.
@@ -224,14 +279,16 @@ func ComponentInit(root, target, platform string) error {
 			// repaired what it could; this is the report of where it ended.
 			if bin := builtBinary(root, plan.Build); bin != "" {
 				results, output, cerr := RunConformance(root, bin, target, graph.Map, nil)
-				reportConformance(results, output, cerr)
+				conformanceFault = reportConformance(results, output, cerr)
 
 				// Interoperability, against the real orchestrator of this tenant.
 				// A component can satisfy every assertion about itself and be
 				// unable to register — eight faults were found that way by hand.
 				iresults, ioutput, ierr := RunInterop(root, bin, target, graph.Map, nil)
 				if len(iresults) > 0 {
-					reportConformance(iresults, ioutput, ierr)
+					if ifault := reportConformance(iresults, ioutput, ierr); ifault != nil && conformanceFault == nil {
+						conformanceFault = ifault
+					}
 				}
 			}
 		}
@@ -245,6 +302,13 @@ func ComponentInit(root, target, platform string) error {
 		// What the structural checks think — advice, and useful mainly when it
 		// disagrees with the above.
 		reportChecklist(EvaluateChecklistAgainst(req.Checklist, files, graph.Map))
+
+		// Reported LAST, after everything a person needs in order to act on it.
+		// Returning at the point of detection would have hidden the checklist
+		// and the model's own verdicts, which are where the cause usually is.
+		if conformanceFault != nil {
+			return conformanceFault
+		}
 		return nil
 	}
 
@@ -512,13 +576,9 @@ func PatternApply(root, pattern, resource string) error {
 
 // RequireProvider creates and validates an AI provider.
 func RequireProvider() (Provider, error) {
+	// Retry is applied by NewProvider itself, so this and every other path that
+	// talks to a model gets it without asking. See provider.go.
 	provider, err := NewProvider()
-	if err == nil {
-		// Every path that talks to a model retries a failure that calls itself
-		// temporary. Two runs died on "529 Overloaded … usually temporary — try
-		// again in a moment", one of them on file 49 of 49.
-		provider = WithTransientRetry(provider)
-	}
 	if err != nil {
 		return nil, fmt.Errorf("AI provider required for code generation\n\n"+
 			"  Configure an AI provider:\n"+
@@ -540,6 +600,19 @@ func RequireProvider() (Provider, error) {
 		return nil, fmt.Errorf("AI provider not reachable: %w\n\n"+
 			"  Check your WL_AI_* configuration", testErr)
 	}
+	// Which model, in the run's own words rather than in the configuration's.
+	// WL_AI_MODEL unset means "the tool's default", and the tool's default is
+	// not a constant — so the only trustworthy answer comes from the response.
+	if m, ok := Underlying(provider).(interface{ ModelUsed() string }); ok {
+		if used := m.ModelUsed(); used != "" {
+			fmt.Printf("  [ok] AI provider connected — generating with %s\n", used)
+			if os.Getenv("WL_AI_MODEL") == "" {
+				fmt.Printf("       (no WL_AI_MODEL set, so this is the tool's default and may change\n" +
+					"        between runs — set it to pin what generates this tenant)\n")
+			}
+			return provider, nil
+		}
+	}
 	fmt.Println("  [ok] AI provider connected")
 
 	return provider, nil
@@ -559,7 +632,9 @@ func DiscoverProvider() string {
 		info += " (" + model + ")"
 	}
 
-	provider, err := NewProvider()
+	// Not the retrying provider: this answers "what is configured", and a
+	// status line that takes six minutes to print is not a status line.
+	provider, err := newRawProvider()
 	if err != nil {
 		return info + " [error: " + err.Error() + "]"
 	}
@@ -568,6 +643,17 @@ func DiscoverProvider() string {
 		{Role: "user", Content: "Respond with exactly: ok"},
 	})
 	if err != nil {
+		// "unreachable" reads as not installed or misconfigured, and this line
+		// is printed at the top of every build. A run that says "unreachable"
+		// and then generates thirty-five files has told the operator something
+		// false. An overload is the provider being busy, which is a different
+		// fact and one the build will ride out.
+		if isTransient(err) {
+			return info + " [busy — will retry]"
+		}
+		if f := FaultOf(err); f != nil && f.Message != "" {
+			return info + " [" + firstErrorLine(f) + "]"
+		}
 		return info + " [unreachable]"
 	}
 
@@ -583,7 +669,7 @@ func ProviderStatus() map[string]any {
 		"has_key":  os.Getenv("WL_AI_KEY") != "",
 	}
 
-	_, err := NewProvider()
+	_, err := newRawProvider()
 	if err != nil {
 		status["status"] = "error"
 		status["error"] = err.Error()
@@ -1110,8 +1196,25 @@ func builtBinary(root, buildCmd string) string {
 	return ""
 }
 
-// reportConformance prints what running the component established.
-func reportConformance(results []ConformanceResult, output string, err error) {
+// reportConformance prints what running the component established, and returns
+// what it means for the run's outcome.
+//
+// # Why it returns something now
+//
+// It printed and returned nothing, and ComponentInit ended `return nil`. So a
+// build whose component PANICKED AT STARTUP exited 0. The pipeline detected the
+// fault, printed the panic, tried two rounds of repair, said "the component
+// does not run" — and then reported success.
+//
+// That is worse than not checking. Anything reading the exit status — a script,
+// CI, Studio, an operator — is told a hub was built, and the hub does not
+// start. A check whose result is discarded is indistinguishable from no check
+// at all, except that it costs time and looks like diligence.
+//
+// A test with no harness is NOT a failure and does not count here: "we have not
+// verified this" and "this is wrong" are different facts, and conflating them
+// would make the unrun count a reason to fail a correct build.
+func reportConformance(results []ConformanceResult, output string, err error) error {
 	if err != nil {
 		// It never answered. Its own output is the finding.
 		fmt.Printf("  [failed] the component does not run\n           %v\n\n", err)
@@ -1119,7 +1222,7 @@ func reportConformance(results []ConformanceResult, output string, err error) {
 			fmt.Println(indentBlock(lastLines(t, 12), "    "))
 			fmt.Println()
 		}
-		return
+		return fmt.Errorf("the component does not run: %w", err)
 	}
 	passed, failed, unrun := ConformanceSummary(results)
 	fmt.Printf("  Conformance L1: %d passed, %d failed, %d unrun\n", passed, failed, unrun)
@@ -1137,6 +1240,10 @@ func reportConformance(results []ConformanceResult, output string, err error) {
 		fmt.Printf("    %d test(s) have no harness yet — they are NOT passes\n", unrun)
 	}
 	fmt.Println()
+	if failed > 0 {
+		return fmt.Errorf("%s", plural(failed, "conformance test")+" failed")
+	}
+	return nil
 }
 
 // lastLines returns the tail of some output, which is where a startup failure

@@ -274,3 +274,43 @@ func TestPlanTargetComesFromTheCallerNotTheModel(t *testing.T) {
 		t.Errorf("plan.Target = %q, want the caller's target %q", plan.Target, "content")
 	}
 }
+
+// A declared store operation must be planned under its declared name.
+//
+// The prompt asks for this; the check is what makes it binding. A plan that
+// renames one is not a worse plan — it cannot be applied to the existing
+// tenant, because every caller is written against the blueprint's name.
+func TestAPlanMustDeclareTheOperationsItWasGiven(t *testing.T) {
+	req := &Requirements{Operations: []string{"GetAgent", "PutAgent", "ListAgents"}}
+
+	// Renamed: the exact failure that regenerated ten compliant files.
+	renamed := &Plan{Target: "orchestrator", Root: ".", Files: []PlannedFile{
+		{Path: "internal/orchestrator/registry.go", Purpose: "the registry",
+			Declares: []string{"Registry", "(*Registry).Get", "(*Registry).Put", "(*Registry).List"}},
+	}}
+	gaps := ValidatePlan(renamed, req, nil)
+	if !anyContains(gaps, "GetAgent") {
+		t.Fatalf("a plan that renamed GetAgent to Get was accepted: %v", gaps)
+	}
+
+	// Declared correctly, in method notation, which is how a store is planned.
+	correct := &Plan{Target: "orchestrator", Root: ".", Files: []PlannedFile{
+		{Path: "internal/orchestrator/registry.go", Purpose: "the registry",
+			Declares: []string{"Registry", "(*Registry).GetAgent", "(*Registry).PutAgent",
+				"(*Registry).ListAgents"}},
+	}}
+	for _, g := range ValidatePlan(correct, req, nil) {
+		if strings.Contains(g, "architecture/storage declares") {
+			t.Fatalf("a correctly named plan was rejected: %s", g)
+		}
+	}
+}
+
+func anyContains(in []string, sub string) bool {
+	for _, s := range in {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}

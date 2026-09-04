@@ -71,7 +71,7 @@ func (p *OpenAIProvider) Chat(messages []Message) (string, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("provider request failed: %w", err)
+		return "", &ProviderFault{Provider: "provider", Message: "request failed: " + err.Error()}
 	}
 	defer resp.Body.Close()
 
@@ -80,7 +80,7 @@ func (p *OpenAIProvider) Chat(messages []Message) (string, error) {
 		return "", err
 	}
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("provider returned %d: %s", resp.StatusCode, string(respBody))
+		return "", httpFault("provider", resp.StatusCode, respBody)
 	}
 
 	var result chatResponse
@@ -88,7 +88,7 @@ func (p *OpenAIProvider) Chat(messages []Message) (string, error) {
 		return "", fmt.Errorf("parsing response: %w", err)
 	}
 	if result.Error != nil {
-		return "", fmt.Errorf("provider error: %s", result.Error.Message)
+		return "", &ProviderFault{Provider: "provider", Message: result.Error.Message}
 	}
 	if len(result.Choices) == 0 {
 		return "", fmt.Errorf("provider returned no choices")
@@ -150,7 +150,7 @@ func (p *AnthropicProvider) Chat(messages []Message) (string, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("anthropic request failed: %w", err)
+		return "", &ProviderFault{Provider: "anthropic", Message: "request failed: " + err.Error()}
 	}
 	defer resp.Body.Close()
 
@@ -159,7 +159,7 @@ func (p *AnthropicProvider) Chat(messages []Message) (string, error) {
 		return "", err
 	}
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("anthropic returned %d: %s", resp.StatusCode, string(respBody))
+		return "", httpFault("anthropic", resp.StatusCode, respBody)
 	}
 
 	var result anthropicResponse
@@ -167,7 +167,7 @@ func (p *AnthropicProvider) Chat(messages []Message) (string, error) {
 		return "", fmt.Errorf("parsing anthropic response: %w", err)
 	}
 	if result.Error != nil {
-		return "", fmt.Errorf("anthropic error: %s", result.Error.Message)
+		return "", &ProviderFault{Provider: "anthropic", Message: result.Error.Message}
 	}
 
 	var text strings.Builder
@@ -181,8 +181,28 @@ func (p *AnthropicProvider) Chat(messages []Message) (string, error) {
 
 // Factory
 
-// NewProvider creates a Provider from WL_AI_* environment variables.
+// NewProvider creates a Provider from WL_AI_* environment variables, with
+// transient-failure retry already applied.
+//
+// The retry is HERE rather than at the call sites deliberately. It used to be
+// applied in one place, RequireProvider, and every other way of getting a
+// provider silently got none — which is the same shape as the bug that made the
+// retry inert in the first place: a policy that exists but is not reached.
+// Wrapping at construction makes the retrying provider the only kind there is,
+// so a new call site cannot forget.
+//
+// newRawProvider is for the one caller that must NOT retry: a status probe,
+// where six minutes of patience would be six minutes of an operator watching a
+// prompt that has not come back.
 func NewProvider() (Provider, error) {
+	p, err := newRawProvider()
+	if err != nil {
+		return nil, err
+	}
+	return WithTransientRetry(p), nil
+}
+
+func newRawProvider() (Provider, error) {
 	api := os.Getenv("WL_AI_PROVIDER")
 	if api == "" {
 		api = "openai"

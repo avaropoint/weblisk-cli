@@ -1,0 +1,765 @@
+package orchestrator
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+
+	"tenant-v4/internal/protocol"
+	"tenant-v4/internal/storage"
+)
+
+// ReservedNamespace is the top-level event namespace owned by the orchestrator
+// itself. protocol/spec reserves it: an AGENT claiming it is refused at
+// registration with NAMESPACE_RESERVED, while the orchestrator claims it during
+// startup through the same store.
+//
+// The refusal is a registration rule, not a storage rule — neither this registry
+// nor the store beneath it rejects the claim, because the one component the
+// reservation exists to serve would then be unable to own its own namespace.
+// IsReservedNamespace is the predicate the registration handler applies.
+const ReservedNamespace = "system"
+
+// Domain dependency statuses.
+const (
+	DomainStatusReady    = "ready"
+	DomainStatusDegraded = "degraded"
+)
+
+// DomainDependency records whether a domain controller's declared
+// required_agents are all present in the registry. It is recalculated on every
+// registration and deregistration.
+type DomainDependency struct {
+	Domain         string   `json:"domain"`
+	RequiredAgents []string `json:"required_agents"`
+	Missing        []string `json:"missing,omitempty"`
+	Status         string   `json:"status"`
+}
+
+// RegistryCounts is a point-in-time summary of the orchestrator's live state.
+// Channels are not counted here — they belong to the channel store.
+type RegistryCounts struct {
+	Agents          int            `json:"agents"`
+	Domains         int            `json:"domains"`
+	Infrastructure  int            `json:"infrastructure"`
+	Namespaces      int            `json:"namespaces"`
+	Routes          int            `json:"routes"`
+	Subscriptions   int            `json:"subscriptions"`
+	DomainsReady    int            `json:"domains_ready"`
+	DomainsDegraded int            `json:"domains_degraded"`
+	ByStatus        map[string]int `json:"by_status"`
+}
+
+// Registry is the orchestrator's live state: the agent registry, the namespace
+// map, the routing table built from agent subscriptions, and the domain
+// dependency map. Every map is guarded by its own sync.RWMutex — RLock for
+// reads, Lock for writes.
+//
+// Lock order, where more than one is held, is always agentsMu → nsMu → routesMu
+// → domainsMu. Nothing acquires them in any other order.
+//
+// The store is the durable record; the maps are the hot copy. Load rehydrates
+// the maps from the store at startup.
+type Registry struct {
+	store storage.Store
+
+	agentsMu sync.RWMutex
+	agents   map[string]storage.AgentEntry
+
+	nsMu       sync.RWMutex
+	namespaces map[string]string
+
+	routesMu sync.RWMutex
+	routes   map[string][]protocol.RouteEntry
+
+	domainsMu sync.RWMutex
+	domains   map[string]DomainDependency
+}
+
+// NewRegistry creates an empty registry backed by store. Call Load to rehydrate
+// it from the store's contents.
+func NewRegistry(store storage.Store) *Registry {
+	return &Registry{
+		store:      store,
+		agents:     make(map[string]storage.AgentEntry),
+		namespaces: make(map[string]string),
+		routes:     make(map[string][]protocol.RouteEntry),
+		domains:    make(map[string]DomainDependency),
+	}
+}
+
+// Load rehydrates the registry from the store: every agent entry, every
+// namespace claim, the routing table rebuilt from the loaded manifests, and the
+// domain dependency map recalculated from the result.
+func (r *Registry) Load() error {
+	if r.store == nil {
+		return fmt.Errorf("registry: no store configured")
+	}
+
+	agents := make(map[string]storage.AgentEntry)
+	filter := storage.AgentFilter{Limit: storage.MaxLimit}
+	for {
+		page, err := r.store.ListAgents(filter)
+		if err != nil {
+			return fmt.Errorf("registry: list agents: %w", err)
+		}
+		for _, entry := range page.Items {
+			name := entry.Name()
+			if name == "" {
+				continue
+			}
+			agents[name] = cloneAgentEntry(entry)
+		}
+		if !page.HasMore || page.NextCursor == "" {
+			break
+		}
+		filter.Cursor = page.NextCursor
+	}
+
+	namespaces, err := r.store.ListNamespaces()
+	if err != nil {
+		return fmt.Errorf("registry: list namespaces: %w", err)
+	}
+	loadedNamespaces := make(map[string]string, len(namespaces))
+	for ns, owner := range namespaces {
+		loadedNamespaces[ns] = owner
+	}
+
+	routes := make(map[string][]protocol.RouteEntry)
+	for name, entry := range agents {
+		for _, route := range routesFor(name, entry.Manifest.URL, entry.Manifest.Subscriptions) {
+			routes[route.pattern] = append(routes[route.pattern], route.entry)
+		}
+	}
+	for pattern := range routes {
+		sortRoutes(routes[pattern])
+	}
+
+	r.agentsMu.Lock()
+	r.agents = agents
+	r.agentsMu.Unlock()
+
+	r.nsMu.Lock()
+	r.namespaces = loadedNamespaces
+	r.nsMu.Unlock()
+
+	r.routesMu.Lock()
+	r.routes = routes
+	r.routesMu.Unlock()
+
+	r.RecalculateDomains()
+	return nil
+}
+
+// Put stores or replaces an agent registration. It persists to the store first,
+// then updates the in-memory registry, rebuilds that agent's routing entries
+// from its declared subscriptions, and recalculates the domain dependency map.
+//
+// Namespace ownership is a separate operation — see ClaimNamespaces — because
+// registration validates it before the entry is stored.
+func (r *Registry) Put(entry storage.AgentEntry) error {
+	name := entry.Name()
+	if name == "" {
+		return fmt.Errorf("registry: agent name is required")
+	}
+	if r.store == nil {
+		return fmt.Errorf("registry: no store configured")
+	}
+
+	now := protocol.NowUnix()
+	if entry.Status == "" {
+		entry.Status = protocol.StatusOnline
+	}
+	if entry.RegisteredAt == 0 {
+		entry.RegisteredAt = now
+	}
+	if entry.LastSeen == 0 {
+		entry.LastSeen = now
+	}
+	stored := cloneAgentEntry(entry)
+
+	if err := r.store.PutAgent(name, stored); err != nil {
+		return fmt.Errorf("registry: put agent %q: %w", name, err)
+	}
+
+	r.agentsMu.Lock()
+	r.agents[name] = cloneAgentEntry(stored)
+	r.agentsMu.Unlock()
+
+	r.SetRoutes(name, stored.Manifest.URL, stored.Manifest.Subscriptions)
+	r.RecalculateDomains()
+	return nil
+}
+
+// Get returns the live entry for an agent.
+func (r *Registry) Get(name string) (storage.AgentEntry, bool) {
+	r.agentsMu.RLock()
+	entry, ok := r.agents[name]
+	r.agentsMu.RUnlock()
+	if !ok {
+		return storage.AgentEntry{}, false
+	}
+	return cloneAgentEntry(entry), true
+}
+
+// Delete removes an agent from the registry, drops its routing entries, and
+// recalculates the domain dependency map. Owned namespaces are released
+// separately via ReleaseNamespaces, matching the deregistration flow.
+func (r *Registry) Delete(name string) error {
+	if name == "" {
+		return fmt.Errorf("registry: agent name is required")
+	}
+	if r.store == nil {
+		return fmt.Errorf("registry: no store configured")
+	}
+
+	if err := r.store.DeleteAgent(name); err != nil && err != storage.ErrNotFound {
+		return fmt.Errorf("registry: delete agent %q: %w", name, err)
+	}
+
+	r.agentsMu.Lock()
+	delete(r.agents, name)
+	r.agentsMu.Unlock()
+
+	r.RemoveRoutes(name)
+	r.RecalculateDomains()
+	return nil
+}
+
+// List returns a filtered, cursor-paginated page of agent entries from the live
+// registry.
+func (r *Registry) List(filter storage.AgentFilter) (storage.Page[storage.AgentEntry], error) {
+	f := filter.Normalize()
+
+	offset := 0
+	if f.Cursor != "" {
+		decoded, err := storage.DecodeCursor(f.Cursor)
+		if err != nil {
+			return storage.Page[storage.AgentEntry]{}, err
+		}
+		offset = decoded
+	}
+
+	r.agentsMu.RLock()
+	matched := make([]storage.AgentEntry, 0, len(r.agents))
+	for _, entry := range r.agents {
+		if !f.Matches(entry) {
+			continue
+		}
+		matched = append(matched, cloneAgentEntry(entry))
+	}
+	r.agentsMu.RUnlock()
+
+	sort.Slice(matched, func(i, j int) bool { return matched[i].Name() < matched[j].Name() })
+
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(matched) {
+		offset = len(matched)
+	}
+	end := offset + f.Limit
+	if end > len(matched) {
+		end = len(matched)
+	}
+	page := storage.Page[storage.AgentEntry]{
+		Items:   matched[offset:end],
+		HasMore: end < len(matched),
+	}
+	if page.HasMore {
+		page.NextCursor = storage.EncodeCursor(end)
+	}
+	return page, nil
+}
+
+// ClaimNamespaces records exclusive ownership of exactly the given namespaces
+// for one agent. Re-claiming what the agent already owns is idempotent, and any
+// namespace the agent previously owned that is not in the list is released —
+// which is what "re-registers with fewer namespaces" means.
+//
+// On conflict nothing changes: the returned namespace and current owner name the
+// collision, and the caller answers 409 NAMESPACE_CONFLICT. A conflict is not an
+// error return — it is an outcome.
+func (r *Registry) ClaimNamespaces(agent string, namespaces []string) (string, string, error) {
+	if agent == "" {
+		return "", "", fmt.Errorf("registry: agent name is required")
+	}
+	if r.store == nil {
+		return "", "", fmt.Errorf("registry: no store configured")
+	}
+
+	desired := make(map[string]struct{}, len(namespaces))
+	ordered := make([]string, 0, len(namespaces))
+	for _, ns := range namespaces {
+		ns = strings.TrimSpace(ns)
+		if ns == "" {
+			continue
+		}
+		if _, dup := desired[ns]; dup {
+			continue
+		}
+		desired[ns] = struct{}{}
+		ordered = append(ordered, ns)
+	}
+
+	r.nsMu.Lock()
+	defer r.nsMu.Unlock()
+
+	for _, ns := range ordered {
+		if owner, ok := r.namespaces[ns]; ok && owner != agent {
+			return ns, owner, nil
+		}
+	}
+
+	dropped := make([]string, 0)
+	for ns, owner := range r.namespaces {
+		if owner != agent {
+			continue
+		}
+		if _, keep := desired[ns]; !keep {
+			dropped = append(dropped, ns)
+		}
+	}
+	sort.Strings(dropped)
+
+	claimed := make([]string, 0, len(ordered))
+	for _, ns := range ordered {
+		if r.namespaces[ns] == agent {
+			continue
+		}
+		if err := r.store.ClaimNamespace(ns, agent); err != nil {
+			for _, done := range claimed {
+				_ = r.store.ReleaseNamespace(done)
+			}
+			return "", "", fmt.Errorf("registry: claim namespace %q for %q: %w", ns, agent, err)
+		}
+		claimed = append(claimed, ns)
+	}
+
+	for _, ns := range dropped {
+		if err := r.store.ReleaseNamespace(ns); err != nil {
+			return "", "", fmt.Errorf("registry: release namespace %q: %w", ns, err)
+		}
+		delete(r.namespaces, ns)
+	}
+	for _, ns := range ordered {
+		r.namespaces[ns] = agent
+	}
+	return "", "", nil
+}
+
+// ReleaseNamespaces releases every namespace owned by an agent and returns the
+// namespaces that were released, sorted.
+func (r *Registry) ReleaseNamespaces(agent string) ([]string, error) {
+	if agent == "" {
+		return nil, fmt.Errorf("registry: agent name is required")
+	}
+	if r.store == nil {
+		return nil, fmt.Errorf("registry: no store configured")
+	}
+
+	r.nsMu.Lock()
+	defer r.nsMu.Unlock()
+
+	released, err := r.store.ReleaseAgentNamespaces(agent)
+	if err != nil {
+		return nil, fmt.Errorf("registry: release namespaces for %q: %w", agent, err)
+	}
+	for _, ns := range released {
+		delete(r.namespaces, ns)
+	}
+	for ns, owner := range r.namespaces {
+		if owner == agent {
+			delete(r.namespaces, ns)
+			released = append(released, ns)
+		}
+	}
+	sort.Strings(released)
+	return released, nil
+}
+
+// NamespaceOwner returns the agent that owns a namespace.
+func (r *Registry) NamespaceOwner(namespace string) (string, bool) {
+	r.nsMu.RLock()
+	owner, ok := r.namespaces[namespace]
+	r.nsMu.RUnlock()
+	return owner, ok
+}
+
+// Namespaces returns a copy of the namespace → owning agent map, as carried in
+// the ServiceDirectory.
+func (r *Registry) Namespaces() map[string]string {
+	r.nsMu.RLock()
+	out := make(map[string]string, len(r.namespaces))
+	for ns, owner := range r.namespaces {
+		out[ns] = owner
+	}
+	r.nsMu.RUnlock()
+	return out
+}
+
+// SetRoutes replaces every routing entry belonging to one agent with entries
+// built from its declared subscriptions. A subscription's group defaults to the
+// agent name and its scope defaults to "self".
+func (r *Registry) SetRoutes(agent, url string, subs []protocol.Subscription) {
+	if agent == "" {
+		return
+	}
+	built := routesFor(agent, url, subs)
+
+	r.routesMu.Lock()
+	defer r.routesMu.Unlock()
+
+	r.removeRoutesLocked(agent)
+	for _, b := range built {
+		r.routes[b.pattern] = append(r.routes[b.pattern], b.entry)
+	}
+	for _, b := range built {
+		sortRoutes(r.routes[b.pattern])
+	}
+}
+
+// RemoveRoutes drops every routing table entry for an agent.
+func (r *Registry) RemoveRoutes(agent string) {
+	if agent == "" {
+		return
+	}
+	r.routesMu.Lock()
+	r.removeRoutesLocked(agent)
+	r.routesMu.Unlock()
+}
+
+func (r *Registry) removeRoutesLocked(agent string) {
+	for pattern, entries := range r.routes {
+		kept := entries[:0:0]
+		for _, entry := range entries {
+			if entry.Agent == agent {
+				continue
+			}
+			kept = append(kept, entry)
+		}
+		if len(kept) == 0 {
+			delete(r.routes, pattern)
+			continue
+		}
+		r.routes[pattern] = kept
+	}
+}
+
+// RoutingTable returns a deep copy of the routing table: topic pattern → the
+// subscribers registered for it. It is distributed as part of the
+// ServiceDirectory so that publishers resolve subscribers locally.
+func (r *Registry) RoutingTable() map[string][]protocol.RouteEntry {
+	r.routesMu.RLock()
+	out := make(map[string][]protocol.RouteEntry, len(r.routes))
+	for pattern, entries := range r.routes {
+		copied := make([]protocol.RouteEntry, len(entries))
+		copy(copied, entries)
+		out[pattern] = copied
+	}
+	r.routesMu.RUnlock()
+	return out
+}
+
+// Subscribers resolves a concrete topic against the routing table's patterns and
+// returns every matching subscriber. Scope filtering and consumer-group
+// selection are applied by the publisher, not here — this answers only "who
+// subscribed to this topic".
+func (r *Registry) Subscribers(topic string) []protocol.RouteEntry {
+	if topic == "" {
+		return nil
+	}
+	r.routesMu.RLock()
+	var out []protocol.RouteEntry
+	for pattern, entries := range r.routes {
+		if !matchTopic(pattern, topic) {
+			continue
+		}
+		out = append(out, entries...)
+	}
+	r.routesMu.RUnlock()
+	sortRoutes(out)
+	return out
+}
+
+// RecalculateDomains rebuilds the domain dependency map from the current agent
+// registry and returns the result. Every registration and deregistration calls
+// it, because a domain becomes ready or degraded through the arrival or
+// departure of an agent it never spoke to.
+func (r *Registry) RecalculateDomains() []DomainDependency {
+	r.agentsMu.RLock()
+	present := make(map[string]struct{}, len(r.agents))
+	domains := make([]storage.AgentEntry, 0)
+	for name, entry := range r.agents {
+		present[name] = struct{}{}
+		if entry.Type() == protocol.TypeDomain {
+			domains = append(domains, entry)
+		}
+	}
+	r.agentsMu.RUnlock()
+
+	computed := make(map[string]DomainDependency, len(domains))
+	for _, entry := range domains {
+		name := entry.Name()
+		required := append([]string(nil), entry.Manifest.RequiredAgents...)
+		sort.Strings(required)
+
+		var missing []string
+		for _, want := range required {
+			if want == "" || want == name {
+				continue
+			}
+			if _, ok := present[want]; !ok {
+				missing = append(missing, want)
+			}
+		}
+		dep := DomainDependency{
+			Domain:         name,
+			RequiredAgents: required,
+			Missing:        missing,
+			Status:         DomainStatusReady,
+		}
+		if len(missing) > 0 {
+			dep.Status = DomainStatusDegraded
+		}
+		computed[name] = dep
+	}
+
+	r.domainsMu.Lock()
+	r.domains = computed
+	r.domainsMu.Unlock()
+
+	return r.DomainStatuses()
+}
+
+// DomainStatus returns the dependency status of one domain controller.
+func (r *Registry) DomainStatus(name string) (DomainDependency, bool) {
+	r.domainsMu.RLock()
+	dep, ok := r.domains[name]
+	r.domainsMu.RUnlock()
+	if !ok {
+		return DomainDependency{}, false
+	}
+	return cloneDomainDependency(dep), true
+}
+
+// DomainStatuses returns every domain's dependency status, sorted by domain name.
+func (r *Registry) DomainStatuses() []DomainDependency {
+	r.domainsMu.RLock()
+	out := make([]DomainDependency, 0, len(r.domains))
+	for _, dep := range r.domains {
+		out = append(out, cloneDomainDependency(dep))
+	}
+	r.domainsMu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Domain < out[j].Domain })
+	return out
+}
+
+// Counts summarises the live state for the health and overview endpoints.
+func (r *Registry) Counts() RegistryCounts {
+	counts := RegistryCounts{ByStatus: make(map[string]int)}
+
+	r.agentsMu.RLock()
+	counts.Agents = len(r.agents)
+	for _, entry := range r.agents {
+		switch entry.Type() {
+		case protocol.TypeDomain:
+			counts.Domains++
+		case protocol.TypeInfrastructure:
+			counts.Infrastructure++
+		}
+		status := entry.Status
+		if status == "" {
+			status = protocol.StatusOffline
+		}
+		counts.ByStatus[status]++
+		counts.Subscriptions += len(entry.Manifest.Subscriptions)
+	}
+	r.agentsMu.RUnlock()
+
+	r.nsMu.RLock()
+	counts.Namespaces = len(r.namespaces)
+	r.nsMu.RUnlock()
+
+	r.routesMu.RLock()
+	for _, entries := range r.routes {
+		counts.Routes += len(entries)
+	}
+	r.routesMu.RUnlock()
+
+	r.domainsMu.RLock()
+	for _, dep := range r.domains {
+		if dep.Status == DomainStatusReady {
+			counts.DomainsReady++
+			continue
+		}
+		counts.DomainsDegraded++
+	}
+	r.domainsMu.RUnlock()
+
+	return counts
+}
+
+// ServiceEntries returns the registered agents as ServiceDirectory entries,
+// sorted by name.
+func (r *Registry) ServiceEntries() []protocol.ServiceEntry {
+	r.agentsMu.RLock()
+	out := make([]protocol.ServiceEntry, 0, len(r.agents))
+	for _, entry := range r.agents {
+		out = append(out, entry.ServiceEntry())
+	}
+	r.agentsMu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// TopNamespace returns the top-level segment of a topic, namespace pattern or
+// publish declaration — "workflow" for all of "workflow", "workflow.*" and
+// "workflow.phase.ready".
+func TopNamespace(topic string) string {
+	if i := strings.IndexByte(topic, '.'); i >= 0 {
+		return topic[:i]
+	}
+	return topic
+}
+
+// IsReservedNamespace reports whether a declared namespace falls under the
+// orchestrator's reserved "system" namespace. Registration refuses such a claim
+// from an agent with 403 NAMESPACE_RESERVED; the orchestrator's own startup
+// claim goes through unaffected, because this is a predicate and not a gate.
+func IsReservedNamespace(namespace string) bool {
+	return TopNamespace(strings.TrimSpace(namespace)) == ReservedNamespace
+}
+
+// builtRoute pairs a subscription pattern with the routing entry it produces.
+type builtRoute struct {
+	pattern string
+	entry   protocol.RouteEntry
+}
+
+func routesFor(agent, url string, subs []protocol.Subscription) []builtRoute {
+	if agent == "" {
+		return nil
+	}
+	eventURL := ""
+	if url != "" {
+		eventURL = protocol.JoinPath(url, protocol.PathAgentEvent)
+	}
+	out := make([]builtRoute, 0, len(subs))
+	for _, sub := range subs {
+		pattern := strings.TrimSpace(sub.Pattern)
+		if pattern == "" {
+			continue
+		}
+		out = append(out, builtRoute{
+			pattern: pattern,
+			entry: protocol.RouteEntry{
+				Agent: agent,
+				URL:   eventURL,
+				Group: sub.GroupOrDefault(agent),
+				Scope: sub.ScopeOrDefault(),
+			},
+		})
+	}
+	return out
+}
+
+func sortRoutes(entries []protocol.RouteEntry) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].Agent != entries[j].Agent {
+			return entries[i].Agent < entries[j].Agent
+		}
+		if entries[i].Group != entries[j].Group {
+			return entries[i].Group < entries[j].Group
+		}
+		return entries[i].Scope < entries[j].Scope
+	})
+}
+
+// matchTopic applies the subscription pattern grammar: segments are delimited by
+// ".", "*" matches exactly one segment, and "#" matches any number of remaining
+// segments. Wildcards are whole segments only.
+func matchTopic(pattern, topic string) bool {
+	if pattern == "" || topic == "" {
+		return false
+	}
+	if pattern == topic {
+		return true
+	}
+	return matchSegments(strings.Split(pattern, "."), strings.Split(topic, "."))
+}
+
+func matchSegments(pattern, topic []string) bool {
+	for i, seg := range pattern {
+		if seg == "#" {
+			return true
+		}
+		if i >= len(topic) {
+			return false
+		}
+		if seg == "*" {
+			continue
+		}
+		if seg != topic[i] {
+			return false
+		}
+	}
+	return len(pattern) == len(topic)
+}
+
+func cloneAgentEntry(entry storage.AgentEntry) storage.AgentEntry {
+	out := entry
+	out.Namespaces = cloneStrings(entry.Namespaces)
+	out.Manifest = cloneManifest(entry.Manifest)
+	return out
+}
+
+func cloneManifest(m protocol.AgentManifest) protocol.AgentManifest {
+	out := m
+	out.Collaborators = cloneStrings(m.Collaborators)
+	out.RequiredAgents = cloneStrings(m.RequiredAgents)
+	out.Workflows = cloneStrings(m.Workflows)
+	out.Publishes = cloneStrings(m.Publishes)
+
+	if m.Capabilities != nil {
+		caps := make([]protocol.Capability, len(m.Capabilities))
+		for i, c := range m.Capabilities {
+			c.Resources = cloneStrings(c.Resources)
+			caps[i] = c
+		}
+		out.Capabilities = caps
+	}
+	if m.Inputs != nil {
+		inputs := make([]protocol.IOSpec, len(m.Inputs))
+		copy(inputs, m.Inputs)
+		out.Inputs = inputs
+	}
+	if m.Outputs != nil {
+		outputs := make([]protocol.IOSpec, len(m.Outputs))
+		copy(outputs, m.Outputs)
+		out.Outputs = outputs
+	}
+	if m.Subscriptions != nil {
+		subs := make([]protocol.Subscription, len(m.Subscriptions))
+		copy(subs, m.Subscriptions)
+		out.Subscriptions = subs
+	}
+	return out
+}
+
+func cloneDomainDependency(dep DomainDependency) DomainDependency {
+	out := dep
+	out.RequiredAgents = cloneStrings(dep.RequiredAgents)
+	out.Missing = cloneStrings(dep.Missing)
+	return out
+}
+
+func cloneStrings(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}

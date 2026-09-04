@@ -115,3 +115,41 @@ func TestACacheThatCannotOpenDisablesItself(t *testing.T) {
 		t.Error("a disabled cache returned content")
 	}
 }
+
+// Every requirement that shapes a plan must be in the plan's key.
+//
+// Declared operations shape it more than anything else — they are the symbols
+// every generated file is written against. A cached plan served after a
+// blueprint renamed one would generate against a contract nobody holds.
+func TestRenamingADeclaredNameReDerivesThePlan(t *testing.T) {
+	base := &Requirements{
+		Types:     []string{"Agent"},
+		Endpoints: []string{"POST /v1/register"},
+		EndpointOps: []EndpointOperation{
+			{Method: "POST", Path: "/v1/register", Operation: "Register"},
+		},
+		Operations: []string{"GetAgent", "PutAgent"},
+	}
+	key := func(r *Requirements) string { return planKey(r, "orchestrator", "go", "plat", "sys") }
+	original := key(base)
+
+	renamedOp := *base
+	renamedOp.Operations = []string{"Get", "PutAgent"}
+	if key(&renamedOp) == original {
+		t.Error("renaming a store operation did not re-derive the plan")
+	}
+
+	renamedEndpoint := *base
+	renamedEndpoint.EndpointOps = []EndpointOperation{
+		{Method: "POST", Path: "/v1/register", Operation: "AgentRegister"},
+	}
+	if key(&renamedEndpoint) == original {
+		t.Error("renaming an endpoint operation did not re-derive the plan")
+	}
+
+	// And an unchanged specification must still hit, or nothing is incremental.
+	same := *base
+	if key(&same) != original {
+		t.Error("identical requirements produced a different key")
+	}
+}

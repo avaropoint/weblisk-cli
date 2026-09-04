@@ -391,3 +391,93 @@ func TestAccumulatedDeclarationsStayInTheVariableTail(t *testing.T) {
 		t.Error("accumulated declarations were dropped")
 	}
 }
+
+// The exact sequence that discarded a clean 31-file build.
+//
+// The plan assigned EncodePublicKey to sign.go. keys.go was generated first and
+// declared it anyway; nothing objected. sign.go was then generated correctly
+// WITHOUT it and was REJECTED, because its plan entry says it must define
+// EncodePublicKey. The retry complied, both files declared it, and the
+// coherence check failed after all 31 files were written.
+//
+// The per-file guard produced the collision the final check could not see until
+// half an hour later.
+func TestAFileIsRejectedForDeclaringAnotherFilesSymbol(t *testing.T) {
+	plan := &Plan{Target: "orchestrator", Root: ".", Files: []PlannedFile{
+		{Path: "internal/identity/keys.go", Declares: []string{"GenerateKeyPair"}},
+		{Path: "internal/identity/sign.go", Declares: []string{"EncodePublicKey", "Sign"}},
+	}}
+	owner := claimedSymbols(plan, map[string][]Declaration{})
+
+	// keys.go reaching for a symbol the plan gave to sign.go.
+	overreaching := `package identity
+
+func GenerateKeyPair() error { return nil }
+
+func EncodePublicKey(b []byte) string { return "" }
+`
+	v := redeclaresElsewhere(overreaching, plan.Files[0], owner)
+	if v == "" {
+		t.Fatal("keys.go declared sign.go's symbol and was accepted")
+	}
+	if !strings.Contains(v, "sign.go") {
+		t.Errorf("the complaint does not name the owning file: %s", v)
+	}
+
+	// The same file staying inside its contract is accepted.
+	correct := `package identity
+
+func GenerateKeyPair() error { return nil }
+`
+	if v := redeclaresElsewhere(correct, plan.Files[0], owner); v != "" {
+		t.Errorf("a compliant file was rejected: %s", v)
+	}
+
+	// And sign.go declaring its OWN planned symbol is fine — the check must not
+	// reject the file the plan assigned it to.
+	signFile := `package identity
+
+func EncodePublicKey(b []byte) string { return "" }
+
+func Sign(b []byte) []byte { return nil }
+`
+	if v := redeclaresElsewhere(signFile, plan.Files[1], owner); v != "" {
+		t.Errorf("the owning file was rejected for declaring its own symbol: %s", v)
+	}
+}
+
+// Two methods with the same name on different types are not a collision, and
+// rejecting them would refuse correct Go.
+func TestSameMethodNameOnDifferentTypesIsNotACollision(t *testing.T) {
+	plan := &Plan{Target: "orchestrator", Root: ".", Files: []PlannedFile{
+		{Path: "internal/orchestrator/a.go", Declares: []string{"Alpha", "(*Alpha).String"}},
+		{Path: "internal/orchestrator/b.go", Declares: []string{"Beta", "(*Beta).String"}},
+	}}
+	owner := claimedSymbols(plan, map[string][]Declaration{})
+	body := `package orchestrator
+
+type Beta struct{}
+
+func (b *Beta) String() string { return "" }
+`
+	if v := redeclaresElsewhere(body, plan.Files[1], owner); v != "" {
+		t.Fatalf("String on a second type was called a collision: %s", v)
+	}
+}
+
+// A symbol nobody planned still cannot be declared twice — Go forbids it.
+func TestAnUnplannedHelperIsOwnedByWhoeverWroteItFirst(t *testing.T) {
+	plan := &Plan{Target: "orchestrator", Root: ".", Files: []PlannedFile{
+		{Path: "internal/orchestrator/a.go"},
+		{Path: "internal/orchestrator/b.go"},
+	}}
+	written := map[string][]Declaration{
+		"internal/orchestrator/a.go": ExtractDeclarations("internal/orchestrator/a.go",
+			"package orchestrator\n\nfunc helper() {}\n"),
+	}
+	owner := claimedSymbols(plan, written)
+	body := "package orchestrator\n\nfunc helper() {}\n"
+	if v := redeclaresElsewhere(body, plan.Files[1], owner); v == "" {
+		t.Fatal("an unplanned helper was declared in two files and accepted")
+	}
+}

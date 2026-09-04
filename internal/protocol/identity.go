@@ -150,8 +150,8 @@ type tokenHeader struct {
 
 // TokenClaims are the payload of an auth token.
 type TokenClaims struct {
-	Subject      string   `json:"sub"`       // agent name
-	Issuer       string   `json:"iss"`       // "orchestrator" or agent name
+	Subject      string   `json:"sub"` // agent name
+	Issuer       string   `json:"iss"` // "orchestrator" or agent name
 	IssuedAt     int64    `json:"iat"`
 	ExpiresAt    int64    `json:"exp"`
 	Capabilities []string `json:"cap,omitempty"` // granted capabilities

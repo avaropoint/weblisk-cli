@@ -54,19 +54,44 @@ func TestProtectedPathsComeFromTheAuthColumn(t *testing.T) {
 	}
 }
 
+// Buildable is DERIVED — a component states an HTTP surface and a binding
+// contract, or it is not one. Asserted as the rule rather than as a roster.
+//
+// It was a roster: {orchestrator, content}. Then architecture/agent gained the
+// Endpoints table it had always been required to have, the agent became
+// buildable, and the test failed against a corpus that had improved. A list of
+// expected answers has to be edited every time the corpus is right, which is
+// how a guard gets relaxed to make it pass.
 func TestBuildableComponentsComeFromTheCorpus(t *testing.T) {
 	bps := readBlueprints(t, []string{"architecture", "protocol"})
-	got := BuildableComponents(bps)
-	want := map[string]bool{"orchestrator": true, "content": true}
-	for _, g := range got {
-		if !want[g] {
-			t.Errorf("%q was read as buildable; it states no HTTP surface or no bindings", g)
+	got := map[string]bool{}
+	for _, g := range BuildableComponents(bps) {
+		got[g] = true
+	}
+	if len(got) == 0 {
+		t.Fatal("no component was read as buildable; the derivation is not running")
+	}
+
+	for path, body := range bps {
+		if !strings.HasPrefix(path, "architecture/") || strings.HasSuffix(path, "README.md") {
+			continue
 		}
-		delete(want, g)
+		name := strings.TrimSuffix(strings.TrimPrefix(path, "architecture/"), ".md")
+		qualifies := strings.Contains(body, "\n## Endpoints") && len(ExtractBindings(body)) > 0
+		if qualifies && !got[name] {
+			t.Errorf("%q states an Endpoints table and bindings and was not read as buildable", name)
+		}
+		if !qualifies && got[name] {
+			t.Errorf("%q was read as buildable; it states no HTTP surface or no bindings", name)
+		}
 	}
-	for missing := range want {
-		t.Errorf("%q states an Endpoints table and bindings and was not read as buildable", missing)
+
+	// The orchestrator must always qualify — if it does not, the derivation is
+	// broken rather than the corpus.
+	if !got["orchestrator"] {
+		t.Error("the orchestrator is not buildable; the derivation is wrong")
 	}
+	t.Logf("buildable: %v", BuildableComponents(bps))
 }
 
 // The Go list must not drift from the declaration it mirrors.

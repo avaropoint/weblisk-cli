@@ -35,49 +35,86 @@ import (
 // Three, with growing delays: an overload that has not cleared in half a minute
 // is not the momentary spike this exists for, and a run that stalls silently is
 // worse than one that fails with the provider's own words.
-const transientAttempts = 3
+// transientAttempts and the backoff below are sized for an UNATTENDED BUILD,
+// not for an interactive command.
+//
+// They were three attempts with 2s and 8s of backoff — a total window of ten
+// seconds. A tenant build takes forty minutes, and a provider outage of half a
+// minute therefore threw away everything done so far: one run died at the
+// reachability check on "529 Overloaded. This is a server-side issue, usually
+// temporary — try again in a moment", having correctly identified the error as
+// temporary and then given up before the moment passed.
+//
+// A run that has already spent thirty minutes should obviously wait five for a
+// provider to come back. The window is now ~5.7 minutes across seven attempts,
+// which survives an ordinary outage and still fails in bounded time.
+//
+// This does NOT make a session limit slow to report: isTransient checks the
+// permanent conditions FIRST, so a quota error still returns immediately.
+const transientAttempts = 7
 
 // transientBackoff is the wait before attempt n (1-indexed).
+//
+// Doubling, capped. Uncapped doubling reaches half an hour by attempt ten,
+// which stops being patience and becomes a hang.
 func transientBackoff(attempt int) time.Duration {
-	switch attempt {
-	case 1:
-		return 2 * time.Second
-	case 2:
-		return 8 * time.Second
-	default:
-		return 20 * time.Second
+	waits := []time.Duration{
+		2 * time.Second,
+		8 * time.Second,
+		20 * time.Second,
+		45 * time.Second,
+		90 * time.Second,
+		180 * time.Second,
 	}
+	if attempt >= 1 && attempt <= len(waits) {
+		return waits[attempt-1]
+	}
+	return 180 * time.Second
+}
+
+// TransientWindow is the total time retries may span, for reporting.
+func TransientWindow() time.Duration {
+	var total time.Duration
+	for i := 1; i < transientAttempts; i++ {
+		total += transientBackoff(i)
+	}
+	return total
 }
 
 // isTransient reports whether a provider error is worth trying again.
+//
+// Structure first. A provider that told us its HTTP status has already answered
+// this question, and reading its status is not the same kind of act as reading
+// its prose. Only when nothing structural is available does this fall back to
+// matching words — and then against the human message alone.
+//
+// The order matters and is the whole fix: this used to match the permanent
+// words against the error's full text, and every Claude Code envelope contains
+// "permission_denials", so every transient failure was classified permanent and
+// nothing was ever retried. See fault.go.
 func isTransient(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-
-	// A session or quota limit is not transient on any useful timescale, and it
-	// arrives as a 429 — so this is checked FIRST, before the retryable codes.
-	for _, permanent := range []string{
-		"session limit", "quota", "insufficient_quota", "credit balance",
-		"authentication", "invalid api key", "permission",
-	} {
-		if strings.Contains(s, permanent) {
+	if f := FaultOf(err); f != nil {
+		switch f.Class() {
+		case FaultTransient:
+			return true
+		case FaultPermanent:
 			return false
 		}
+		// The provider gave us a fault but not enough of one. Its message is
+		// still better evidence than the envelope around it.
+		return transientMessage(f.Message) && !permanentMessage(f.Message)
 	}
-
-	for _, retryable := range []string{
-		"529", "overloaded", "rate limit", "429",
-		"502", "503", "504", "bad gateway", "service unavailable",
-		"connection reset", "connection refused", "eof",
-		"timeout", "temporarily", "try again",
-	} {
-		if strings.Contains(s, retryable) {
-			return true
-		}
+	// A provider that reports failures as bare sentences — or a Go error from
+	// the transport. permanentMessage is asked first: a session limit arrives
+	// as a 429 and 429 is otherwise the most retryable thing there is.
+	s := err.Error()
+	if permanentMessage(s) {
+		return false
 	}
-	return false
+	return transientMessage(s)
 }
 
 // withTransientRetry calls a provider, retrying failures that say they are
@@ -166,4 +203,23 @@ func withTransientRetryNoSleep(call func() (string, error)) (string, error) {
 		}
 	}
 	return out, err
+}
+
+// Unwrap returns the provider beneath the retry, so a caller that needs to know
+// WHICH provider was selected can ask without the wrapper hiding it.
+//
+// Named Unwrap so errors.As-style introspection and type assertions have one
+// obvious way through, rather than each caller reaching for newRawProvider and
+// re-deciding the selection.
+func (r *retryingProvider) Unwrap() Provider { return r.inner }
+
+// Underlying returns the provider beneath any number of decorators.
+func Underlying(p Provider) Provider {
+	for {
+		u, ok := p.(interface{ Unwrap() Provider })
+		if !ok {
+			return p
+		}
+		p = u.Unwrap()
+	}
 }

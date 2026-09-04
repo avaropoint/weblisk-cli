@@ -35,6 +35,24 @@ type TenantState struct {
 	Module   string            // module path from go.mod, "" if none
 	Owned    map[string]string // path → the component whose manifest claims it
 	Packages []TenantPackage   // existing packages and what they export
+	// SelfNames are the symbols the component being built declared last time.
+	//
+	// Kept apart from Packages on purpose. Packages is "code somebody else
+	// owns — import it, do not re-declare it". These are this component's own
+	// previous output, which this run may freely replace; they are shown as a
+	// NAMING baseline, so a plan that is re-derived does not rename symbols
+	// nothing asked it to rename.
+	//
+	// Two builds of the same blueprints produced Get/Put/List and then
+	// GetAgent/PutAgent/ListAgents. No file was wrong and every file was
+	// stale: ten compliant files were regenerated because the plan had been
+	// made again. Excluding self was right — being shown its own output as
+	// untouchable stopped a component changing anything — but excluding the
+	// NAMES with it left the model nothing to be consistent with.
+	//
+	// Never part of Shape(): that is a cache key, and keying it on generated
+	// symbol names is the feedback loop this whole area exists to remove.
+	SelfNames []string
 }
 
 // TenantPackage is one existing package and the surface another component may
@@ -83,7 +101,7 @@ func ReadTenantState(root, selfTarget string) *TenantState {
 		}
 	}
 
-	st.Packages = readTenantPackages(root, st.Owned, selfOwned(root, selfTarget), selfTarget)
+	st.Packages, st.SelfNames = readTenantPackages(root, st.Owned, selfOwned(root, selfTarget), selfTarget)
 	return st
 }
 
@@ -117,8 +135,9 @@ func isSelfDir(dir, selfTarget string) bool {
 }
 
 // readTenantPackages lists the Go packages present and what each exports.
-func readTenantPackages(root string, owned map[string]string, mine map[string]bool, selfTarget string) []TenantPackage {
+func readTenantPackages(root string, owned map[string]string, mine map[string]bool, selfTarget string) ([]TenantPackage, []string) {
 	byDir := map[string]*TenantPackage{}
+	var selfNames []string
 	fset := token.NewFileSet()
 
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -146,7 +165,10 @@ func readTenantPackages(root string, owned map[string]string, mine map[string]bo
 		}
 		dir := filepath.ToSlash(filepath.Dir(rel))
 		if mine[filepath.Clean(rel)] || isSelfDir(dir, selfTarget) {
-			return nil // this component's own output, which this run replaces
+			// This component's own output, which this run replaces. Not a
+			// package to import — but its names are worth keeping.
+			selfNames = append(selfNames, exportedDecls(f)...)
+			return nil
 		}
 		p := byDir[dir]
 		if p == nil {
@@ -167,7 +189,8 @@ func readTenantPackages(root string, owned map[string]string, mine map[string]bo
 		out = append(out, *p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Dir < out[j].Dir })
-	return out
+	sort.Strings(selfNames)
+	return out, dedupeStrings(selfNames)
 }
 
 // exportedDecls returns the exported top-level names a file declares.
@@ -257,6 +280,20 @@ func (st *TenantState) FormatTenantState(target string) string {
 	fmt.Fprintf(&b, "Your component's own directories are internal/%s/ and cmd/%s/.\n", target, target)
 	fmt.Fprintf(&b, "Its entry point is cmd/%s/main.go. Another component's cmd/ directory is\n", target)
 	b.WriteString("never yours to write — replacing it replaces a component that is running.\n\n")
+	if len(st.SelfNames) > 0 {
+		// Framed as a naming baseline, NOT as code to leave alone. The
+		// distinction is the whole point: this component's previous output is
+		// what this run replaces, and being told it is untouchable stops a
+		// regeneration changing anything. Being told nothing about it makes a
+		// re-derived plan rename things at random, which is what actually
+		// happened — Get/Put/List became GetAgent/PutAgent/ListAgents and ten
+		// correct files were rebuilt because of it.
+		b.WriteString("Names YOUR component declared last time. This code is yours and this run\n")
+		b.WriteString("replaces it — you may restructure it freely. But KEEP a name where the\n")
+		b.WriteString("requirement behind it has not changed. Renaming something nothing asked\n")
+		b.WriteString("you to rename makes every file that used it stale:\n\n")
+		fmt.Fprintf(&b, "      %s\n\n", wrapList(st.SelfNames, 72, "      "))
+	}
 	if len(st.Owned) > 0 {
 		b.WriteString("Files owned by another component. A plan naming any of these is rejected:\n")
 		var paths []string
@@ -301,15 +338,49 @@ func wrapList(items []string, width int, indent string) string {
 // every component in the tenant re-plans whenever any other one is regenerated.
 //
 // Exports still reach the FILE prompts, where the symbol names actually matter.
+//
+// # Why the export COUNT is not here either
+//
+// It was, and it made the plan cache miss on every run after the first. The
+// count changes whenever a generated file gains a helper, so:
+//
+//	build → files written → export counts change → shape changes →
+//	plan cache misses → the model re-plans → it invents different names
+//	(Get/Put/List became GetAgent/PutAgent/ListAgents) → every file that
+//	declared the old names is non-compliant → regenerate → counts change again
+//
+// A self-sustaining churn loop, and the reason a rebuild that should have cost
+// nothing cost twenty files. One orchestrator run regenerated ten files whose
+// only fault was that the plan had been re-derived since they were written.
+//
+// The count is not structure. A package gaining an export is the same package.
+//
+// # Nor is the module path, for the same reason
+//
+// It was here, and it had exactly the property the export count had: THE BUILD
+// CREATES go.mod. So the first run saw no module, the second saw one, the key
+// changed, and the plan was re-derived on the second run of every tenant that
+// had ever been built — measured directly, "" then "tenant-v7".
+//
+// Removing the export count and leaving this was half a fix. The test to apply
+// to any candidate key input is not "is it structural?" but "can a build
+// produce it?" — and if it can, it is a feedback loop whatever else it is.
+//
+// The module path is not a plan input in any case. A plan decides which files
+// exist, what each declares, what each serves and in what order. The module
+// path decides IMPORT STATEMENTS, which is file content — and cacheKey hashes
+// the whole rendered file prompt, so a module rename already invalidates every
+// file precisely, without touching the plan that was correct before it.
+//
+// What remains is genuinely structural: the package directories, their names,
+// and who owns them. Those change only when something has really moved.
 func (st *TenantState) Shape() string {
 	if st == nil {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(st.Module)
-	b.WriteString("\n")
 	for _, p := range st.Packages {
-		fmt.Fprintf(&b, "%s %s %s %d\n", p.Dir, p.Name, p.Owner, len(p.Exports))
+		fmt.Fprintf(&b, "%s %s %s\n", p.Dir, p.Name, p.Owner)
 	}
 	owned := make([]string, 0, len(st.Owned))
 	for k, v := range st.Owned {

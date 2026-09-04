@@ -56,18 +56,28 @@ func ProtectedEndpointsFor(component string, blueprints map[string]string) []Pro
 	}
 	seen := map[string]bool{}
 	var out []ProtectedEndpoint
-	for _, m := range reEndpointRow.FindAllStringSubmatch(body, -1) {
-		method, path := m[1], m[2]
-		auth := strings.ToLower(strings.TrimSpace(m[3]))
-		if !strings.HasPrefix(auth, "yes") {
-			continue
+	// By column NAME. This read the third cell, and adding the Operation column
+	// that schemas/architecture requires made the third cell the operation —
+	// so every protected endpoint in the corpus read as unprotected and the
+	// prober expected no token where the blueprint requires one. A table
+	// gaining a column is an ordinary edit; nothing may depend on cell order.
+	for _, t := range TablesWithColumns(body, "method", "path", "auth") {
+		for _, row := range t.Rows {
+			method := strings.ToUpper(strings.TrimSpace(row["method"]))
+			path := strings.Trim(strings.TrimSpace(row["path"]), "`")
+			if !isHTTPMethod(method) || !strings.HasPrefix(path, "/") {
+				continue
+			}
+			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(row["auth"])), "yes") {
+				continue
+			}
+			key := method + " " + path
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, ProtectedEndpoint{Method: method, Path: path})
 		}
-		key := method + " " + path
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, ProtectedEndpoint{Method: method, Path: path})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Path != out[j].Path {
@@ -178,4 +188,13 @@ func LoadArchitectureCorpus(root string) map[string]string {
 		}
 	}
 	return out
+}
+
+// isHTTPMethod recognises the methods a blueprint's endpoint table may name.
+func isHTTPMethod(s string) bool {
+	switch s {
+	case "GET", "POST", "PUT", "PATCH", "DELETE":
+		return true
+	}
+	return false
 }

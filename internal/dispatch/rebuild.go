@@ -32,6 +32,17 @@ const (
 	RebuildAbsent RebuildVerdict = "absent"
 	// RebuildEdited — the file differs from what generation wrote. REFUSED.
 	RebuildEdited RebuildVerdict = "edited"
+	// RebuildUnowned — the file is present and generation cannot show it wrote
+	// it. REFUSED, for the same reason and by a different fact.
+	//
+	// Reported apart from RebuildEdited because the operator's remedy differs.
+	// "You changed this" sends somebody looking for an edit; "I have no record
+	// of writing this" is what is actually true after a manifest is lost or a
+	// run is interrupted before recording, and the answer is to delete the file
+	// if it was a previous run's output or leave it out of the plan if it is
+	// hand-written. One heading for both sent a reader hunting for a change
+	// nobody had made.
+	RebuildUnowned RebuildVerdict = "unowned"
 	// RebuildNonCompliant — the file no longer meets its plan entry.
 	RebuildNonCompliant RebuildVerdict = "non-compliant"
 	// RebuildReached — a blueprint changed and the change reaches this file.
@@ -118,7 +129,7 @@ func decideOne(root string, plan *Plan, f PlannedFile, rec FileRecord,
 	// edited rather than absent — the file exists and generation cannot show it
 	// authored it, so overwriting it would destroy work of unknown origin.
 	if rec.Digest == "" {
-		d.RebuildVerdict = RebuildEdited
+		d.RebuildVerdict = RebuildUnowned
 		if legacy {
 			d.Detail = "the previous run recorded no per-file provenance, so an edit cannot be ruled out"
 		} else {
@@ -159,13 +170,24 @@ func decideOne(root string, plan *Plan, f PlannedFile, rec FileRecord,
 // unmetObligations reports the first obligation the file no longer meets.
 func unmetObligations(body string, f PlannedFile) string {
 	if len(f.Declares) > 0 {
-		have := map[string]bool{}
-		for _, d := range ExtractDeclarations(f.Path, body) {
-			have[d.Name] = true
-		}
+		// missingFrom, NOT a second comparison written here.
+		//
+		// This used to index declarations by bare Name and look up the plan's
+		// spelling directly, so a plan entry written in method notation —
+		// "(*Registry).Load" — never matched the declaration the extractor
+		// reports as Name "Load", Receiver "Registry". Every method in every
+		// plan therefore read as missing, and the file that declared all of
+		// them was regenerated as non-compliant.
+		//
+		// Measured on one orchestrator build: 9 of registry.go's 22 reported
+		// gaps were present in the file, and the same fault fired on eight
+		// other files. The comparison already existed and was correct — it
+		// resolves the receiver and matches against the signature. Two
+		// implementations of one question is how the wrong one survives.
+		declared := ExtractDeclarations(f.Path, body)
 		var missing []string
 		for _, want := range f.Declares {
-			if !have[want] {
+			if missingFrom(declared, []string{want}) != "" {
 				missing = append(missing, want)
 			}
 		}
@@ -214,7 +236,19 @@ func digestString(s string) string {
 }
 
 // BuildFileRecords produces the records to persist for a completed run.
-func BuildFileRecords(plan *Plan, files []GeneratedFile, blueprints map[string]string) map[string]FileRecord {
+//
+// The digest is read back FROM DISK, not computed from the content in memory.
+//
+// writeGeneratedFiles stores `f.Content + "\n"`, so a digest of f.Content is
+// wrong by one byte for every file ever written — and the rebuild table then
+// reported the entire target as "edited since generation wrote it" on every
+// rebuild, refusing to touch a tenant it had produced itself.
+//
+// This is the implementation note in architecture/content, applied here:
+// "compute the digest from what was written, not what was submitted. Reading
+// back after a write costs one read and is the only way the recorded identity
+// is the identity of the bytes on the backend."
+func BuildFileRecords(dir string, plan *Plan, files []GeneratedFile, blueprints map[string]string) map[string]FileRecord {
 	byPath := map[string]PlannedFile{}
 	for _, pf := range plan.Files {
 		byPath[pf.Path] = pf
@@ -226,9 +260,13 @@ func BuildFileRecords(plan *Plan, files []GeneratedFile, blueprints map[string]s
 	out := map[string]FileRecord{}
 	for _, f := range files {
 		pf := byPath[f.Path]
+		digest := digestString(f.Content)
+		if body, err := os.ReadFile(filepath.Join(dir, f.Path)); err == nil {
+			digest = digestString(string(body))
+		}
 		out[f.Path] = FileRecord{
 			Path:       f.Path,
-			Digest:     digestString(f.Content),
+			Digest:     digest,
 			Declares:   pf.Declares,
 			Serves:     pf.Serves,
 			Purpose:    pf.Purpose,
@@ -245,9 +283,10 @@ func ReportDecisions(ds []Decision) string {
 		byVerdict[d.RebuildVerdict] = append(byVerdict[d.RebuildVerdict], d)
 	}
 	var b strings.Builder
-	order := []RebuildVerdict{RebuildEdited, RebuildNonCompliant, RebuildReached, RebuildAbsent, RebuildUnreached, RebuildUnchanged}
+	order := []RebuildVerdict{RebuildEdited, RebuildUnowned, RebuildNonCompliant, RebuildReached, RebuildAbsent, RebuildUnreached, RebuildUnchanged}
 	labels := map[RebuildVerdict]string{
 		RebuildEdited:       "edited since generation wrote them — REFUSED, nothing written",
+		RebuildUnowned:      "present with no record of generation writing them — REFUSED, nothing written",
 		RebuildNonCompliant: "no longer meet their plan entry — regenerating",
 		RebuildReached:      "reached by a blueprint change — regenerating",
 		RebuildAbsent:       "absent — generating",
@@ -260,7 +299,7 @@ func ReportDecisions(ds []Decision) string {
 			continue
 		}
 		fmt.Fprintf(&b, "  %d %s\n", len(group), labels[v])
-		if v == RebuildEdited || v == RebuildNonCompliant {
+		if v == RebuildEdited || v == RebuildUnowned || v == RebuildNonCompliant {
 			for _, d := range group {
 				fmt.Fprintf(&b, "    %s — %s\n", d.Path, d.Detail)
 			}

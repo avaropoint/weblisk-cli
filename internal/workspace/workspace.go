@@ -17,17 +17,17 @@ type Workspace struct {
 
 // FileChange describes a proposed file modification.
 type FileChange struct {
-	Path    string       // relative to workspace root
-	Action  string       // "create", "modify", "delete"
-	Content string       // new content (create/modify)
+	Path    string         // relative to workspace root
+	Action  string         // "create", "modify", "delete"
+	Content string         // new content (create/modify)
 	Mods    []Modification // line-level edits (modify only)
 }
 
 // Modification is a single edit within a file.
 type Modification struct {
-	Line    int    // 1-based line number
-	Old     string // expected existing content
-	New     string // replacement content
+	Line int    // 1-based line number
+	Old  string // expected existing content
+	New  string // replacement content
 }
 
 // NewWorkspace creates a workspace rooted at the given directory.

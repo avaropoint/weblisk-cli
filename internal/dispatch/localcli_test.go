@@ -148,9 +148,15 @@ func TestLocalProvidersAreSelectableAndNeedNoKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("local-cli with a valid command was refused: %v", err)
 	}
-	lp, ok := p.(*LocalCLIProvider)
+	// Every provider is built with transient-failure retry applied, so what
+	// comes back is the wrapper. That is asserted too: a provider handed out
+	// without retry is how five tenant builds were lost.
+	if _, wrapped := p.(*retryingProvider); !wrapped {
+		t.Fatalf("NewProvider returned %T, which does not retry transient failures", p)
+	}
+	lp, ok := Underlying(p).(*LocalCLIProvider)
 	if !ok {
-		t.Fatalf("local-cli built %T, want *LocalCLIProvider", p)
+		t.Fatalf("local-cli built %T, want *LocalCLIProvider", Underlying(p))
 	}
 	if lp.Bin != tool {
 		t.Errorf("bin = %q, want %q", lp.Bin, tool)

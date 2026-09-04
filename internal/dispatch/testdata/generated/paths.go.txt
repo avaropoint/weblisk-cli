@@ -1,0 +1,97 @@
+package protocol
+
+import "strings"
+
+// ProtocolVersion is the wire protocol version this implementation speaks.
+// It is a bare major number and MUST be compared for equality — never parsed
+// as semver. See protocol/spec — "Two words that mean two things".
+const ProtocolVersion = "1"
+
+// SupportedVersions lists every wire protocol version this implementation
+// accepts. Reported in OrchestratorInfo.SupportedVersions.
+var SupportedVersions = []string{ProtocolVersion}
+
+// IsSupportedVersion reports whether v is a wire protocol version this
+// implementation accepts. An empty value means the peer omitted
+// protocol_version and defaults to the current wire version.
+func IsSupportedVersion(v string) bool {
+	if v == "" {
+		v = defaultProtocolVersion
+	}
+	for _, s := range SupportedVersions {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+// Endpoint paths. Every path here is absolute and carries its /v1 prefix: an
+// orchestrator or agent URL is an ORIGIN — scheme, host, port — and a client
+// composes a request as origin + path.
+const (
+	// Orchestrator protocol endpoints.
+	PathRegister  = "/v1/register"
+	PathServices  = "/v1/services"
+	PathChannel   = "/v1/channel"
+	PathHealth    = "/v1/health"
+	PathAudit     = "/v1/audit"
+	PathRotateKey = "/v1/rotate-key"
+
+	// Observability. Served without auth.
+	PathMetrics = "/metrics"
+
+	// Administrative endpoints backed by state the orchestrator owns.
+	PathAdminOperatorsRegister = "/v1/admin/operators/register"
+	PathAdminOperatorsToken    = "/v1/admin/operators/token"
+	PathAdminOperators         = "/v1/admin/operators"
+	PathAdminAgents            = "/v1/admin/agents"
+	PathAdminOverview          = "/v1/admin/overview"
+
+	// Agent protocol endpoints the orchestrator calls on registered agents.
+	PathAgentEvent    = "/v1/event"
+	PathAgentServices = "/v1/services"
+)
+
+// PathAdminOperatorByName builds the absolute path for a single operator.
+func PathAdminOperatorByName(name string) string {
+	return PathAdminOperators + "/" + name
+}
+
+// PathAdminOperatorRole builds the absolute path for an operator's role.
+func PathAdminOperatorRole(name string) string {
+	return PathAdminOperators + "/" + name + "/role"
+}
+
+// PathAdminAgentByName builds the absolute path for a single agent.
+func PathAdminAgentByName(name string) string {
+	return PathAdminAgents + "/" + name
+}
+
+// PathAdminAgentDeregister builds the absolute path for force-deregistering
+// an agent.
+func PathAdminAgentDeregister(name string) string {
+	return PathAdminAgents + "/" + name + "/deregister"
+}
+
+// Request body ceilings, applied with io.LimitReader on every read.
+const (
+	// LimitRegistration bounds registration bodies: 1 MB.
+	LimitRegistration int64 = 1 << 20
+	// LimitMessage bounds agent message bodies: 1 MB.
+	LimitMessage int64 = 1 << 20
+	// LimitServices bounds service directory update bodies: 1 MB.
+	LimitServices int64 = 1 << 20
+	// LimitTask bounds task execution bodies: 10 MB.
+	LimitTask int64 = 10 << 20
+	// LimitChannel bounds channel request bodies: 64 KB.
+	LimitChannel int64 = 1 << 16
+)
+
+// JoinPath composes a request URL from an origin and an absolute endpoint
+// path. The origin carries no path of its own; a trailing slash on it is
+// discarded so that origin + path is exact.
+func JoinPath(origin, path string) string {
+	return strings.TrimRight(origin, "/") + path
+}
+

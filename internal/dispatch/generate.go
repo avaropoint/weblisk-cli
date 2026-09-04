@@ -67,6 +67,70 @@ func stripFence(s string) string {
 
 // contractViolation returns the reason a response is not an acceptable file, or
 // "" when it is.
+// claimedSymbols maps a package-qualified symbol to the file that owns it.
+//
+// From the PLAN first, so a symbol is owned before its file is written, then
+// from what has actually been written for anything the plan did not name —
+// unexported helpers, mostly, which two files in one Go package still cannot
+// both declare.
+func claimedSymbols(plan *Plan, decls map[string][]Declaration) map[string]string {
+	owner := map[string]string{}
+	for _, f := range plan.Files {
+		pkg := planPackage(f.Path)
+		for _, d := range f.Declares {
+			owner[pkg+"."+strings.TrimSpace(d)] = f.Path
+			// Plans write a method as "(*Registry).Load"; a parsed declaration
+			// keys it as "orchestrator.Registry.Load". Both spellings are
+			// recorded so the two meet.
+			if m := reMethodNotation.FindStringSubmatch(strings.TrimSpace(d)); m != nil {
+				owner[pkg+"."+m[1]+"."+m[2]] = f.Path
+			}
+		}
+	}
+	for path, ds := range decls {
+		for _, d := range ds {
+			if _, planned := owner[d.Key()]; !planned {
+				owner[d.Key()] = path
+			}
+		}
+	}
+	return owner
+}
+
+// redeclaresElsewhere reports a symbol this file declares that belongs to
+// another file in the same package.
+//
+// # Why this is a per-file check and not a final one
+//
+// It was final: every file was generated, then DuplicateDeclarations reported
+// the collision and the whole run was discarded. A clean 31-file build died
+// that way after generating all 31 — the last file completed, and then nothing
+// was usable.
+//
+// Worse, the per-file check CAUSED the collision it could not see. The plan
+// assigned EncodePublicKey to sign.go. keys.go was generated first and declared
+// it anyway. sign.go was then generated correctly WITHOUT it — and
+// contractViolation rejected sign.go, because its plan entry says it must
+// define EncodePublicKey. The retry complied, and both files declared it.
+//
+// The guard produced the fault, thirty minutes before the check that could see
+// it ran. Asked at the point the file is written, keys.go is rejected instead,
+// with the name of the file that owns the symbol, and the run continues.
+func redeclaresElsewhere(content string, f PlannedFile, owner map[string]string) string {
+	if len(owner) == 0 {
+		return ""
+	}
+	for _, d := range ExtractDeclarations(f.Path, content) {
+		who, ok := owner[d.Key()]
+		if !ok || who == f.Path {
+			continue
+		}
+		return fmt.Sprintf("declares %s, which belongs to %s — import it, do not re-declare it. "+
+			"Two files in one package cannot declare the same symbol", d.Name, who)
+	}
+	return ""
+}
+
 func contractViolation(content string, f PlannedFile) string {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
@@ -421,6 +485,9 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 	generated := make([]GeneratedFile, 0, len(ordered))
 	written := make([]string, 0, len(ordered))
 	decls := map[string][]Declaration{}
+	// Who owns which symbol, from the plan. Rebuilt as files are written so an
+	// unplanned helper also gets an owner.
+	owner := claimedSymbols(plan, decls)
 
 	for i, f := range ordered {
 		var content string
@@ -438,6 +505,7 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 			generated = append(generated, GeneratedFile{Path: f.Path, Content: string(body), Lang: inferLang(f.Path)})
 			written = append(written, f.Path)
 			decls[f.Path] = ExtractDeclarations(f.Path, string(body))
+			owner = claimedSymbols(plan, decls)
 			continue
 		}
 
@@ -454,6 +522,7 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 			generated = append(generated, GeneratedFile{Path: f.Path, Content: cached, Lang: inferLang(f.Path)})
 			written = append(written, f.Path)
 			decls[f.Path] = ExtractDeclarations(f.Path, cached)
+			owner = claimedSymbols(plan, decls)
 			continue
 		}
 
@@ -484,6 +553,11 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 				lastViolation = v
 				continue
 			}
+			// Coherence, asked here rather than after all files are written.
+			if v := redeclaresElsewhere(candidate, f, owner); v != "" {
+				lastViolation = v
+				continue
+			}
 			content = candidate
 			break
 		}
@@ -499,6 +573,7 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 		generated = append(generated, GeneratedFile{Path: f.Path, Content: content, Lang: inferLang(f.Path)})
 		written = append(written, f.Path)
 		decls[f.Path] = ExtractDeclarations(f.Path, content)
+		owner = claimedSymbols(plan, decls)
 		onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path, Status: "written"})
 	}
 

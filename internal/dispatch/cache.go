@@ -183,6 +183,23 @@ func planKey(req *Requirements, target, platform, platBP, systemPrompt string) s
 	for _, e := range req.Endpoints {
 		h.Write([]byte(e))
 	}
+	// The DECLARED names, not only the wire facts.
+	//
+	// A plan is a set of symbols, and these are what those symbols are spelled
+	// from — so renaming an operation in a blueprint must re-derive the plan.
+	// Leaving them out would serve a cached plan built from the old names and
+	// generate against a contract nobody holds any more. cacheKey's own comment
+	// records the last time an input was added to a prompt and not to its key:
+	// forty-three files were served that imported a module path that no longer
+	// existed.
+	for _, e := range req.EndpointOps {
+		h.Write([]byte(e.Method))
+		h.Write([]byte(e.Path))
+		h.Write([]byte(e.Operation))
+	}
+	for _, op := range req.Operations {
+		h.Write([]byte(op))
+	}
 	for _, c := range req.Checklist {
 		h.Write([]byte(c.Source))
 		h.Write([]byte(c.Text))

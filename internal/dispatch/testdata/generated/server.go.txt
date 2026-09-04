@@ -1,0 +1,421 @@
+package orchestrator
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"tenant-v4/internal/observability"
+	"tenant-v4/internal/protocol"
+)
+
+// Server timeouts. Go's net/http default server has no timeouts at all, so
+// every one of these is set explicitly on the http.Server the orchestrator
+// runs. The orchestrator executes no tasks — it registers, looks up and
+// brokers — so its request handling is short and the write budget is
+// generous rather than task-sized.
+const (
+	// ReadHeaderTimeout bounds how long a client may take to send request
+	// headers. It is the guard against slow-header connection exhaustion.
+	ReadHeaderTimeout = 10 * time.Second
+
+	// ReadTimeout bounds the whole request read, headers and body together.
+	// Bodies here are capped at 1 MB (registration, messages, service
+	// updates) or 64 KB (channels) by protocol.ReadJSON.
+	ReadTimeout = 30 * time.Second
+
+	// WriteTimeout bounds response writing. A full service directory with
+	// routing table and namespace map is the largest response served.
+	WriteTimeout = 60 * time.Second
+
+	// IdleTimeout bounds how long a keep-alive connection may sit unused.
+	IdleTimeout = 120 * time.Second
+
+	// ShutdownGrace bounds graceful shutdown: in-flight requests are given
+	// this long to finish before the listener is closed hard.
+	ShutdownGrace = 15 * time.Second
+)
+
+// muxMethod binds one HTTP method to one handler on a route.
+type muxMethod struct {
+	method  string
+	handler http.HandlerFunc
+}
+
+// muxRoute is one path pattern and every method served on it.
+type muxRoute struct {
+	pattern string
+	methods []muxMethod
+
+	// noFallback suppresses the method-less 405 pattern for this route.
+	//
+	// net/http's ServeMux panics when two patterns overlap and neither is
+	// more specific than the other. A method-less literal such as
+	// "/v1/admin/operators/register" overlaps "GET /v1/admin/operators/{name}"
+	// on GET, and neither contains the other: the literal is narrower in
+	// path, the wildcard route narrower in method. Registering both is a
+	// startup panic, so literal siblings of a wildcard segment carry only
+	// their method-specific routes and fall through to the wildcard's
+	// fallback for everything else.
+	noFallback bool
+}
+
+// allowed lists the methods this route serves, in registration order, for
+// the Allow header of a 405 response.
+func (r muxRoute) allowed() []string {
+	out := make([]string, 0, len(r.methods))
+	for _, m := range r.methods {
+		out = append(out, m.method)
+	}
+	return out
+}
+
+// routeTable is the orchestrator's complete surface: the protocol endpoints
+// from protocol/spec, and the administrative endpoints backed by state this
+// component owns — operators, agents, and its own overview. Nothing here
+// serves strategies, approvals, observations, workflows or tasks; those
+// belong to other components and are absent by design.
+//
+// Every pattern is an absolute path taken from protocol's path constants. A
+// client composes requests as origin + path, so no constant here omits its
+// /v1 prefix.
+func (o *Orchestrator) routeTable() []muxRoute {
+	operators := strings.TrimSuffix(protocol.PathAdminOperators, "/")
+	agents := strings.TrimSuffix(protocol.PathAdminAgents, "/")
+
+	return []muxRoute{
+		// --- Protocol endpoints ---
+		{
+			pattern: protocol.PathRegister,
+			methods: []muxMethod{
+				{method: http.MethodPost, handler: o.HandleRegister},
+				{method: http.MethodDelete, handler: o.HandleDeregister},
+			},
+		},
+		{
+			pattern: protocol.PathRotateKey,
+			methods: []muxMethod{
+				{method: http.MethodPost, handler: o.HandleRotateKey},
+			},
+		},
+		{
+			pattern: protocol.PathServices,
+			methods: []muxMethod{
+				{method: http.MethodGet, handler: o.HandleServices},
+			},
+		},
+		{
+			pattern: protocol.PathChannel,
+			methods: []muxMethod{
+				{method: http.MethodPost, handler: o.HandleChannel},
+			},
+		},
+		{
+			pattern: protocol.PathHealth,
+			methods: []muxMethod{
+				{method: http.MethodGet, handler: o.HandleHealth},
+			},
+		},
+		{
+			pattern: protocol.PathAudit,
+			methods: []muxMethod{
+				{method: http.MethodGet, handler: o.HandleAudit},
+			},
+		},
+
+		// --- Observability ---
+		{
+			pattern: protocol.PathMetrics,
+			methods: []muxMethod{
+				{method: http.MethodGet, handler: o.HandleMetrics},
+			},
+		},
+
+		// --- Administrative: operators ---
+		{
+			// Unauthenticated: registration is how an operator joins.
+			pattern:    protocol.PathAdminOperatorsRegister,
+			noFallback: true,
+			methods: []muxMethod{
+				{method: http.MethodPost, handler: o.HandleOperatorRegister},
+			},
+		},
+		{
+			// Unauthenticated by token: this is the endpoint that issues them.
+			pattern:    protocol.PathAdminOperatorsToken,
+			noFallback: true,
+			methods: []muxMethod{
+				{method: http.MethodPost, handler: o.HandleOperatorToken},
+			},
+		},
+		{
+			pattern: operators,
+			methods: []muxMethod{
+				{method: http.MethodGet, handler: o.HandleOperatorList},
+			},
+		},
+		{
+			pattern: operators + "/{name}",
+			methods: []muxMethod{
+				{method: http.MethodGet, handler: o.HandleOperatorGet},
+				{method: http.MethodDelete, handler: o.HandleOperatorDelete},
+			},
+		},
+		{
+			pattern: operators + "/{name}/role",
+			methods: []muxMethod{
+				{method: http.MethodPut, handler: o.HandleOperatorRole},
+			},
+		},
+
+		// --- Administrative: agents and overview ---
+		{
+			pattern: agents,
+			methods: []muxMethod{
+				{method: http.MethodGet, handler: o.HandleAdminAgents},
+			},
+		},
+		{
+			pattern: agents + "/{name}",
+			methods: []muxMethod{
+				{method: http.MethodGet, handler: o.HandleAdminAgentGet},
+			},
+		},
+		{
+			pattern: agents + "/{name}/deregister",
+			methods: []muxMethod{
+				{method: http.MethodPost, handler: o.HandleAdminAgentDeregister},
+			},
+		},
+		{
+			pattern: protocol.PathAdminOverview,
+			methods: []muxMethod{
+				{method: http.MethodGet, handler: o.HandleAdminOverview},
+			},
+		},
+	}
+}
+
+// Routes registers every orchestrator endpoint on a fresh ServeMux using
+// Go 1.22 method-and-pattern routes. Each path also gets a method-less
+// pattern that answers a wrong method with a structured 405 and an Allow
+// header, and an unmatched path answers with a structured 404 — a client
+// that guesses wrong gets JSON back, never net/http's plain text.
+func (o *Orchestrator) Routes() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	for _, rt := range o.routeTable() {
+		for _, m := range rt.methods {
+			mux.HandleFunc(m.method+" "+rt.pattern, m.handler)
+		}
+		if rt.noFallback {
+			continue
+		}
+		allowed := rt.allowed()
+		mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) {
+			writeMethodNotAllowed(w, allowed...)
+		})
+	}
+
+	mux.HandleFunc("/", o.handleNotFound)
+	return mux
+}
+
+// handleNotFound answers an unrouted path with the registered NOT_FOUND
+// code rather than an empty body.
+func (o *Orchestrator) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	protocol.WriteErrorCode(w, protocol.CodeNotFound,
+		"no endpoint for "+r.Method+" "+observability.NormalizePath(r.URL.Path))
+}
+
+// Handler wraps the route mux in the observability middleware stack.
+//
+// Order, outermost first: trace, so a trace context exists (preserved from
+// X-Trace-Id when the caller supplied one, generated when not) before
+// anything else runs; metrics, so wl_http_requests_total and
+// wl_http_request_duration_seconds count every request including those that
+// end in 404 or 405; then the access log, which reads the trace context the
+// outer layer established.
+func (o *Orchestrator) Handler() http.Handler {
+	var h http.Handler = o.Routes()
+	h = o.logMiddleware(h)
+	if o.Metrics != nil {
+		h = observability.MetricsMiddleware(o.Metrics, h)
+	}
+	h = observability.TraceMiddleware(o.Logger, h)
+	return h
+}
+
+// responseObserver captures the status code so the access log can report it.
+type responseObserver struct {
+	http.ResponseWriter
+	status  int
+	written bool
+}
+
+func (w *responseObserver) WriteHeader(status int) {
+	if !w.written {
+		w.status = status
+		w.written = true
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseObserver) Write(b []byte) (int, error) {
+	if !w.written {
+		w.status = http.StatusOK
+		w.written = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *responseObserver) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// logMiddleware emits one structured access line per request. The path is
+// normalized so identifiers never reach a log field that would be joined to
+// a metric label, and health and metrics polling logs at debug so a
+// monitoring loop cannot flood the stream.
+func (o *Orchestrator) logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &responseObserver{ResponseWriter: w, status: http.StatusOK}
+
+		next.ServeHTTP(rec, r)
+
+		fields := map[string]any{
+			"method":      r.Method,
+			"path":        observability.NormalizePath(r.URL.Path),
+			"status":      rec.status,
+			"duration_ms": time.Since(start).Milliseconds(),
+		}
+		if tc, ok := observability.TraceFromContext(r.Context()); ok {
+			fields["trace_id"] = tc.TraceID
+			fields["span_id"] = tc.SpanID
+		}
+
+		switch {
+		case rec.status >= http.StatusInternalServerError:
+			o.Logger.Error("http request", fields)
+		case rec.status >= http.StatusBadRequest:
+			o.Logger.Warn("http request", fields)
+		case isPollingPath(r.URL.Path):
+			o.Logger.Debug("http request", fields)
+		default:
+			o.Logger.Info("http request", fields)
+		}
+	})
+}
+
+// isPollingPath reports whether a path is scraped on a schedule rather than
+// requested by a peer doing work.
+func isPollingPath(path string) bool {
+	switch path {
+	case protocol.PathHealth, protocol.PathMetrics:
+		return true
+	default:
+		return false
+	}
+}
+
+// Serve runs the orchestrator until ctx is cancelled or shutdown is
+// requested, then drains in-flight requests within ShutdownGrace.
+//
+// The orchestrator is the first component a deployment starts, so a failure
+// before the listener is open is fatal to the caller: Serve returns the
+// error rather than degrading into a process that answers nothing.
+func (o *Orchestrator) Serve(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if !o.Started() {
+		if err := o.Startup(ctx); err != nil {
+			return fmt.Errorf("startup: %w", err)
+		}
+	}
+
+	srv := &http.Server{
+		Addr:              o.Config.Addr(),
+		Handler:           o.Handler(),
+		ReadHeaderTimeout: ReadHeaderTimeout,
+		ReadTimeout:       ReadTimeout,
+		WriteTimeout:      WriteTimeout,
+		IdleTimeout:       IdleTimeout,
+	}
+
+	listener, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", srv.Addr, err)
+	}
+
+	origin := o.Config.Origin()
+	o.Logger.Info("orchestrator listening", map[string]any{
+		"addr":       listener.Addr().String(),
+		"url":        origin,
+		"version":    o.Config.Version,
+		"public_key": o.PublicKey(),
+		"register":   protocol.JoinPath(origin, protocol.PathRegister),
+		"services":   protocol.JoinPath(origin, protocol.PathServices),
+		"health":     protocol.JoinPath(origin, protocol.PathHealth),
+		"metrics":    protocol.JoinPath(origin, protocol.PathMetrics),
+		"dev":        o.Config.DevMode(),
+	})
+
+	serveErr := make(chan error, 1)
+	go func() {
+		err := srv.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		serveErr <- err
+	}()
+
+	var runErr error
+	select {
+	case runErr = <-serveErr:
+		// The listener failed on its own; fall through and shut the rest down.
+		if runErr != nil {
+			o.Logger.Error("http server stopped", map[string]any{"error": runErr.Error()})
+		}
+	case <-ctx.Done():
+		o.Logger.Info("shutdown requested", map[string]any{"reason": "context cancelled"})
+	case <-o.Stopping():
+		o.Logger.Info("shutdown requested", map[string]any{"reason": "orchestrator stopping"})
+	}
+
+	// Shutdown uses a fresh context: ctx may already be cancelled, and the
+	// drain must still get its full grace period.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownGrace)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		o.Logger.Warn("http shutdown incomplete", map[string]any{"error": err.Error()})
+		if runErr == nil {
+			runErr = fmt.Errorf("http shutdown: %w", err)
+		}
+		_ = srv.Close()
+	}
+
+	// Drain the serve goroutine so it cannot outlive this call.
+	if err := <-serveErr; err != nil && runErr == nil {
+		runErr = err
+	}
+
+	if err := o.Shutdown(shutdownCtx); err != nil {
+		o.Logger.Error("orchestrator shutdown", map[string]any{"error": err.Error()})
+		if runErr == nil {
+			runErr = fmt.Errorf("shutdown: %w", err)
+		}
+	}
+
+	o.Logger.Info("orchestrator stopped", map[string]any{"uptime": o.Uptime()})
+	return runErr
+}

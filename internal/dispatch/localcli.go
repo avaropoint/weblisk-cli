@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -81,13 +82,22 @@ func ResolveLocalCLI(name, configured string) (string, []string) {
 
 // LocalCLIProvider drives a coding-agent CLI as a subprocess.
 type LocalCLIProvider struct {
-	Bin     string        // resolved binary path
-	Name    string        // provider name, for errors
-	Args    []string      // flags before the prompt
-	Model   string        // "" leaves the tool's default
-	JSON    bool          // parse stdout as a result envelope
-	Timeout time.Duration // 0 means defaultLocalCLITimeout
-	Dir     string        // working directory, "" means inherit
+	Bin   string   // resolved binary path
+	Name  string   // provider name, for errors
+	Args  []string // flags before the prompt
+	Model string   // "" leaves the tool's default
+	// observed is the model the tool actually used, as it reported it.
+	//
+	// A build that does not record which model wrote a file cannot answer the
+	// question the whole chain exists to answer. WL_AI_MODEL was unset on every
+	// run so far, so generation ran on whatever the CLI's default happened to
+	// be that week — it resolved to a small model, and nothing in the output
+	// said so. That is not a setting anybody chose; it is a setting nobody saw.
+	observed   string
+	observedMu sync.Mutex
+	JSON       bool          // parse stdout as a result envelope
+	Timeout    time.Duration // 0 means defaultLocalCLITimeout
+	Dir        string        // working directory, "" means inherit
 }
 
 // defaultLocalCLITimeout bounds one call. Generation from blueprints is
@@ -145,8 +155,20 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("%s timed out after %s — the model may still be working; "+
-				"raise WL_AI_TIMEOUT if generation legitimately takes longer", p.Name, timeout)
+			// Retryable: 408 is the status for exactly this, and a subprocess
+			// that ran out of time on one attempt often finishes on the next.
+			return "", &ProviderFault{Provider: p.Name, Status: 408,
+				Message: fmt.Sprintf("timed out after %s — the model may still be working; "+
+					"raise WL_AI_TIMEOUT if generation legitimately takes longer", timeout)}
+		}
+		// A non-zero exit still prints the result envelope on stdout, and that
+		// envelope carries the status and terminal reason that decide whether
+		// this is worth retrying. Read it as a fault rather than pasting the
+		// JSON into an error string: the string form was matched against for
+		// retry decisions, and its "permission_denials" field made every
+		// transient failure look permanent.
+		if f := faultFromClaudeCode(p.Name, strings.TrimSpace(stdout.String())); f != nil {
+			return "", f
 		}
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
@@ -155,7 +177,7 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 		if detail == "" {
 			detail = err.Error()
 		}
-		return "", fmt.Errorf("%s failed: %s", p.Name, detail)
+		return "", &ProviderFault{Provider: p.Name, Message: detail, Raw: detail}
 	}
 
 	raw := strings.TrimSpace(stdout.String())
@@ -173,8 +195,16 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 		// using it.
 		return raw, nil
 	}
+	if res.Model != "" {
+		p.observedMu.Lock()
+		p.observed = res.Model
+		p.observedMu.Unlock()
+	}
 	if res.IsError {
-		return "", fmt.Errorf("%s reported an error: %s", p.Name, res.Result)
+		if f := faultFromClaudeCode(p.Name, raw); f != nil {
+			return "", f
+		}
+		return "", &ProviderFault{Provider: p.Name, Message: res.Result, Raw: raw}
 	}
 	return res.Result, nil
 }
@@ -301,4 +331,12 @@ func LocalCLIAvailable(kind string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return exec.CommandContext(ctx, bin, "--version").Run() == nil
+}
+
+// ModelUsed reports the model the tool said it used, once it has been asked
+// something. Empty before the first call.
+func (p *LocalCLIProvider) ModelUsed() string {
+	p.observedMu.Lock()
+	defer p.observedMu.Unlock()
+	return p.observed
 }

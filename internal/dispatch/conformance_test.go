@@ -4,6 +4,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -310,5 +311,44 @@ func TestAFailureMentioningWarningIsStillAFailure(t *testing.T) {
 	got := failureLines("startup failed: warning threshold exceeded, refusing to serve")
 	if len(got) != 1 {
 		t.Fatalf("a real failure was discarded: %q", got)
+	}
+}
+
+// A component that does not run MUST fail the build.
+//
+// It did not. A generated hub panicked at startup on a net/http pattern
+// conflict; the pipeline detected it, printed the panic, tried two rounds of
+// repair, reported "the component does not run" — and exited 0. Anything
+// reading the exit status was told a hub had been built.
+//
+// A check whose result is discarded is indistinguishable from no check, except
+// that it costs time and looks like diligence.
+func TestANonRunningComponentIsAFailure(t *testing.T) {
+	startupPanic := errors.New("exit status 2: panic: pattern \"/v1/x\" conflicts with \"GET /v1/{name}\"")
+	if err := reportConformance(nil, "goroutine 1 [running]:", startupPanic); err == nil {
+		t.Fatal("a component that does not run was reported as success")
+	}
+}
+
+// A failed conformance test fails the build.
+func TestAFailedConformanceTestIsAFailure(t *testing.T) {
+	results := []ConformanceResult{
+		{ID: "L1-01", Name: "health answers", Passed: true},
+		{ID: "L1-02", Name: "register verifies the signature", Passed: false, Detail: "accepted an invalid signature"},
+	}
+	if err := reportConformance(results, "", nil); err == nil {
+		t.Fatal("a failed conformance test was reported as success")
+	}
+}
+
+// But an UNRUN test is not a failure. "We have not verified this" and "this is
+// wrong" are different facts, and conflating them fails correct builds.
+func TestAnUnrunTestIsNotAFailure(t *testing.T) {
+	results := []ConformanceResult{
+		{ID: "L1-01", Name: "health answers", Passed: true},
+		{ID: "L1-09", Name: "survives a restart", Unrun: true, Detail: "no harness yet"},
+	}
+	if err := reportConformance(results, "", nil); err != nil {
+		t.Fatalf("an unrun test failed the build: %v", err)
 	}
 }

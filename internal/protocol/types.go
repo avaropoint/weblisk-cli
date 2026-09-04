@@ -32,7 +32,7 @@ type AgentManifest struct {
 	Capabilities []Capability `json:"capabilities"`
 	Inputs       []IOSpec     `json:"inputs,omitempty"`
 	Outputs      []IOSpec     `json:"outputs,omitempty"`
-	PublicKey     string      `json:"public_key"`
+	PublicKey    string       `json:"public_key"`
 }
 
 // Capability is a single thing an agent can do.
@@ -53,12 +53,12 @@ type IOSpec struct {
 
 // TaskRequest is what the orchestrator sends to an agent.
 type TaskRequest struct {
-	ID          string            `json:"id"`
-	Type        string            `json:"type"`
-	Payload     map[string]any    `json:"payload"`
-	Context     *TaskContext      `json:"context,omitempty"`
-	Signature   string            `json:"signature,omitempty"`
-	Token       string            `json:"token,omitempty"`
+	ID        string         `json:"id"`
+	Type      string         `json:"type"`
+	Payload   map[string]any `json:"payload"`
+	Context   *TaskContext   `json:"context,omitempty"`
+	Signature string         `json:"signature,omitempty"`
+	Token     string         `json:"token,omitempty"`
 }
 
 // TaskContext provides additional context for task execution.
@@ -70,18 +70,18 @@ type TaskContext struct {
 
 // TaskResult is what an agent returns after execution.
 type TaskResult struct {
-	ID       string           `json:"id"`
-	Status   string           `json:"status"` // "success", "error", "partial"
-	Output   map[string]any   `json:"output,omitempty"`
-	Changes  []ProposedChange `json:"changes,omitempty"`
-	Error    string           `json:"error,omitempty"`
+	ID      string           `json:"id"`
+	Status  string           `json:"status"` // "success", "error", "partial"
+	Output  map[string]any   `json:"output,omitempty"`
+	Changes []ProposedChange `json:"changes,omitempty"`
+	Error   string           `json:"error,omitempty"`
 }
 
 // ProposedChange is a file change an agent wants to make.
 type ProposedChange struct {
-	Path    string     `json:"path"`
-	Action  string     `json:"action"` // "create", "modify", "delete"
-	Content string     `json:"content,omitempty"`
+	Path    string      `json:"path"`
+	Action  string      `json:"action"` // "create", "modify", "delete"
+	Content string      `json:"content,omitempty"`
 	Diff    *ChangeDiff `json:"diff,omitempty"`
 }
 
@@ -171,10 +171,10 @@ type ChannelGrant struct {
 
 // HealthStatus is returned by the health check endpoint.
 type HealthStatus struct {
-	Status    string `json:"status"`
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	Uptime    int64  `json:"uptime,omitempty"`
+	Status  string `json:"status"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Uptime  int64  `json:"uptime,omitempty"`
 }
 
 // AuditEntry is a single audit log record.

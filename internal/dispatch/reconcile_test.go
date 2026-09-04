@@ -136,3 +136,106 @@ func TestAnInstructedOmissionIsNotStale(t *testing.T) {
 		t.Error("a genuinely stale file survived; protection is now too broad")
 	}
 }
+
+// Reconciliation must reach a nested file, and must still refuse to touch one
+// it cannot prove it wrote.
+//
+// It called os.ReadDir on plan.Root and skipped every directory entry.
+// plan.Root is "." — the tenant IS the module root — so it examined go.mod and
+// nothing else, and no stale file has been removed since platforms/go
+// specified cmd/ and internal/ packages. It surfaced as eleven redeclaration
+// errors: one plan named a file auditlog.go, the next named it audit.go, both
+// existed, and the package declared Auditor twice.
+func TestReconcileReachesNestedFiles(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("package x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{
+		"internal/orchestrator/audit.go",       // planned — kept
+		"internal/orchestrator/auditlog.go",    // ours, dropped by this plan — removed
+		"internal/orchestrator/handwritten.go", // never ours — left alone
+		"cmd/orchestrator/main.go",             // planned — kept
+		"bin/orchestrator",                     // build output — never considered
+	} {
+		write(f)
+	}
+
+	plan := &Plan{Target: "orchestrator", Root: ".", Files: []PlannedFile{
+		{Path: "internal/orchestrator/audit.go"},
+		{Path: "cmd/orchestrator/main.go"},
+	}}
+	// The previous run owned the file this plan drops.
+	RecordWritten(root, &Plan{Target: "orchestrator", Root: "."}, []GeneratedFile{
+		{Path: "internal/orchestrator/audit.go"},
+		{Path: "internal/orchestrator/auditlog.go"},
+		{Path: "cmd/orchestrator/main.go"},
+	})
+
+	rec, err := ReconcileTarget(root, plan, &TenantState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(rec.Stale, "internal/orchestrator/auditlog.go") {
+		t.Fatalf("the nested stale file was not removed: stale=%v foreign=%v", rec.Stale, rec.Foreign)
+	}
+	if _, err := os.Stat(filepath.Join(root, "internal/orchestrator/auditlog.go")); err == nil {
+		t.Fatal("reported stale but still on disk")
+	}
+	// The safety property. Widening the walk must not widen what is deleted.
+	if _, err := os.Stat(filepath.Join(root, "internal/orchestrator/handwritten.go")); err != nil {
+		t.Fatal("a file generation never wrote was deleted")
+	}
+	if !containsStr(rec.Foreign, "internal/orchestrator/handwritten.go") {
+		t.Errorf("the unowned file was not reported: %v", rec.Foreign)
+	}
+	// Build output is not part of the source tree and is never walked.
+	if _, err := os.Stat(filepath.Join(root, "bin/orchestrator")); err != nil {
+		t.Error("bin/ was reconciled; it is build output")
+	}
+	for _, f := range []string{"internal/orchestrator/audit.go", "cmd/orchestrator/main.go"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(f))); err != nil {
+			t.Errorf("%s is in the plan and was removed", f)
+		}
+	}
+}
+
+// A file this target wrote stays this target's until it is removed. Dropping it
+// from the record while it is still on disk makes it indistinguishable from a
+// hand-written file, and it can then never be cleaned up.
+func TestOwnershipSurvivesAPlanThatDropsAFile(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "internal", "x", "old.go")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := &Plan{Target: "orchestrator", Root: "."}
+	RecordWritten(root, plan, []GeneratedFile{{Path: "internal/x/old.go"}})
+
+	// A later run writes a different file and does not mention old.go — which
+	// is still on disk, because the run was interrupted before reconcile.
+	RecordWritten(root, plan, []GeneratedFile{{Path: "internal/x/new.go"}})
+
+	if got := PriorPaths(root, "orchestrator"); !containsStr(got, "internal/x/old.go") {
+		t.Fatalf("ownership of a still-present file was forgotten: %v", got)
+	}
+
+	// And a file that is gone is NOT carried forward, so the record cannot grow
+	// without bound as a tenant is restructured.
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	RecordWritten(root, plan, []GeneratedFile{{Path: "internal/x/new.go"}})
+	if got := PriorPaths(root, "orchestrator"); containsStr(got, "internal/x/old.go") {
+		t.Fatalf("a deleted file is still claimed: %v", got)
+	}
+}

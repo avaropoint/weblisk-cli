@@ -24,12 +24,19 @@ func rebuildFixture(t *testing.T) (root string, plan *Plan, bps map[string]strin
 
 const compliantFile = "package content\n\ntype Service struct{}\n\n// route: /v1/content\n"
 
+// writeAndRecord writes through the SAME path production uses.
+//
+// The first version called os.WriteFile directly, so it stored exactly the
+// bytes it digested — while writeGeneratedFiles appends a newline. The test
+// passed and every real rebuild refused every file as edited. A fixture that
+// writes differently from production cannot detect a difference between them.
 func writeAndRecord(t *testing.T, root string, plan *Plan, bps map[string]string, body string) map[string]FileRecord {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(root, "svc.go"), []byte(body), 0o644); err != nil {
+	files := []GeneratedFile{{Path: "svc.go", Content: body}}
+	if _, err := writeGeneratedFiles(filepath.Join(root, plan.Root), files); err != nil {
 		t.Fatal(err)
 	}
-	return BuildFileRecords(plan, []GeneratedFile{{Path: "svc.go", Content: body}}, bps)
+	return BuildFileRecords(filepath.Join(root, plan.Root), plan, files, bps)
 }
 
 func onlyDecision(t *testing.T, ds []Decision) Decision {
@@ -73,8 +80,15 @@ func TestRebuildUnrecordedFileIsNotOverwritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := onlyDecision(t, DecideRebuild(root, plan, map[string]FileRecord{}, bps))
-	if d.RebuildVerdict != RebuildEdited {
-		t.Errorf("got %q, want edited — generation cannot show it authored this file", d.RebuildVerdict)
+	// Reported as unowned rather than edited: the file was not changed, it was
+	// never recorded. Both refuse, and the operator's remedy differs.
+	if d.RebuildVerdict != RebuildUnowned {
+		t.Errorf("got %q, want unowned — generation cannot show it authored this file", d.RebuildVerdict)
+	}
+	// The load-bearing property: a refusal must not be read as an instruction
+	// to rebuild, or it overwrites the file it exists to protect.
+	if d.RebuildVerdict.Generates() {
+		t.Error("an unowned file was scheduled for regeneration")
 	}
 }
 
@@ -156,7 +170,7 @@ func TestRebuildLegacyManifestSaysItCannotTell(t *testing.T) {
 	legacy := onlyDecision(t, DecideRebuild(root, plan, nil, bps))
 	known := onlyDecision(t, DecideRebuild(root, plan, map[string]FileRecord{}, bps))
 
-	if legacy.RebuildVerdict != RebuildEdited || known.RebuildVerdict != RebuildEdited {
+	if legacy.RebuildVerdict.Generates() || known.RebuildVerdict.Generates() {
 		t.Fatalf("both must refuse: legacy=%q known=%q", legacy.RebuildVerdict, known.RebuildVerdict)
 	}
 	if legacy.Detail == known.Detail {
@@ -200,5 +214,81 @@ func TestARepairedFileIsNotReportedAsEdited(t *testing.T) {
 	}
 	if d.RebuildVerdict != RebuildUnchanged {
 		t.Errorf("got %q, want unchanged", d.RebuildVerdict)
+	}
+}
+
+// The recorded digest must be the digest of the bytes ON DISK.
+//
+// writeGeneratedFiles stores content plus a trailing newline. Recording a
+// digest of the in-memory content made every record wrong by one byte, so the
+// table reported an entire target as "edited since generation wrote it" and
+// refused to touch a tenant generation had produced itself — which is what a
+// real rebuild did, on 6 of 37 files, until this.
+func TestTheRecordedDigestIsTheDigestOnDisk(t *testing.T) {
+	root, plan, bps := rebuildFixture(t)
+	files := []GeneratedFile{{Path: "svc.go", Content: compliantFile}}
+	if _, err := writeGeneratedFiles(filepath.Join(root, plan.Root), files); err != nil {
+		t.Fatal(err)
+	}
+	recs := BuildFileRecords(filepath.Join(root, plan.Root), plan, files, bps)
+
+	onDisk, err := os.ReadFile(filepath.Join(root, "svc.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := digestString(string(onDisk)); recs["svc.go"].Digest != want {
+		t.Errorf("record digests memory, not disk:\n  record %s\n  disk   %s",
+			recs["svc.go"].Digest[:16], want[:16])
+	}
+	if recs["svc.go"].Digest == digestString(compliantFile) {
+		t.Error("the record digests the submitted content; the writer appends a newline")
+	}
+	// And the decision that consumes it must therefore report unchanged.
+	d := onlyDecision(t, DecideRebuild(root, plan, recs, bps))
+	if d.RebuildVerdict != RebuildUnchanged {
+		t.Errorf("a freshly written file was judged %q: %s", d.RebuildVerdict, d.Detail)
+	}
+}
+
+// A generated file, kept verbatim, against the plan entry that declared it
+// non-compliant on a real orchestrator build.
+//
+// The rebuild decision indexed declarations by bare name and looked up the
+// plan's spelling directly, so every plan entry written in method notation read
+// as missing. registry.go declares all nine of these; it was regenerated
+// anyway, and eight other files failed the same way in the same run.
+func TestMethodNotationDoesNotForceARebuild(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "generated", "registry.go.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := PlannedFile{
+		Path: "internal/orchestrator/registry.go",
+		Declares: []string{
+			"(*Registry).ClaimNamespaces", "(*Registry).Counts",
+			"(*Registry).RoutingTable", "(*Registry).SetRoutes",
+			"(*Registry).Load", "(*Registry).Namespaces",
+			"(*Registry).RecalculateDomains", "(*Registry).RemoveRoutes",
+			"(*Registry).DomainStatuses",
+		},
+	}
+	if got := unmetObligations(string(b), f); got != "" {
+		t.Fatalf("a file that declares every one of these was called non-compliant: %s", got)
+	}
+}
+
+// And the check must still catch a real gap, or the fix has merely turned it
+// off. registry.go has Get, not GetAgent.
+func TestAGenuineGapIsStillCaught(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "generated", "registry.go.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := PlannedFile{
+		Path:     "internal/orchestrator/registry.go",
+		Declares: []string{"(*Registry).GetAgent"},
+	}
+	if got := unmetObligations(string(b), f); got == "" {
+		t.Fatal("a method the file does not declare was accepted")
 	}
 }

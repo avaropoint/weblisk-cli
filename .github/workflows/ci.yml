@@ -1,7 +1,21 @@
 # ── CI: Weblisk CLI ──────────────────────────────────────────
 #
 # Runs on every push and PR to main.
-# Validates that the CLI compiles cleanly on all target platforms.
+#
+# It used to validate only that the CLI compiles on every target platform. Two
+# things were wrong with that:
+#
+#   - It ran NO TESTS. Every guard in this repository — the rebuild decision
+#     table, the retry classifier, the declared-name rules, the reconciliation
+#     safety property — was enforced on one laptop and nowhere else.
+#   - It pinned Go 1.22 while go.mod requires 1.25, so it could not have built
+#     even the thing it claimed to be checking. The version is now read FROM
+#     go.mod, which is the only way the two cannot drift apart again.
+#
+# The blueprint corpus is checked out too, because this CLI's behaviour is
+# derived from it: the tests that read it were skipping silently here, which
+# reduced the suite without saying so. WL_REQUIRE_BLUEPRINTS=1 turns that skip
+# into a failure, so a corpus that fails to appear is reported.
 
 name: CI
 
@@ -16,18 +30,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: weblisk-cli
+
+      # A sibling checkout, matching the layout the tests resolve by default.
+      - uses: actions/checkout@v4
+        with:
+          repository: avaropoint/weblisk-blueprints
+          path: weblisk-blueprints
+          token: ${{ secrets.BLUEPRINTS_TOKEN || github.token }}
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version-file: weblisk-cli/go.mod
+
+      - name: Format
+        working-directory: weblisk-cli
+        run: |
+          unformatted=$(gofmt -l internal/ *.go)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change:"; echo "$unformatted"; exit 1
+          fi
 
       - name: Vet
+        working-directory: weblisk-cli
         run: go vet ./...
 
+      - name: Test
+        working-directory: weblisk-cli
+        env:
+          WL_BLUEPRINTS: ${{ github.workspace }}/weblisk-blueprints
+          WL_REQUIRE_BLUEPRINTS: "1"
+        run: go test -race ./...
+
       - name: Build (host)
+        working-directory: weblisk-cli
         run: go build -ldflags="-s -w -X main.version=ci" -o /dev/null .
 
       - name: Cross-compile check
+        working-directory: weblisk-cli
         env:
           CGO_ENABLED: "0"
         run: |

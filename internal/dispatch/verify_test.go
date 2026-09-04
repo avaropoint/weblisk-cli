@@ -3,6 +3,8 @@ package dispatch
 // The four outcomes, and the asymmetry that makes the third one honest.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -427,5 +429,65 @@ func TestStatusesAreCheckedAgainstTheBlueprintsOwnTable(t *testing.T) {
 		"\t\"NAMESPACE_CONFLICT\": {Code: \"NAMESPACE_CONFLICT\", Status: 409, Category: \"permanent\"},\n}\n"
 	if r := EvaluateChecklistAgainst([]ChecklistItem{assertion}, []GeneratedFile{{Path: "protocol.go", Content: keyed}}, spec)[0]; r.Outcome == OutcomeFailed {
 		t.Errorf("a keyed literal was misread: %s", r.Detail)
+	}
+}
+
+// The real generated hub's route registration, kept verbatim.
+//
+// The verifier accepted only a string literal as a mux pattern. This hub — like
+// any hub anyone would write — registers from a table of named constants, with
+// one local alias derived by strings.TrimSuffix and a loop that concatenates
+// the method onto the pattern. The verifier saw ZERO routes and refuted
+// twenty-one correct assertions with "no handler is registered for: GET
+// /v1/health".
+func TestRoutesResolveThroughConstantsAndConcatenation(t *testing.T) {
+	load := func(name, path string) GeneratedFile {
+		b, err := os.ReadFile(filepath.Join("testdata", "generated", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return GeneratedFile{Path: path, Content: string(b)}
+	}
+	ctx := BuildCheckContext([]GeneratedFile{
+		load("server.go.txt", "internal/orchestrator/server.go"),
+		load("paths.go.txt", "internal/protocol/paths.go"),
+	})
+
+	// Every path the refuted assertions asked about.
+	for _, want := range []string{
+		"/v1/health", "/v1/register", "/v1/channel", "/v1/services",
+		"/v1/audit", "/v1/rotate-key",
+		"/v1/admin/overview", "/v1/admin/operators/token",
+		"/v1/admin/operators/register",
+		"/v1/admin/agents",                   // a local alias via strings.TrimSuffix
+		"/v1/admin/agents/{name}/deregister", // that alias, concatenated
+	} {
+		if _, ok := ctx.Routes[want]; !ok {
+			t.Errorf("route %s was not found — the checklist would refute it", want)
+		}
+	}
+}
+
+// The resolution must not invent routes: an unreadable registration is recorded
+// as unread, so a report can say "cannot tell" instead of "absent".
+func TestAnUnreadableRegistrationIsRecordedNotIgnored(t *testing.T) {
+	ctx := BuildCheckContext([]GeneratedFile{{
+		Path: "main.go",
+		Content: `package main
+
+import "net/http"
+
+func routes(mux *http.ServeMux, patterns []string) {
+	for _, p := range patterns {
+		mux.HandleFunc(p, nil)
+	}
+}
+`,
+	}})
+	if len(ctx.Routes) != 0 {
+		t.Fatalf("invented %d route(s) from a pattern it cannot read", len(ctx.Routes))
+	}
+	if len(ctx.UnroutableCalls) == 0 {
+		t.Fatal("an unreadable registration was silently dropped — the report would say 'no handler' about code it could not parse")
 	}
 }

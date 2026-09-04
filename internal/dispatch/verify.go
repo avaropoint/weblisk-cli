@@ -51,6 +51,7 @@ import (
 	"go/token"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -78,6 +79,18 @@ type CheckContext struct {
 	// compare against the specification's own tables rather than against a copy
 	// of them written into the tooling.
 	Spec map[string]string
+	// Consts are string-valued constants and variables, by bare name and by
+	// package-qualified name. Route patterns are usually one of these.
+	Consts map[string]string
+	// ambiguousConst records bare names declared with different values in more
+	// than one package, so a bare lookup cannot silently pick a winner.
+	ambiguousConst map[string]bool
+	// UnroutableCalls are mux registrations whose pattern could not be resolved
+	// to a string. They are the difference between "this hub registers nothing"
+	// and "this tool could not read how it registers" — and a check MUST report
+	// the second as a gap in its own knowledge rather than as a fault in the
+	// artifact.
+	UnroutableCalls []string
 }
 
 // Field is one struct field and what it serialises as.
@@ -98,15 +111,17 @@ func BuildCheckContextWith(files []GeneratedFile, spec map[string]string) *Check
 
 func BuildCheckContext(files []GeneratedFile) *CheckContext {
 	ctx := &CheckContext{
-		Files:      files,
-		Fields:     map[string][]Field{},
-		Values:     map[string][]string{},
-		Routes:     map[string]string{},
-		Imports:    map[string]string{},
-		OwnerOf:    map[string]string{},
-		Codes:      map[string]string{},
-		Registered: map[string]bool{},
-		CodeStatus: map[string]int{},
+		Files:          files,
+		Fields:         map[string][]Field{},
+		Values:         map[string][]string{},
+		Routes:         map[string]string{},
+		Imports:        map[string]string{},
+		OwnerOf:        map[string]string{},
+		Codes:          map[string]string{},
+		Registered:     map[string]bool{},
+		CodeStatus:     map[string]int{},
+		Consts:         map[string]string{},
+		ambiguousConst: map[string]bool{},
 	}
 	var all strings.Builder
 	for _, f := range files {
@@ -121,9 +136,260 @@ func BuildCheckContext(files []GeneratedFile) *CheckContext {
 		}
 		ctx.absorbGo(f)
 	}
+	// Constants, then routes. A route pattern is nearly always a named constant
+	// — often from another package — so neither pass can be folded into the
+	// per-file walk above without reading files in an order nobody controls.
+	// Repeated until it stops learning. A local alias can be written in terms
+	// of a constant declared in another file, and files are absorbed in
+	// whatever order the plan produced them — one pass would resolve the alias
+	// only when its dependency happened to come first.
+	for round := 0; round < 4; round++ {
+		before := len(ctx.Consts)
+		for _, f := range files {
+			if strings.HasSuffix(f.Path, ".go") {
+				ctx.absorbConsts(f)
+			}
+		}
+		if len(ctx.Consts) == before {
+			break
+		}
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f.Path, ".go") {
+			ctx.absorbRoutes(f)
+		}
+	}
 	ctx.Source = all.String()
 	sort.Strings(ctx.Paths)
 	return ctx
+}
+
+// absorbConsts records every string-valued constant and package-level variable,
+// under its bare name and its package-qualified name.
+//
+// A bare name declared with two different values in two packages is marked
+// ambiguous and will not resolve, because picking one would be a guess.
+func (c *CheckContext) absorbConsts(f GeneratedFile) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, f.Path, f.Content, parser.SkipObjectResolution)
+	if err != nil {
+		return
+	}
+	pkg := ""
+	if file.Name != nil {
+		pkg = file.Name.Name
+	}
+	record := func(name, val string) {
+		if pkg != "" {
+			c.Consts[pkg+"."+name] = val
+		}
+		if prior, seen := c.Consts[name]; seen && prior != val {
+			c.ambiguousConst[name] = true
+			return
+		}
+		c.Consts[name] = val
+	}
+	for _, d := range file.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				if val, err := strconv.Unquote(lit.Value); err == nil {
+					record(name.Name, val)
+				}
+			}
+		}
+	}
+	// Function-scope short declarations too. A route table is commonly built
+	// inside the function that returns it, and its local aliases —
+	// "agents := strings.TrimSuffix(protocol.PathAdminAgents, \"/\")" — are what
+	// the table's entries are written in terms of.
+	ast.Inspect(file, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || as.Tok != token.DEFINE {
+			return true
+		}
+		for i, lhs := range as.Lhs {
+			id, ok := lhs.(*ast.Ident)
+			if !ok || i >= len(as.Rhs) {
+				continue
+			}
+			if val, ok := c.evalString(as.Rhs[i]); ok {
+				record(id.Name, val)
+			}
+		}
+		return true
+	})
+}
+
+// absorbRoutes records the endpoints a file registers on a mux.
+//
+// # Why this resolves expressions
+//
+// It used to accept only a string literal as the first argument. A real
+// generated hub registers from a route table —
+//
+//	{pattern: protocol.PathAdminOverview, methods: ...}
+//	{pattern: agents + "/{name}", methods: ...}
+//	mux.HandleFunc(m.method+" "+rt.pattern, m.handler)
+//
+// — so the walk found no literal, recorded no routes, and the checklist
+// reported "no handler is registered for: GET /v1/health" about a hub that
+// registers it correctly. Twenty-one assertions were refuted that way in one
+// run, every one of them wrong.
+//
+// A check that cannot read the artifact must say so. Anything unresolved is
+// recorded in UnroutableCalls, so the difference between "absent" and "not
+// legible to this tool" survives to the report.
+func (c *CheckContext) absorbRoutes(f GeneratedFile) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, f.Path, f.Content, parser.SkipObjectResolution)
+	if err != nil {
+		return
+	}
+	// Composite-literal fields named "pattern"/"path"/"route" are how a route
+	// table states its endpoints, and the mux call itself only sees a variable.
+	ast.Inspect(file, func(n ast.Node) bool {
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		for _, elt := range cl.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			switch strings.ToLower(key.Name) {
+			case "pattern", "path", "route", "endpoint":
+				v, ok := c.evalString(kv.Value)
+				if ok && strings.HasPrefix(v, "/") {
+					c.recordRoute(v, f.Path)
+					continue
+				}
+				if !ok {
+					// A route table entry this tool cannot read. Recorded for
+					// the same reason as an unreadable mux call: the report must
+					// distinguish "absent" from "not legible here".
+					c.UnroutableCalls = append(c.UnroutableCalls, f.Path)
+				}
+			}
+		}
+		return true
+	})
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "HandleFunc", "Handle":
+			if len(call.Args) == 0 {
+				return true
+			}
+			if v, ok := c.evalString(call.Args[0]); ok {
+				c.recordRoute(v, f.Path)
+				return true
+			}
+			// Registered from a variable this tool cannot follow — a loop over a
+			// route table, most often. Recorded as unread, never as absent.
+			c.UnroutableCalls = append(c.UnroutableCalls, f.Path)
+		}
+		return true
+	})
+}
+
+// evalString resolves a constant string expression: a literal, a named
+// constant, a package-qualified constant, a parenthesised expression, or any
+// concatenation of those.
+//
+// It returns false rather than a partial answer. A route half-resolved is a
+// route this tool does not know, and the caller must be able to tell.
+func (c *CheckContext) evalString(e ast.Expr) (string, bool) {
+	switch v := e.(type) {
+	case *ast.BasicLit:
+		if v.Kind != token.STRING {
+			return "", false
+		}
+		s, err := strconv.Unquote(v.Value)
+		return s, err == nil
+	case *ast.Ident:
+		if c.ambiguousConst[v.Name] {
+			return "", false
+		}
+		s, ok := c.Consts[v.Name]
+		return s, ok
+	case *ast.SelectorExpr:
+		pkg, ok := v.X.(*ast.Ident)
+		if !ok {
+			return "", false
+		}
+		s, ok := c.Consts[pkg.Name+"."+v.Sel.Name]
+		return s, ok
+	case *ast.ParenExpr:
+		return c.evalString(v.X)
+	case *ast.CallExpr:
+		// The two string helpers a generated route table actually uses to derive
+		// one path from another:
+		//
+		//	agents := strings.TrimSuffix(protocol.PathAdminAgents, "/")
+		//
+		// Folded because they are pure and total, not because this is becoming
+		// an interpreter — anything else stays unresolved and is reported as
+		// unread.
+		sel, ok := v.Fun.(*ast.SelectorExpr)
+		if !ok || len(v.Args) != 2 {
+			return "", false
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "strings" {
+			return "", false
+		}
+		a, aok := c.evalString(v.Args[0])
+		b, bok := c.evalString(v.Args[1])
+		if !aok || !bok {
+			return "", false
+		}
+		switch sel.Sel.Name {
+		case "TrimSuffix":
+			return strings.TrimSuffix(a, b), true
+		case "TrimPrefix":
+			return strings.TrimPrefix(a, b), true
+		}
+		return "", false
+	case *ast.BinaryExpr:
+		if v.Op != token.ADD {
+			return "", false
+		}
+		l, lok := c.evalString(v.X)
+		r, rok := c.evalString(v.Y)
+		if !lok || !rok {
+			return "", false
+		}
+		return l + r, true
+	}
+	return "", false
 }
 
 // absorbGo records everything one Go file contributes to the context.
@@ -216,30 +482,9 @@ func (c *CheckContext) absorbGo(f GeneratedFile) {
 		return true
 	})
 
-	// Routed paths, from the AST rather than a regex over text, so a path in a
-	// comment or an error message is not mistaken for a route.
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		switch sel.Sel.Name {
-		case "HandleFunc", "Handle":
-			if len(call.Args) == 0 {
-				return true
-			}
-			lit, ok := call.Args[0].(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			c.recordRoute(strings.Trim(lit.Value, `"`), f.Path)
-		}
-		return true
-	})
+	// Routes are NOT collected here. A route pattern is frequently a constant
+	// declared in another file — often another package — so it cannot be
+	// resolved until every file has been read. See absorbRoutes.
 }
 
 // recordRoute normalises a mux pattern into method+path.
@@ -662,6 +907,17 @@ var structuralChecks = []structuralCheck{
 			}
 			if len(missing) == 0 {
 				return true, "", nil
+			}
+			// A mux registration this tool could not read is not evidence of an
+			// absent handler. Saying "no handler is registered" about a hub whose
+			// route table is a loop over constants is a confident zero, and it
+			// refuted twenty-one correct assertions in one run.
+			if len(c.UnroutableCalls) > 0 {
+				return false, "cannot tell whether a handler is registered for " +
+						strings.Join(missing, ", ") + " — " +
+						plural(len(c.UnroutableCalls), "mux registration") +
+						" in " + firstUnroutable(c) + " could not be resolved to a path",
+					routeHosts(c)
 			}
 			// Nothing owns a route that does not exist, so the blame is the file
 			// the plan put the HTTP surface in — found by where the other routes
@@ -1139,4 +1395,25 @@ func environmentNames(file *ast.File) map[string]bool {
 		return true
 	})
 	return out
+}
+
+// firstUnroutable names one file with an unreadable registration, so the
+// message points somewhere rather than describing a category.
+func firstUnroutable(c *CheckContext) string {
+	seen := map[string]bool{}
+	var files []string
+	for _, f := range c.UnroutableCalls {
+		if !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
+	sort.Strings(files)
+	if len(files) == 0 {
+		return "the artifact"
+	}
+	if len(files) == 1 {
+		return files[0]
+	}
+	return fmt.Sprintf("%s and %d other file(s)", files[0], len(files)-1)
 }

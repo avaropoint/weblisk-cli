@@ -18,7 +18,40 @@ import (
 	"testing"
 )
 
-const blueprintsRoot = "/Users/lwilson/Projects/Avaropoint/weblisk-blueprints"
+// blueprintsRoot locates the corpus these tests check.
+//
+// # Why this is resolved and not a constant
+//
+// It was an absolute path on one machine. CI checks out only this repository,
+// so the path did not exist there, readBlueprints called t.Skipf, and EVERY
+// corpus test skipped silently — the neutrality rule, the declared-name rules,
+// the protected-endpoint derivation, all of it. They protected one laptop.
+//
+// Resolution order, most explicit first:
+//
+//	WL_BLUEPRINTS        — set by CI after checking the corpus out
+//	../weblisk-blueprints — the sibling layout a developer actually has
+//	./blueprints          — a vendored or symlinked copy
+//
+// WL_REQUIRE_BLUEPRINTS=1 turns a skip into a failure. CI sets it, so a corpus
+// that fails to check out is reported rather than quietly reducing the suite.
+func blueprintsRootDir() string {
+	if p := strings.TrimSpace(os.Getenv("WL_BLUEPRINTS")); p != "" {
+		return p
+	}
+	for _, candidate := range []string{
+		filepath.Join("..", "..", "..", "weblisk-blueprints"),
+		filepath.Join("..", "..", "blueprints"),
+	} {
+		if fi, err := os.Stat(filepath.Join(candidate, "schemas", "common.md")); err == nil && !fi.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// requireBlueprints reports whether an absent corpus is a failure.
+func requireBlueprints() bool { return os.Getenv("WL_REQUIRE_BLUEPRINTS") == "1" }
 
 // specificationDirs hold blueprints that state requirements.
 var specificationDirs = []string{"protocol", "architecture", "patterns", "agents"}
@@ -44,9 +77,20 @@ var facilityBlueprints = map[string]bool{
 func readBlueprints(t *testing.T, dirs []string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
+	root := blueprintsRootDir()
+	if root == "" {
+		if requireBlueprints() {
+			t.Fatal("the blueprint corpus is not present and WL_REQUIRE_BLUEPRINTS=1 — " +
+				"set WL_BLUEPRINTS or check out weblisk-blueprints beside this repository")
+		}
+		t.Skip("blueprint corpus not found; set WL_BLUEPRINTS to check it")
+	}
 	for _, d := range dirs {
-		entries, err := os.ReadDir(filepath.Join(blueprintsRoot, d))
+		entries, err := os.ReadDir(filepath.Join(root, d))
 		if err != nil {
+			if requireBlueprints() {
+				t.Fatalf("the blueprint corpus is incomplete: %v", err)
+			}
 			t.Skipf("blueprints not present: %v", err)
 		}
 		for _, e := range entries {
@@ -54,7 +98,7 @@ func readBlueprints(t *testing.T, dirs []string) map[string]string {
 				continue
 			}
 			rel := d + "/" + e.Name()
-			b, err := os.ReadFile(filepath.Join(blueprintsRoot, rel))
+			b, err := os.ReadFile(filepath.Join(root, rel))
 			if err != nil {
 				continue
 			}
@@ -108,7 +152,7 @@ func TestEveryPlatformBlueprintCarriesAPrimitiveMapping(t *testing.T) {
 	// function come from. rust.md, node.md and cloudflare.md answered neither, so
 	// a hub generated for any of them had no stated way to satisfy
 	// protocol/identity at all — and nothing said so.
-	entries, err := os.ReadDir(filepath.Join(blueprintsRoot, "platforms"))
+	entries, err := os.ReadDir(filepath.Join(blueprintsRootDir(), "platforms"))
 	if err != nil {
 		t.Skip("blueprints not present")
 	}
@@ -118,7 +162,7 @@ func TestEveryPlatformBlueprintCarriesAPrimitiveMapping(t *testing.T) {
 			continue
 		}
 		seen++
-		b, err := os.ReadFile(filepath.Join(blueprintsRoot, "platforms", e.Name()))
+		b, err := os.ReadFile(filepath.Join(blueprintsRootDir(), "platforms", e.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -146,7 +190,7 @@ func TestPlatformBlueprintsDoNotRestateRequirements(t *testing.T) {
 	// parameters, making a second normative copy of a protocol/identity section
 	// one directory away. Naming the module is translation; repeating the
 	// standard is duplication.
-	entries, err := os.ReadDir(filepath.Join(blueprintsRoot, "platforms"))
+	entries, err := os.ReadDir(filepath.Join(blueprintsRootDir(), "platforms"))
 	if err != nil {
 		t.Skip("blueprints not present")
 	}
@@ -168,7 +212,7 @@ func TestPlatformBlueprintsDoNotRestateRequirements(t *testing.T) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || e.Name() == "README.md" {
 			continue
 		}
-		b, _ := os.ReadFile(filepath.Join(blueprintsRoot, "platforms", e.Name()))
+		b, _ := os.ReadFile(filepath.Join(blueprintsRootDir(), "platforms", e.Name()))
 		prose := stripFences(string(b))
 		for _, re := range []*regexp.Regexp{reParams, reSizes} {
 			for _, m := range re.FindAllString(prose, -1) {
@@ -305,7 +349,7 @@ func TestPlatformBlueprintsNameNoSpecificComponent(t *testing.T) {
 	// domains/seo, in structure listings, build commands and test fixtures.
 	// Generation reads these documents whole, so a named component is an
 	// invitation to build it.
-	entries, err := os.ReadDir(filepath.Join(blueprintsRoot, "platforms"))
+	entries, err := os.ReadDir(filepath.Join(blueprintsRootDir(), "platforms"))
 	if err != nil {
 		t.Skip("blueprints not present")
 	}
@@ -315,7 +359,7 @@ func TestPlatformBlueprintsNameNoSpecificComponent(t *testing.T) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || e.Name() == "README.md" {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(blueprintsRoot, "platforms", e.Name()))
+		b, err := os.ReadFile(filepath.Join(blueprintsRootDir(), "platforms", e.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}

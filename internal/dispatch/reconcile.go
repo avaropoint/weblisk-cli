@@ -101,14 +101,51 @@ func RecordWritten(root string, plan *Plan, files []GeneratedFile) {
 
 // RecordWrittenWith also persists what each file was generated from.
 func RecordWrittenWith(root string, plan *Plan, files []GeneratedFile, blueprints map[string]string) {
+	seen := map[string]bool{}
 	paths := make([]string, 0, len(files))
 	for _, f := range files {
-		paths = append(paths, f.Path)
+		clean := filepath.ToSlash(filepath.Clean(f.Path))
+		if !seen[clean] {
+			seen[clean] = true
+			paths = append(paths, clean)
+		}
+	}
+	// Ownership is not forgotten because a plan stopped naming a file.
+	//
+	// The manifest is the ONLY evidence that a file on disk is generation's to
+	// remove — reconcile leaves anything else alone, correctly. Replacing the
+	// list wholesale meant a file written by one plan and dropped by the next
+	// vanished from the record while still sitting on disk, so it became
+	// indistinguishable from a hand-written file and could never be cleaned up.
+	//
+	// Reconcile runs BEFORE generation and deletes what this plan drops, so in
+	// the ordinary case this union adds nothing. It matters when a run is
+	// interrupted between writing files and recording them: without it, that
+	// run's output is orphaned permanently.
+	//
+	// Only paths that still EXIST are carried forward, so the manifest cannot
+	// grow without bound as a tenant is restructured.
+	dir := filepath.Join(root, plan.Root)
+	if b, err := os.ReadFile(manifestName(root, plan.Target)); err == nil {
+		var prior writtenManifest
+		if json.Unmarshal(b, &prior) == nil {
+			for _, p := range prior.Files {
+				clean := filepath.ToSlash(filepath.Clean(p))
+				if seen[clean] {
+					continue
+				}
+				if _, statErr := os.Stat(filepath.Join(dir, clean)); statErr != nil {
+					continue // gone; nothing left to own
+				}
+				seen[clean] = true
+				paths = append(paths, clean)
+			}
+		}
 	}
 	sort.Strings(paths)
 	var recs []FileRecord
 	if blueprints != nil {
-		byPath := BuildFileRecords(plan, files, blueprints)
+		byPath := BuildFileRecords(filepath.Join(root, plan.Root), plan, files, blueprints)
 		for _, p := range paths {
 			if r, ok := byPath[p]; ok {
 				recs = append(recs, r)
@@ -165,38 +202,91 @@ func ReconcileTarget(root string, plan *Plan, st *TenantState) (Reconciliation, 
 	// distinction announced itself.
 	protected := st.Protected()
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	// Walked recursively, because a plan's paths are relative and nested.
+	//
+	// This used to call os.ReadDir on plan.Root and skip every entry that was a
+	// directory. plan.Root is "." — the tenant IS the module root — so it saw
+	// go.mod, cmd/ and internal/, skipped the two directories, and examined
+	// nothing. Reconciliation has therefore never removed a stale file since
+	// platforms/go specified a module with cmd/ and internal/ packages.
+	//
+	// It announced itself as a build failure: one plan named the audit file
+	// auditlog.go and the next named it audit.go, so both existed and the
+	// package declared Auditor twice. Eleven redeclaration errors, none of them
+	// a fault in any generated file.
+	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
 			return rec, nil
 		}
 		return rec, err
 	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || strings.HasPrefix(name, ".") {
-			continue
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, werr error) error {
+		if werr != nil {
+			return werr
 		}
-		clean := filepath.Clean(name)
-		if planned[clean] {
-			continue
+		if info.IsDir() {
+			// Never descend into what generation does not own. bin/ is build
+			// output, blueprints/ is the corpus, and .weblisk holds the keys.
+			switch base := filepath.Base(path); {
+			case path == dir:
+				return nil
+			case strings.HasPrefix(base, "."), base == "bin", base == "blueprints",
+				base == "node_modules", base == "vendor", base == "target":
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		if !previous[clean] {
-			rec.Foreign = append(rec.Foreign, name)
-			continue
+		rel, rerr := filepath.Rel(dir, path)
+		if rerr != nil {
+			return nil
 		}
-		if protected[clean] {
-			rec.Retained = append(rec.Retained, name)
-			continue
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if strings.HasPrefix(filepath.Base(rel), ".") {
+			return nil
 		}
-		// Written by a previous generation, absent from this plan.
-		if err := os.Remove(filepath.Join(dir, name)); err != nil {
-			return rec, err
+		if planned[rel] {
+			return nil
 		}
-		rec.Stale = append(rec.Stale, name)
+		if !previous[rel] {
+			// Not ours to remove. A file this target cannot prove it wrote is
+			// reported and left alone — that property is what makes the walk
+			// safe to widen, and it must not be relaxed.
+			rec.Foreign = append(rec.Foreign, rel)
+			return nil
+		}
+		if protected[rel] {
+			rec.Retained = append(rec.Retained, rel)
+			return nil
+		}
+		// Written by a previous generation of THIS target, absent from this plan.
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		rec.Stale = append(rec.Stale, rel)
+		return nil
+	})
+	if err != nil {
+		return rec, err
 	}
 	sort.Strings(rec.Stale)
 	sort.Strings(rec.Foreign)
 	sort.Strings(rec.Retained)
 	return rec, nil
+}
+
+// PriorPaths is the set of files the manifest records this target as owning.
+//
+// Exported so the ownership rule can be asserted directly: reconcile removes
+// only what appears here, so a test that checks deletion behaviour without
+// checking what is claimed is testing half the mechanism.
+func PriorPaths(root, target string) []string {
+	b, err := os.ReadFile(manifestName(root, target))
+	if err != nil {
+		return nil
+	}
+	var m writtenManifest
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	return m.Files
 }

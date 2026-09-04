@@ -8,7 +8,9 @@ func TestTokenEndpointIsRequiredOfTheOrchestrator(t *testing.T) {
 	req := GatherRequirements(g, "orchestrator")
 	var found bool
 	for _, e := range req.Endpoints {
-		if e == "POST /v1/admin/operators/token" { found = true }
+		if e == "POST /v1/admin/operators/token" {
+			found = true
+		}
 	}
 	if !found {
 		t.Errorf("the token endpoint is not required of the orchestrator; endpoints=%v", req.Endpoints)

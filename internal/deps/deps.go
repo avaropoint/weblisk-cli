@@ -74,10 +74,10 @@ func auditProject(root string, jsonOut bool) error {
 
 	if jsonOut {
 		results := map[string]any{
-			"lockfiles_found":   found,
-			"vulnerabilities":   0,
-			"new_dependencies":  0,
-			"status":            "pass",
+			"lockfiles_found":  found,
+			"vulnerabilities":  0,
+			"new_dependencies": 0,
+			"status":           "pass",
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

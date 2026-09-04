@@ -64,7 +64,7 @@ func Build(root string, opts Options) error {
 	if cfg.CDN != "" {
 		count := rewriteImportMaps(distDir, cfg.CDN, cfg.Lib)
 		if count > 0 {
-		fmt.Printf("  [ok] %d pages rewritten to %s\n", count, cfg.CDN)
+			fmt.Printf("  [ok] %d pages rewritten to %s\n", count, cfg.CDN)
 		}
 	}
 
@@ -185,8 +185,6 @@ func rewriteImportMaps(dir, cdn, lib string) int {
 	})
 	return count
 }
-
-
 
 type fileEntry struct {
 	abs string

@@ -31,6 +31,10 @@ func Handle(args []string) error {
 		PrintHelp()
 		return nil
 	}
+	if err := RefusePassphraseInArgv(args); err != nil {
+		return err
+	}
+	args = takeKeysDir(args)
 
 	switch args[0] {
 	case "init":
@@ -41,6 +45,10 @@ func Handle(args []string) error {
 		return handleToken(args[1:])
 	case "rotate":
 		return handleRotate(args[1:])
+	case "connect":
+		// Connecting needs an ADDRESS, not a tenant directory. A hub on another
+		// host is reachable on the same terms as one next door.
+		return handleConnect(args[1:])
 	case "help", "--help", "-h":
 		PrintHelp()
 		return nil
@@ -516,14 +524,43 @@ func handleRotate(args []string) error {
 
 // ── Helpers ──────────────────────────────────────────────────
 
+// EnvKeysDir names the directory holding an operator identity.
+//
+// Parameterised because one machine may serve SEVERAL operator identities. A
+// console with more than one signed-in account cannot share a single
+// ~/.weblisk/keys/operator.key: the second account would either use the first
+// account's identity or overwrite it, and both are worse than failing. An
+// identity is a person, so it needs a location per person.
+//
+// architecture/admin: "A subject who operates several hubs holds one
+// self-generated identity and a separate credential attested by each hub." The
+// identity is scoped to the subject, not to the machine and not to the tenant.
+const EnvKeysDir = "WL_KEYS_DIR"
+
+// keysDir is set by --keys-dir, which takes precedence over the environment.
+var keysDir string
+
+// SetKeysDir points subsequent operations at a specific identity.
+func SetKeysDir(dir string) { keysDir = dir }
+
 func keysDirectory() string {
+	if keysDir != "" {
+		return keysDir
+	}
+	if d := os.Getenv(EnvKeysDir); d != "" {
+		return d
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".weblisk", "keys")
 }
 
+// tokenFilePath sits beside the identity that obtained it.
+//
+// Beside, not in a fixed location: a token belongs to one operator at one
+// orchestrator, and a shared path would have a second account read the first
+// account's token and act as them.
 func tokenFilePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".weblisk", "token")
+	return filepath.Join(keysDirectory(), "token")
 }
 
 // cachedKey holds the decrypted operator key for the life of the process.
@@ -661,6 +698,11 @@ func RefreshToken() (string, error) {
 // it for a token. Exported so a caller that holds no token file — a first
 // connection from a console — can obtain one.
 func RequestToken(orchURL, name string) (token string, expiresAt int64, err error) {
+	// Before the key is even unlocked. A credential that must not cross this
+	// transport must not be produced for it either.
+	if terr := CheckCredentialTransport(orchURL); terr != nil {
+		return "", 0, terr
+	}
 	privKey, err := loadPrivateKey()
 	if err != nil {
 		return "", 0, err
@@ -702,7 +744,14 @@ func RequestToken(orchURL, name string) (token string, expiresAt int64, err erro
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 {
-		return "", 0, fmt.Errorf("token request refused (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		// The status is carried, not flattened into prose, because callers must
+		// tell these apart. A 403 is "not approved yet" and a 404 or 405 is "this
+		// hub does not implement the endpoint" — reporting the second as the
+		// first told someone to wait for an approval that was never coming.
+		return "", 0, &TokenError{
+			Status: resp.StatusCode,
+			Body:   strings.TrimSpace(string(raw)),
+		}
 	}
 	var out struct {
 		Token     string `json:"token"`
@@ -991,3 +1040,131 @@ func readPassphrase() (string, error) {
 	}
 	return strings.TrimRight(line, "\r\n"), nil
 }
+
+// RefusePassphraseInArgv rejects a passphrase supplied on the command line.
+//
+// argv is readable by every process on the machine — `ps` shows it, and on
+// Linux so does /proc/<pid>/cmdline. A passphrase there is disclosed to any
+// local user for the lifetime of the command and, on many systems, to the
+// shell history file as well.
+//
+// protocol/identity requires the passphrase to "arrive over a channel that does
+// not echo it, does not persist it and does not log it". argv fails all three,
+// so it is refused with the alternative rather than accepted with a warning: a
+// warning on a credential path is a credential leak with a note attached.
+func RefusePassphraseInArgv(args []string) error {
+	for _, a := range args {
+		lower := strings.ToLower(a)
+		for _, bad := range []string{"--passphrase=", "--password=", "--pass="} {
+			if strings.HasPrefix(lower, bad) {
+				return fmt.Errorf("a passphrase must not be passed on the command line — " +
+					"argv is readable by any process on this machine\n" +
+					"  Supply it on stdin instead:  printf '%%s\\n' \"$PASSPHRASE\" | weblisk operator ...")
+			}
+		}
+		if lower == "--passphrase" || lower == "--password" || lower == "--pass" {
+			return fmt.Errorf("a passphrase must not be passed on the command line — " +
+				"argv is readable by any process on this machine\n" +
+				"  Supply it on stdin instead")
+		}
+	}
+	return nil
+}
+
+// takeKeysDir consumes --keys-dir from args and points operations at it.
+func takeKeysDir(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--keys-dir" && i+1 < len(args):
+			SetKeysDir(args[i+1])
+			i++
+		case strings.HasPrefix(args[i], "--keys-dir="):
+			SetKeysDir(strings.SplitN(args[i], "=", 2)[1])
+		default:
+			out = append(out, args[i])
+		}
+	}
+	return out
+}
+
+// handleConnect runs `weblisk operator connect --orch <url>`.
+func handleConnect(args []string) error {
+	orch, name, jsonOut := "", "", false
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--orch" && i+1 < len(args):
+			i++
+			orch = args[i]
+		case strings.HasPrefix(args[i], "--orch="):
+			orch = strings.SplitN(args[i], "=", 2)[1]
+		case args[i] == "--name" && i+1 < len(args):
+			i++
+			name = args[i]
+		case strings.HasPrefix(args[i], "--name="):
+			name = strings.SplitN(args[i], "=", 2)[1]
+		case args[i] == "--json":
+			jsonOut = true
+		}
+	}
+	if strings.TrimSpace(orch) == "" {
+		return fmt.Errorf("--orch <url> is required — connecting needs the hub's address")
+	}
+	if name == "" {
+		name = loadOperatorName()
+	}
+	if !jsonOut {
+		fmt.Print("  Passphrase: ")
+	}
+	pass, err := readPassphrase()
+	if err != nil {
+		return fmt.Errorf("reading passphrase: %w", err)
+	}
+	if !jsonOut {
+		fmt.Println()
+	}
+
+	res, cerr := Connect(orch, name, pass)
+	if cerr != nil {
+		return cerr
+	}
+	if jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(res)
+	}
+	fmt.Println()
+	for _, s := range res.Steps {
+		fmt.Printf("  %s\n", s)
+	}
+	switch res.State {
+	case ConnectedState:
+		fmt.Printf("\n  [ok] Connected to %s as %s\n", res.Address, res.Operator)
+	case PendingApprovalState:
+		fmt.Printf("\n  Registered with %s. %s\n", res.Address, res.Detail)
+	default:
+		fmt.Printf("\n  Could not connect to %s\n  %s\n", res.Address, res.Detail)
+	}
+	fmt.Println()
+	if res.State == UnreachableState {
+		return fmt.Errorf("not connected")
+	}
+	return nil
+}
+
+// TokenError is a refusal from the token endpoint, with its status.
+type TokenError struct {
+	Status int
+	Body   string
+}
+
+func (e *TokenError) Error() string {
+	return fmt.Sprintf("token request refused (HTTP %d): %s", e.Status, e.Body)
+}
+
+// NotApproved reports a hub that knows this operator and has not approved it.
+func (e *TokenError) NotApproved() bool { return e.Status == 401 || e.Status == 403 }
+
+// EndpointAbsent reports a hub that does not serve the token endpoint at all —
+// it predates that part of the protocol.
+func (e *TokenError) EndpointAbsent() bool { return e.Status == 404 || e.Status == 405 }

@@ -465,7 +465,72 @@ func BuildAndRepair(provider Provider, plan *Plan, root, platBP string, files []
 			return result, rebuildList(content, order), nil
 		}
 
+		// A contract between two files cannot be repaired one file at a time.
+		//
+		// An unsatisfied interface, a symbol declared twice, a method that does
+		// not match — the error names one file and the fix needs both. Repaired
+		// singly, each rewrite is locally reasonable and the pair never agrees:
+		// a real build reported the same three errors on rounds 3, 4 and 5 and
+		// stopped, having been asked five times to fix a disagreement while given
+		// authority over one side of it.
+		//
+		// So the round begins by resolving errors to the files they implicate and
+		// repairing any group of more than one TOGETHER. Groups are handled first
+		// because a resolved contract usually removes the single-file errors that
+		// were its symptoms.
+		repaired := map[string]bool{}
 		for _, path := range targets {
+			if repaired[path] {
+				continue
+			}
+			errsFor := append(append([]string{}, byFile[path]...), byFile[""]...)
+			group := ImplicatedFiles(errsFor, content, plan)
+			if len(group) < 2 {
+				continue
+			}
+			var planned []PlannedFile
+			for _, gp := range group {
+				planned = append(planned, byPath[gp])
+			}
+			onProgress(Progress{Path: strings.Join(group, " + "), Status: "repairing", Attempt: round,
+				Detail: "together: " + firstLine(byFile[path])})
+
+			allErrs := map[string]bool{}
+			var merged []string
+			for _, gp := range group {
+				for _, e := range byFile[gp] {
+					if !allErrs[e] {
+						allErrs[e] = true
+						merged = append(merged, e)
+					}
+				}
+			}
+			decls := map[string][]Declaration{}
+			for _, pth := range order {
+				if d := ExtractDeclarations(pth, content[pth]); len(d) > 0 {
+					decls[pth] = d
+				}
+			}
+			prompt := repairGroupPrompt(planned, plan, content, merged, byFile[""], decls, order, platBP)
+			got, gerr := askForFiles(provider, prompt, planned)
+			if gerr != nil {
+				// Not fatal. A group repair that comes back incomplete falls
+				// through to the single-file path, which is worse at this fault and
+				// better than nothing.
+				onProgress(Progress{Path: strings.Join(group, " + "), Status: "failed", Attempt: round,
+					Detail: gerr.Error()})
+				continue
+			}
+			for _, g := range got {
+				content[g.Path] = g.Content
+				repaired[g.Path] = true
+			}
+		}
+
+		for _, path := range targets {
+			if repaired[path] {
+				continue
+			}
 			f := byPath[path]
 			onProgress(Progress{Path: path, Status: "repairing", Attempt: round,
 				Detail: firstLine(byFile[path])})
