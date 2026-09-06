@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"github.com/avaropoint/weblisk-cli/internal/dispatch"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,6 +102,16 @@ func Run(root string) error {
 			warnings++
 		}
 	}
+
+	// ── Which blueprints this project reads ────────────────────
+
+	// Doctor validated blueprint YAML and never said WHICH blueprints. That is
+	// the question behind most of the confusing answers: a build reads local
+	// `blueprints/` -> WL_BLUEPRINT_SOURCES -> the shared cache, first hit wins,
+	// and the cache tracks the PUBLISHED blueprints. Somebody editing a checkout
+	// this project cannot see gets a hub built to a specification they have
+	// already replaced, with nothing to indicate it. See dispatch.AnnounceSources.
+	dispatch.AnnounceSources(dispatch.ResolveSources(root))
 
 	// ── Blueprint YAML validation ──────────────────────────────
 
