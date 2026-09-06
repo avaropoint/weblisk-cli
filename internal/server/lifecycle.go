@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -63,8 +62,9 @@ func StartDetached(root, component string, port int, extra []string) (RunState, 
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.Stdin = nil
 	// Its own process group, so it survives the CLI exiting and a Ctrl-C in the
-	// terminal that launched it does not take the hub down with it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// terminal that launched it does not take the hub down with it. Expressed
+	// per platform — see process_unix.go and process_windows.go.
+	cmd.SysProcAttr = detachAttrs()
 
 	if err := cmd.Start(); err != nil {
 		return RunState{}, fmt.Errorf("starting %s: %w", component, err)
@@ -105,9 +105,9 @@ func Stop(root, component string) error {
 	if err != nil {
 		return err
 	}
-	// SIGTERM first. architecture/agent requires an orderly shutdown, and that
+	// Asked first. architecture/agent requires an orderly shutdown, and that
 	// path only exists if the component is asked rather than killed.
-	if err := p.Signal(syscall.SIGTERM); err != nil {
+	if err := requestStop(p); err != nil {
 		return fmt.Errorf("signalling %s (pid %d): %w", component, st.PID, err)
 	}
 
@@ -122,7 +122,7 @@ func Stop(root, component string) error {
 
 	// It did not go. Reported rather than silent: a component that ignores
 	// SIGTERM has a bug worth knowing about, and killing it quietly hides that.
-	_ = p.Signal(syscall.SIGKILL)
+	_ = forceStop(p)
 	clearRunState(root, component)
 	return fmt.Errorf("%s did not shut down within %s and was killed — its graceful shutdown path did not complete",
 		component, stopGrace)

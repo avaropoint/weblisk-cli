@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -101,8 +100,8 @@ func clearRunState(root, component string) {
 
 // alive reports whether a pid names a running process.
 //
-// Signal 0 performs the existence and permission checks without delivering
-// anything, which is the portable way to ask.
+// How that is asked differs by platform and has no common spelling — see
+// process_unix.go and process_windows.go.
 func alive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -111,7 +110,7 @@ func alive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return p.Signal(syscall.Signal(0)) == nil
+	return processAlive(p)
 }
 
 // StatusOf reports what is known about a component.
