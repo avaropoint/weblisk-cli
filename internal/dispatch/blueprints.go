@@ -184,13 +184,40 @@ func describeCache(dir, kind, origin string) Source {
 }
 
 // revisionOf returns the short commit of a directory that is a git checkout.
+// revisionOf identifies the blueprint content a hub was generated from.
+//
+// # Why "-dirty" is not cosmetic here
+//
+// This returned HEAD alone. A tenant was generated from a working tree with
+// six thousand lines of uncommitted edits and the run recorded
+//
+//	blueprints (project @79a5280) — 8 of 8
+//
+// which names a commit the content did not come from. An auditor who checks out
+// 79a5280 gets a different corpus and cannot reproduce the artifact — and
+// architecture/cli requires the blueprint version a hub was generated from to
+// be part of its provenance.
+//
+// A hash that is wrong is worse than no hash, because it is acted on. The
+// git convention for this is a "-dirty" suffix, and it is the honest answer:
+// the artifact came from a tree that has no name.
 func revisionOf(dir string) string {
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "--short", "HEAD")
 	outBytes, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(outBytes))
+	rev := strings.TrimSpace(string(outBytes))
+	if rev == "" {
+		return ""
+	}
+	// Tracked modifications AND untracked files both count: a blueprint that
+	// has not been added yet still reached the model.
+	status, serr := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	if serr == nil && strings.TrimSpace(string(status)) != "" {
+		return rev + "-dirty"
+	}
+	return rev
 }
 
 func stampTime(dir string) time.Time {
@@ -395,4 +422,46 @@ func DomainControllerBlueprint(name string) string {
 // PatternBlueprint returns the blueprint path for a pattern.
 func PatternBlueprint(name string) string {
 	return "patterns/" + name + ".md"
+}
+
+// AnnounceSources states which blueprints a build is about to read.
+//
+// # Why a build must say this out loud
+//
+// Blueprints resolve local checkout → custom sources → shared cache, first hit
+// wins, and until this existed a build said nothing about which it used. On
+// 2026-09-06 that produced the quietest possible failure: a week of blueprint
+// work sat in a local repository forty commits ahead of its remote, the shared
+// cache faithfully refreshed itself FROM that remote, and every hub generated
+// outside the local checkout was built and conformance-repaired against the old
+// specification. Nothing was broken. Nothing said anything. The work simply did
+// not reach a single build.
+//
+// Reported before generation rather than after, because after is a diagnosis
+// and before is a decision.
+func AnnounceSources(srcs []Source) {
+	if len(srcs) == 0 {
+		return
+	}
+	fmt.Println("  Blueprints:")
+	onlyCore := true
+	for _, s := range srcs {
+		// Describe already carries the revision and the fetch age; adding a
+		// second rendering of the same fact printed "fetched 1h ago — fetched
+		// 1 hours ago".
+		fmt.Printf("    %s\n", s.Describe())
+		if s.Kind != "core" {
+			onlyCore = false
+		}
+	}
+	// The case worth naming. A cache is not stale by being a cache — it is the
+	// normal source — but somebody editing blueprints in a checkout this build
+	// cannot see is about to spend minutes generating against work they have
+	// already replaced.
+	if onlyCore {
+		fmt.Println("    note: reading the shared cache, which tracks the published blueprints.")
+		fmt.Println("          Local edits are only used from a `blueprints/` directory in this")
+		fmt.Println("          tenant, or a path in WL_BLUEPRINT_SOURCES.")
+	}
+	fmt.Println()
 }

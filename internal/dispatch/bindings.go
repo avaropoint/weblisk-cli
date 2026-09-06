@@ -82,6 +82,21 @@ type Binding struct {
 // uses ParseBindings and refuses on error: an unparsed contract is one nobody
 // read.
 func ExtractBindings(blueprint string) []Binding {
+	// A DECLARATION supersedes the `## Dependencies` section it replaced.
+	//
+	// A migrated blueprint removes that section in the same edit that adds the
+	// declaration — leaving both is two statements of one dependency, and the
+	// generator reproduces faults faithfully, so fixing one copy leaves the
+	// other wrong.
+	//
+	// Answering here rather than at each call site means every caller —
+	// requirements gathering, buildable-component derivation, the validator —
+	// gets the same answer without knowing which form a blueprint uses. Three
+	// callers read the section directly and returned nothing the moment the
+	// orchestrator migrated.
+	if d, err := ExtractDeclaration("", blueprint); err == nil && d != nil {
+		return d.Bindings()
+	}
 	bs, _ := ParseBindings("", blueprint)
 	return bs
 }

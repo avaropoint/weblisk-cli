@@ -9,29 +9,6 @@ import (
 	"testing"
 )
 
-// schemas/architecture requires an Operation for every endpoint row. A row
-// without one is a gap the pipeline must report rather than fill in — so this
-// asserts the corpus has none.
-func TestEveryDeclaredEndpointHasAnOperation(t *testing.T) {
-	bps := readBlueprints(t, []string{"architecture", "protocol"})
-	found := 0
-	for name, body := range bps {
-		if !strings.HasPrefix(name, "architecture/") {
-			continue
-		}
-		for _, e := range ExtractEndpointOperations(body) {
-			found++
-			if e.Operation == "" {
-				t.Errorf("%s: %s has no Operation — schemas/architecture requires one", name, e.Wire())
-			}
-		}
-	}
-	if found == 0 {
-		t.Fatal("no endpoint rows were read at all; the parser is not reading the corpus")
-	}
-	t.Logf("%d endpoint rows, all named", found)
-}
-
 // The exact names one plan replaced with Get/Put/List. The blueprint declared
 // them all along; nothing read it.
 func TestStoreOperationsReachTheOrchestrator(t *testing.T) {

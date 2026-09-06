@@ -56,7 +56,7 @@ func TestProseIsRejectedAndRetried(t *testing.T) {
 		if pr.Status == "retrying" {
 			retried = pr.Detail
 		}
-	}, nil, nil, nil, nil)
+	}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("generation failed: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestMissingRequiredSymbolIsRejected(t *testing.T) {
 		"package main\n// still wrong\n",
 		"package main\n// wrong a third time\n",
 	}}
-	_, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", t.TempDir(), nil, nil, nil, nil, nil)
+	_, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", t.TempDir(), nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("a file missing its required symbol was accepted")
 	}
@@ -99,7 +99,7 @@ func TestFencedOutputIsAccepted(t *testing.T) {
 	body := "package main\n\nfunc main() { _ = \"/v1/health\" }\n"
 	p := &fakeProvider{responses: []string{"```go\n" + body + "```"}}
 	root := t.TempDir()
-	if _, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", root, nil, nil, nil, nil, nil); err != nil {
+	if _, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", root, nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatalf("fenced output was rejected: %v", err)
 	}
 	got, _ := os.ReadFile(filepath.Join(root, "server", "main.go"))
@@ -123,7 +123,7 @@ func TestNothingIsWrittenUntilEveryFileSucceeds(t *testing.T) {
 		"package main\n// wrong\n", "package main\n// wrong\n", "package main\n// wrong\n",
 	}}
 	root := t.TempDir()
-	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", root, nil, nil, nil, nil, nil); err == nil {
+	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", root, nil, nil, nil, nil, nil, nil); err == nil {
 		t.Fatal("generation reported success despite a failed file", nil)
 	}
 	if _, err := os.Stat(filepath.Join(root, "server", "a.go")); err == nil {
@@ -141,7 +141,7 @@ func TestEachFileIsToldWhatAlreadyExists(t *testing.T) {
 		},
 	}
 	p := &fakeProvider{responses: []string{"package main\n", "package main\n"}}
-	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", t.TempDir(), nil, nil, nil, nil, nil); err != nil {
+	if _, err := GenerateTarget(p, target, "go", nil, nil, "platform", t.TempDir(), nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err, nil)
 	}
 	if len(p.prompts) != 2 {
@@ -160,7 +160,7 @@ func TestProgressReportsEveryFile(t *testing.T) {
 	var steps []string
 	if _, err := GenerateTarget(p, oneFilePlan(), "go", nil, nil, "platform", t.TempDir(), func(pr Progress) {
 		steps = append(steps, pr.Status)
-	}, nil, nil, nil, nil); err != nil {
+	}, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Order matters between generating and written; what follows them does not —
@@ -197,7 +197,7 @@ func TestFrontmatterIsRejectedAsNotSource(t *testing.T) {
 		if pr.Status == "retrying" {
 			retried = pr.Detail
 		}
-	}, nil, nil, nil, nil); err != nil {
+	}, nil, nil, nil, nil, nil); err != nil {
 		t.Fatalf("generation failed: %v", err)
 	}
 	if !strings.Contains(retried, "frontmatter") {
@@ -215,7 +215,7 @@ func TestNonGoContentIsRejectedForAGoPath(t *testing.T) {
 		"package main\n\nfunc main() {}\n",
 	}}
 	plan := &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
-	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil, nil, nil, nil); err != nil {
+	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatalf("valid Go on retry was rejected: %v", err)
 	}
 	if p.calls != 2 {
@@ -229,7 +229,7 @@ func TestAGoFileMayOpenWithADocComment(t *testing.T) {
 	body := "// Package main implements the orchestrator.\n//\n// Long notes.\npackage main\n\nfunc main() {}\n"
 	p := &fakeProvider{responses: []string{body}}
 	plan := &Plan{Root: "server", Files: []PlannedFile{{Path: "main.go", Purpose: "entry"}}}
-	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil, nil, nil, nil); err != nil {
+	if _, err := GenerateTarget(p, plan, "go", nil, nil, "platform", t.TempDir(), nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatalf("a doc-commented file was rejected: %v", err)
 	}
 	if p.calls != 1 {
@@ -250,7 +250,7 @@ func (s ScopeLevel) Valid() bool { return true }
 func NewThing() *ScopeLevel { return nil }
 `
 	f := PlannedFile{Path: "protocol.go", Declares: []string{"(ScopeLevel).Valid", "ScopeLevel", "NewThing"}}
-	if v := contractViolation(src, f); v != "" {
+	if v := contractViolation(src, f, nil); v != "" {
 		t.Errorf("correct source was rejected: %s", v)
 	}
 }
@@ -259,7 +259,7 @@ func TestAMethodOnTheWrongTypeIsNotAccepted(t *testing.T) {
 	// A bare-name match would accept this, and it is a different promise.
 	src := "package main\n\ntype Other int\n\nfunc (o Other) Valid() bool { return true }\n"
 	f := PlannedFile{Path: "protocol.go", Declares: []string{"(ScopeLevel).Valid"}}
-	if v := contractViolation(src, f); v == "" {
+	if v := contractViolation(src, f, nil); v == "" {
 		t.Error("a method declared on the wrong type satisfied the contract")
 	}
 }
@@ -267,7 +267,7 @@ func TestAMethodOnTheWrongTypeIsNotAccepted(t *testing.T) {
 func TestAGenuinelyMissingSymbolIsStillCaught(t *testing.T) {
 	src := "package main\n\ntype ScopeLevel int\n"
 	f := PlannedFile{Path: "protocol.go", Declares: []string{"(ScopeLevel).Valid"}}
-	v := contractViolation(src, f)
+	v := contractViolation(src, f, nil)
 	if v == "" {
 		t.Fatal("a missing method was accepted")
 	}
@@ -279,7 +279,7 @@ func TestAGenuinelyMissingSymbolIsStillCaught(t *testing.T) {
 func TestFuncPrefixNotationIsTolerated(t *testing.T) {
 	// Plans sometimes write "func main" rather than "main".
 	src := "package main\n\nfunc main() {}\n"
-	if v := contractViolation(src, PlannedFile{Path: "main.go", Declares: []string{"func main"}}); v != "" {
+	if v := contractViolation(src, PlannedFile{Path: "main.go", Declares: []string{"func main"}}, nil); v != "" {
 		t.Errorf("correct source was rejected: %s", v)
 	}
 }
@@ -300,7 +300,7 @@ type Orchestrator struct {
 func NewOrchestrator() *Orchestrator { return &Orchestrator{startedAt: time.Now()} }
 `
 	f := PlannedFile{Path: "orchestrator.go", Declares: []string{"Orchestrator", "startedAt", "NewOrchestrator"}}
-	if v := contractViolation(src, f); v != "" {
+	if v := contractViolation(src, f, nil); v != "" {
 		t.Errorf("correct source was rejected: %s", v)
 	}
 }
@@ -309,7 +309,7 @@ func TestAGenuinelyAbsentSymbolIsStillRejected(t *testing.T) {
 	// Permissive is not absent: a symbol nowhere in the file must still fail.
 	src := "package main\n\ntype Orchestrator struct{ port int }\n"
 	f := PlannedFile{Path: "orchestrator.go", Declares: []string{"Orchestrator", "startedAt"}}
-	v := contractViolation(src, f)
+	v := contractViolation(src, f, nil)
 	if v == "" {
 		t.Fatal("a symbol absent from the file was accepted")
 	}
@@ -323,7 +323,7 @@ func TestMethodNotationStillRequiresTheRightReceiver(t *testing.T) {
 	// ARE top-level declarations.
 	src := "package main\n\ntype Other int\n\nfunc (o Other) Valid() bool { return true }\n"
 	f := PlannedFile{Path: "x.go", Declares: []string{"(ScopeLevel).Valid"}}
-	if v := contractViolation(src, f); v == "" {
+	if v := contractViolation(src, f, nil); v == "" {
 		t.Error("a method on the wrong type was accepted")
 	}
 }
@@ -479,5 +479,136 @@ func TestAnUnplannedHelperIsOwnedByWhoeverWroteItFirst(t *testing.T) {
 	body := "package orchestrator\n\nfunc helper() {}\n"
 	if v := redeclaresElsewhere(body, plan.Files[1], owner); v == "" {
 		t.Fatal("an unplanned helper was declared in two files and accepted")
+	}
+}
+
+// A file satisfies its serves contract through the DECLARED OPERATION, not only
+// through a literal path.
+//
+// The check required the literal, and platforms/go forbids exactly that: "a
+// path literal MUST NOT appear at a registration site". So a correct handler
+// referencing protocol.PathOperatorRegister was rejected —
+//
+//	must serve POST /v1/admin/operators/register, and
+//	/v1/admin/operators/register does not appear
+//
+// — costing a model call on every handler file, and pushing the retry toward
+// satisfying the check by breaking the convention.
+func TestTheDeclaredOperationSatisfiesTheServesContract(t *testing.T) {
+	f := PlannedFile{
+		Path:   "internal/orchestrator/handlers_admin_operators.go",
+		Serves: []string{"POST /v1/admin/operators/register"},
+	}
+	ops := map[string]string{"POST /v1/admin/operators/register": "OperatorRegister"}
+
+	// The convention-compliant file: constants, no literal anywhere.
+	compliant := `package orchestrator
+
+func (s *Server) handleOperatorRegister(w http.ResponseWriter, r *http.Request) {}
+
+var _ = protocol.PathOperatorRegister
+`
+	if v := contractViolation(compliant, f, ops); v != "" {
+		t.Fatalf("a convention-compliant handler was rejected: %s", v)
+	}
+
+	// A literal still satisfies it — the check asks whether the endpoint was
+	// implemented, not how. Whether the convention was followed is a separate
+	// conformance assertion.
+	literal := "package orchestrator\n\n// serves /v1/admin/operators/register\n"
+	if v := contractViolation(literal, f, ops); v != "" {
+		t.Errorf("a literal path was rejected: %s", v)
+	}
+
+	// A file that implements neither is still caught, and the complaint names
+	// both spellings it looked for.
+	neither := "package orchestrator\n\nfunc unrelated() {}\n"
+	v := contractViolation(neither, f, ops)
+	if v == "" {
+		t.Fatal("a file serving nothing was accepted")
+	}
+	if !strings.Contains(v, "OperatorRegister") {
+		t.Errorf("the complaint does not name the declared operation: %s", v)
+	}
+}
+
+// A file is told which symbols its siblings own, BEFORE any of them is written.
+//
+// The prompt carried what previously-written files declared, which is
+// order-dependent and incomplete: a file generated before registry.go cannot be
+// told registry.go owns DomainDegraded, so it declares it and costs a model
+// call to repair. It is also what makes generating a dependency level
+// concurrently safe — with this, no file depends on the order its siblings were
+// produced in.
+func TestAFileIsToldWhichSymbolsItsSiblingsOwn(t *testing.T) {
+	plan := &Plan{Target: "orchestrator", Root: ".", Files: []PlannedFile{
+		{Path: "internal/orchestrator/registry.go", Declares: []string{"Registry", "DomainDegraded"}},
+		{Path: "internal/orchestrator/events.go", Declares: []string{"Publisher"}},
+		{Path: "internal/protocol/types.go", Declares: []string{"Agent"}}, // another package
+	}}
+	self := plan.Files[1]
+
+	ow := formatOwnership(plan, self)
+	if !strings.Contains(ow, "DomainDegraded") {
+		t.Fatalf("the sibling's symbols were not stated:\n%s", ow)
+	}
+	if !strings.Contains(ow, "internal/orchestrator/registry.go") {
+		t.Error("the owning FILE is not named, so the model can only avoid the symbol, not import it")
+	}
+	// Its own symbols must not be listed as somebody else's.
+	if strings.Contains(ow, "Publisher") {
+		t.Error("the file's own symbols were listed as owned elsewhere")
+	}
+	// Another package cannot collide, so listing it would be noise in a prompt
+	// that is already ~94k tokens.
+	if strings.Contains(ow, "internal/protocol/types.go") {
+		t.Error("a different package was listed; it is reached by import and cannot collide")
+	}
+	// And it must say what to do about an unplanned helper, which is the case
+	// that produced the second retry.
+	if !strings.Contains(ow, "unexported") {
+		t.Error("the prompt does not say how to name a helper the plan did not assign")
+	}
+}
+
+// A single-file package has no siblings, and an empty section must not be
+// added to the prompt.
+func TestOwnershipIsAbsentWhenThereAreNoSiblings(t *testing.T) {
+	plan := &Plan{Files: []PlannedFile{{Path: "cmd/orchestrator/main.go", Declares: []string{"main"}}}}
+	if ow := formatOwnership(plan, plan.Files[0]); ow != "" {
+		t.Errorf("an empty ownership section was added: %q", ow)
+	}
+}
+
+// The prompt must tell the model how a blueprint is READ, not only send it.
+//
+// architecture/generation's prompt contract element 10: a generator that sends
+// a specification without saying how it is structured has asked the model to
+// infer the document's own rules from the document, and it infers differently
+// each time.
+//
+// The machine-readable parts are extracted and elevated — types as bindings,
+// endpoints as obligations, the checklist as acceptance criteria. A normative
+// sentence in a body paragraph reaches the model as one line in seventy
+// thousand tokens of context, and "the audit log MUST be chained" appears in no
+// table at all.
+func TestTheSystemPromptSaysHowToReadABlueprint(t *testing.T) {
+	for _, required := range []string{
+		"yaml block with a root key IS THE CONTRACT",
+		"HEADER NAME",
+		"MUST, MUST NOT OR SHALL IS BINDING WHEREVER IT APPEARS",
+		"IN FULL before writing",
+		"the more specific wins",
+	} {
+		if !strings.Contains(fileSystemPrompt, required) {
+			t.Errorf("the system prompt does not convey %q", required)
+		}
+	}
+	// And what is NOT binding, or an illustration is implemented as a
+	// requirement.
+	for _, required := range []string{"is an example", "illustrative unless"} {
+		if !strings.Contains(fileSystemPrompt, required) {
+			t.Errorf("the system prompt does not say what is non-binding: %q", required)
+		}
 	}
 }

@@ -47,6 +47,36 @@ func Validate(root string, args []string) error {
 	} else {
 		fmt.Printf("  [ok] %d blueprint source(s) resolved\n", len(dirs))
 		passed++
+
+		// The corpus against its own schemas.
+		//
+		// This is the check that matters and it did not exist here: `weblisk
+		// validate` reported "All checks passed (1)" — the one check being that
+		// sources resolved. Every real rule lived in Go test files, where a
+		// blueprint author could not run it, so a corpus fault was discovered
+		// by a forty-minute generation run failing at file 27.
+		//
+		// The rules are read FROM the schemas. See validate_corpus.go.
+		corpus := loadCorpus(dirs)
+		if len(corpus) == 0 {
+			fmt.Println("  [warn] no blueprints found in the resolved sources")
+			issues++
+		} else {
+			findings := ValidateCorpus(corpus)
+			faults := Faults(findings)
+			if len(findings) == 0 {
+				fmt.Printf("  [ok] %d blueprint(s) conform to their schemas\n", len(corpus))
+				passed++
+			} else {
+				fmt.Printf("  [%s] %d finding(s) across %d blueprint(s)\n\n",
+					map[bool]string{true: "fail", false: "warn"}[faults > 0], len(findings), len(corpus))
+				fmt.Print(FormatFindings(findings))
+				fmt.Println()
+				if faults > 0 {
+					issues += faults
+				}
+			}
+		}
 	}
 
 	// The tenant folder is the module root, so the orchestrator is validated
@@ -340,4 +370,37 @@ func validateSingleFile(root, file string) error {
 		return fmt.Errorf("%d validation error(s)", issues)
 	}
 	return nil
+}
+
+// loadCorpus reads every blueprint from the resolved sources.
+//
+// Keyed as a blueprint refers to itself — "architecture/orchestrator.md" — so a
+// finding names what an author would search for. Earlier sources win, matching
+// how ResolveSources orders them: a project's own copy overrides the core one.
+func loadCorpus(dirs []string) map[string]string {
+	corpus := map[string]string{}
+	for _, dir := range dirs {
+		for _, group := range []string{
+			"schemas", "protocol", "architecture", "patterns", "agents", "platforms", "domains", "standards",
+		} {
+			entries, err := os.ReadDir(filepath.Join(dir, group))
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || e.Name() == "README.md" {
+					continue
+				}
+				key := group + "/" + e.Name()
+				if _, taken := corpus[key]; taken {
+					continue
+				}
+				b, rerr := os.ReadFile(filepath.Join(dir, group, e.Name()))
+				if rerr == nil {
+					corpus[key] = string(b)
+				}
+			}
+		}
+	}
+	return corpus
 }

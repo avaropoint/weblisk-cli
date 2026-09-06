@@ -13,7 +13,7 @@ package dispatch
 // fifty-five. A generator reading the manifest learned about four.
 //
 // And it fixed a structure the specification has no business fixing. What a
-// caller observes — endpoints, types, properties — is the contract. How that is
+// caller observes — endpoints, types, properties — is the declaration. How that is
 // divided into files is an implementation decision, and a hand-authored list
 // prevented a model from making a better one.
 //
@@ -35,6 +35,17 @@ type Requirements struct {
 	// instructs it to implement something the protocol has no name for — and it
 	// complies. See architecture/generation, "A binding is not a wish".
 	FieldFaults []FieldBindingFault
+	// FromDeclaration records that this component's requirements came from a
+	// declared declaration block rather than from the scattered parsers.
+	FromDeclaration bool
+	// DeclarationError is a declaration that is present and malformed. It stops the
+	// run: falling back would generate from the old sections while the author
+	// believes the declaration is in force.
+	DeclarationError error
+	// DeclarationOmissions are endpoints protocol/spec requires of this component
+	// that its contract does not declare. A hole in the declaration, reported
+	// rather than filled in.
+	DeclarationOmissions []string
 	// Types are what the TARGET's blueprint declares it consumes, from its
 	// binding contracts — not every type the protocol defines.
 	Types []string
@@ -98,7 +109,7 @@ func ExtractTypes(typesBlueprint string) []string {
 // Scoped to a section because the spec defines both, and an orchestrator that
 // implemented the agent endpoints would be a different component.
 func ExtractEndpoints(spec, section string) []string {
-	i := strings.Index(spec, "## "+section)
+	i := headingIndex(spec, "## "+section)
 	if i < 0 {
 		return nil
 	}
@@ -135,7 +146,26 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 	// What this component declares it consumes. The blueprint's own statement,
 	// read rather than reconstructed — see bindings.go for what scraping every
 	// type heading instead cost.
-	if body, ok := g.Map[targetBlueprint(target)]; ok {
+	// The CONTRACT when the blueprint has one, the scattered parsers when it
+	// does not. Nothing is deleted until the corpus has migrated, so a
+	// half-migrated corpus still builds — see CONTRACT_BLOCK_PLAN.md.
+	if body, ok := g.Map[targetBlueprint(target)]; ok && HasDeclaration(body) {
+		c, cerr := ExtractDeclaration(targetBlueprint(target), body)
+		if cerr != nil {
+			// A malformed contract is a fault in the blueprint and MUST stop
+			// the run. Falling back would generate from the old sections while
+			// the author believes the declaration is in force.
+			req.DeclarationError = cerr
+		} else if c != nil {
+			req.FromDeclaration = true
+			req.Bindings = c.Bindings()
+			req.Types = BoundTypes(req.Bindings)
+			req.EndpointOps = c.EndpointOperations()
+			req.FieldFaults = CheckFieldBindings(
+				map[string]string{targetBlueprint(target): body}, g.Map)
+		}
+	}
+	if body, ok := g.Map[targetBlueprint(target)]; ok && !req.FromDeclaration {
 		req.Bindings = ExtractBindings(body)
 		req.Types = BoundTypes(req.Bindings)
 		// Only this blueprint's own bindings reach the model, so only its own
@@ -160,20 +190,46 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 			}
 		}
 	}
+	// A contract SEEDS the set rather than adding to it.
+	//
+	// Appending produced 24 endpoints where there are 17: the declaration carries
+	// every endpoint this component serves, including the seven protocol/spec
+	// names, and adding both counted those seven twice. The first real build
+	// on a declaration found it.
+	//
+	// protocol/spec is still read, but now as a CROSS-CHECK: an endpoint the
+	// protocol requires of this component and the declaration omits is a hole in
+	// the declaration, and is reported rather than quietly filled in. A contract
+	// that is completed by the thing it replaced is not a declaration.
+	if req.FromDeclaration {
+		for _, e := range req.EndpointOps {
+			seenEndpoint[e.Wire()] = true
+			req.Endpoints = append(req.Endpoints, e.Wire())
+		}
+	}
 	// Only the two components protocol/spec names have a section in it. A
 	// component the protocol does not describe declares its whole surface in its
 	// own blueprint — inheriting the orchestrator's section by default would
 	// require it to serve /v1/register and /v1/channel, which belong to the
 	// trust anchor and to nothing else.
 	if spec, ok := g.Map["protocol/spec.md"]; ok {
+		var required []string
 		switch target {
 		case "orchestrator":
-			addEndpoints(ExtractEndpoints(spec, "Orchestrator Endpoints"))
+			required = ExtractEndpoints(spec, "Orchestrator Endpoints")
 		case "agent":
-			addEndpoints(ExtractEndpoints(spec, "Agent Endpoints"))
+			required = ExtractEndpoints(spec, "Agent Endpoints")
 		}
+		if req.FromDeclaration {
+			for _, e := range required {
+				if !seenEndpoint[e] {
+					req.DeclarationOmissions = append(req.DeclarationOmissions, e)
+				}
+			}
+		}
+		addEndpoints(required)
 	}
-	if body, ok := g.Map[targetBlueprint(target)]; ok {
+	if body, ok := g.Map[targetBlueprint(target)]; ok && !req.FromDeclaration {
 		// The declared name of each endpoint, alongside the wire fact.
 		for _, e := range ExtractEndpointOperations(body) {
 			if e.Operation == "" {
@@ -223,13 +279,26 @@ func GatherRequirements(g *BlueprintGraph, target string) *Requirements {
 			OperationsOwnedBy(ExtractStoreContracts(g.Map[name]), target)...)
 	}
 
-	// Every blueprint in the graph, in the graph's order — then scoped to this
-	// target, because a protocol blueprint's checklist covers both ends of the
-	// conversation and an orchestrator does not serve POST /v1/describe.
+	// EVERY blueprint's assertions come from its prose Verification Checklist,
+	// including the target's.
+	//
+	// A declaration block briefly carried them too. That was churn: the
+	// checklist is the one surface already consistent — prose in all 87
+	// blueprints that have one, parsed reliably, never drifted — and it was
+	// never one of the scattered facts a declaration exists to fix. Moving it
+	// made the pipeline read the same assertions from two places.
+	//
+	// It also makes no difference to the model: FormatChecklist renders either
+	// form into the identical ACCEPTANCE CRITERIA block, so the model never
+	// sees YAML or markdown, only the sentences.
+	//
+	// What a declaration DOES carry is `checks:` — machine-verifiable
+	// predicates with declared subjects, which is what prose cannot express.
 	var all []ChecklistItem
 	for _, name := range g.Order {
 		all = append(all, ExtractChecklist(name, g.Map[name])...)
 	}
+
 	mine, others := ScopeChecklist(all, target)
 	// Then by BINDING, not only by group heading.
 	//
@@ -384,11 +453,11 @@ var reTableEndpoint = regexp.MustCompile(`(?m)^\|\s*(GET|POST|PUT|PATCH|DELETE)\
 // is declared where that component is specified, and reading only protocol/spec
 // misses it entirely.
 func ExtractTableEndpoints(blueprint string) []string {
-	i := strings.Index(blueprint, "\n## Endpoints")
+	i := headingIndex(blueprint, "## Endpoints")
 	if i < 0 {
 		return nil
 	}
-	rest := blueprint[i+len("\n## Endpoints"):]
+	rest := blueprint[i+len("## Endpoints"):]
 	if end := strings.Index(rest, "\n## "); end >= 0 {
 		rest = rest[:end]
 	}

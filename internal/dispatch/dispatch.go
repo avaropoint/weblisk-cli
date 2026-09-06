@@ -59,7 +59,7 @@ func SupervisedComponentInit(root, target, platform string) error {
 // ComponentInit generates one component from the blueprints that declare it.
 //
 // The pipeline is not the orchestrator's — it is the same for every component
-// whose architecture blueprint states a contract: one resolved graph, a plan
+// whose architecture blueprint states a declaration: one resolved graph, a plan
 // validated against it, per-file generation, build-and-repair, and conformance.
 // The target names which blueprint is the root and which assertions are this
 // component's; nothing else in the loop varies. A second component built by a
@@ -78,7 +78,38 @@ func ComponentInit(root, target, platform string) error {
 	if err != nil {
 		return fmt.Errorf("resolving blueprints: %w", err)
 	}
+	// The corpus against its own schemas, BEFORE planning.
+	//
+	// Reported here because a schema fault in a blueprint this component reads
+	// is a fault in what the model is about to be told, and finding it after
+	// forty minutes of generation is finding it too late.
+	//
+	// Scoped to the blueprints THIS component reads: a missing `## Security`
+	// section in an agent blueprint the orchestrator never sees is a real fault
+	// and somebody else's. `weblisk validate` reports the whole corpus.
+	// ValidateStructure, not ValidateCorpus: a structure rule is answerable from
+	// one blueprint and its schema, so it holds against this scoped graph. The
+	// relationship rules need the whole corpus and are `weblisk validate`'s.
+	if findings := ValidateStructure(graph.Map); len(findings) > 0 {
+		fmt.Printf("  [warn] %s in the blueprints this component reads:\n",
+			plural(len(findings), "schema finding"))
+		fmt.Print(indentBlock(FormatFindings(findings), "  "))
+		fmt.Println("         Generation continues — these are faults in the specification,")
+		fmt.Println("         and `weblisk validate` reports the whole corpus.")
+		fmt.Println()
+	}
+
 	specs := graph.Joined()
+
+	// Recorded before anything is generated, so a run that fails part-way still
+	// leaves a statement of what it was reading. architecture/cli requires the
+	// blueprint version and the provider to be part of a hub's provenance, and
+	// they were printed rather than recorded — so the artifact carried no
+	// answer to the one question this product exists to answer.
+	SetProvenance(provenanceOf(graph, provider))
+	// And SAID, not only recorded. Recorded answers "what was this built from"
+	// afterwards; said answers "am I about to build from the right thing".
+	AnnounceSources(ResolveSources(root))
 
 	platBP, err := LoadBlueprint(root, PlatformBlueprint(platform))
 	if err != nil {
@@ -90,6 +121,22 @@ func ComponentInit(root, target, platform string) error {
 	// requirements before a single file is generated. See
 	// architecture/generation.md.
 	req := GatherRequirements(graph, target)
+	if req.DeclarationError != nil {
+		return fmt.Errorf("the declaration block is malformed: %w\n"+
+			"  Nothing was generated. Fix the declaration, or remove it to fall back\n"+
+			"  to the sections it replaces", req.DeclarationError)
+	}
+	if req.FromDeclaration {
+		fmt.Printf("  Requirements read from %s's declaration block\n", target)
+	}
+	if len(req.DeclarationOmissions) > 0 {
+		// Reported, never filled in. A contract completed by the sections it
+		// replaced is not a declaration.
+		return fmt.Errorf("%s's contract does not declare %s that protocol/spec requires of it: %s\n"+
+			"  Add them to the declaration's `serves:` list",
+			target, plural(len(req.DeclarationOmissions), "endpoint"),
+			strings.Join(req.DeclarationOmissions, ", "))
+	}
 	if len(req.Types) > 0 || len(req.Endpoints) > 0 {
 		fmt.Printf("  Platform: %s\n", platform)
 		fmt.Print(graph.Describe())
@@ -226,7 +273,7 @@ func ComponentInit(root, target, platform string) error {
 		}
 
 		files, gerr := GenerateTarget(provider, plan, platform, graph.Map, graph.Order, platBP, root,
-			printProgress, req.Checklist, req.Bindings, st, keep)
+			printProgress, req.Checklist, req.Bindings, st, keep, req.EndpointOps)
 		if gerr != nil {
 			return gerr
 		}
@@ -1254,4 +1301,33 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// provenanceOf records what this run is generating from.
+func provenanceOf(graph *BlueprintGraph, provider Provider) *Provenance {
+	p := &Provenance{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Provider:    os.Getenv("WL_AI_PROVIDER"),
+	}
+	if m, ok := Underlying(provider).(interface{ ModelUsed() string }); ok {
+		p.Model = m.ModelUsed()
+	}
+	if p.Model == "" {
+		// The configured value is a second-best answer and is labelled as one
+		// by being the only one present: an empty Model means the provider did
+		// not say, which is different from nobody having asked.
+		p.Model = os.Getenv("WL_AI_MODEL")
+	}
+	for _, s := range graph.Sources {
+		used := 0
+		for _, served := range graph.ServedBy {
+			if served.Dir == s.Dir {
+				used++
+			}
+		}
+		p.Sources = append(p.Sources, ProvenanceSource{
+			Kind: s.Kind, Dir: s.Dir, Revision: s.Revision, Used: used,
+		})
+	}
+	return p
 }

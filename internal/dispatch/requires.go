@@ -354,6 +354,14 @@ func (g *BlueprintGraph) Describe() string {
 			}
 		}
 		fmt.Fprintf(b, "    [%d] %s — %d of %d\n", i+1, s.Describe(), used, len(g.Order))
+		if s.Revision != "" && strings.HasSuffix(s.Revision, "-dirty") {
+			// Said out loud, once, where the revision is printed. An artifact
+			// generated from an unnamed tree cannot be reproduced from a
+			// commit, and that is worth knowing before the build not after it.
+			fmt.Fprintf(b, "        [warn] this source has uncommitted changes — "+
+				"the artifact will not be reproducible from %s\n",
+				strings.TrimSuffix(s.Revision, "-dirty"))
+		}
 	}
 	return b.String()
 }

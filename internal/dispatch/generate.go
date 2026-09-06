@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -131,7 +132,10 @@ func redeclaresElsewhere(content string, f PlannedFile, owner map[string]string)
 	return ""
 }
 
-func contractViolation(content string, f PlannedFile) string {
+// operations maps "METHOD /path" to the endpoint's declared Operation, so a
+// file may satisfy its contract through the declared name rather than a literal
+// the platform convention forbids.
+func contractViolation(content string, f PlannedFile, operations map[string]string) string {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
 		return "the response was empty"
@@ -184,10 +188,41 @@ func contractViolation(content string, f PlannedFile) string {
 		return fmt.Sprintf("%q must define %s, which does not appear", f.Path, sym)
 	}
 	for _, ep := range f.Serves {
-		// Match on the path; the method may be expressed many ways in a router.
+		// Match on the path OR on the endpoint's declared Operation.
+		//
+		// This required the literal path string, and platforms/go now forbids
+		// exactly that: "a path literal MUST NOT appear at a registration
+		// site". So a correct handler references protocol.PathOperatorRegister
+		// and this rejected it —
+		//
+		//   must serve POST /v1/admin/operators/register, and
+		//   /v1/admin/operators/register does not appear
+		//
+		// costing a model call on every handler file, and pushing the retry
+		// toward satisfying the check by breaking the convention.
+		//
+		// The Operation is the right thing to look for: it is the declared
+		// name, and every spelling the platform mandates contains it —
+		// PathOperatorRegister, handleOperatorRegister,
+		// OperatorRegisterRequest. Checking for it needs no per-platform
+		// knowledge here.
+		//
+		// Whether the convention was FOLLOWED is a different question, asked by
+		// the conformance assertion that forbids path literals. This one asks
+		// only whether the endpoint was implemented at all.
 		parts := strings.Fields(ep)
 		route := parts[len(parts)-1]
-		if !strings.Contains(content, route) {
+		if strings.Contains(content, route) {
+			continue
+		}
+		if op := operations[ep]; op != "" && strings.Contains(content, op) {
+			continue
+		}
+		if operations[ep] != "" {
+			return fmt.Sprintf("%q must serve %s — neither %s nor its declared operation %q appears",
+				f.Path, ep, route, operations[ep])
+		}
+		{
 			return fmt.Sprintf("%q must serve %s, and %s does not appear", f.Path, ep, route)
 		}
 	}
@@ -378,6 +413,22 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 		// rather than by the prompt.
 		b.WriteString("\n\n" + tp)
 	}
+	// WHO OWNS WHICH SYMBOL, across the whole plan — in the invariant prefix,
+	// because it is the same for every file in the run.
+	//
+	// The prompt already carries what previously-written files declared. That
+	// is order-dependent and incomplete: a file generated before registry.go
+	// cannot be told registry.go owns DomainDegraded, so it declares it, gets
+	// rejected by the coherence check, and costs a model call to repair. Two
+	// such retries appeared in one run.
+	//
+	// The plan knows every owner before a byte is written. Stating it up front
+	// turns a retry into a non-event — and it is what makes generating a
+	// dependency level CONCURRENTLY safe, because no file then depends on the
+	// order its siblings were produced in.
+	if ow := formatOwnership(plan, f); ow != "" {
+		b.WriteString("\n\n" + ow)
+	}
 	fmt.Fprintf(&b, "\nPlatform: %s\nTarget directory: %s\n", platform, plan.Root)
 	if mod := plan.Module; mod != "" {
 		// The module path is a fact every file needs and nothing used to carry.
@@ -466,7 +517,38 @@ Output rules, which are absolute:
 
 The blueprints below are the specification. Follow them exactly: where they
 specify a name, shape, status code, dependency or endpoint, use it. Where they
-are silent, they are silent — this prompt adds no requirements of its own.`
+are silent, they are silent — this prompt adds no requirements of its own.
+
+HOW TO READ A BLUEPRINT
+
+Every section has a form, and the form says how it binds:
+
+- A fenced yaml block with a root key IS THE CONTRACT. Every key in it is
+  required output. The prose around it explains the block; it does not replace
+  or soften it.
+- A markdown table IS THE CONTRACT. Every row is required output, and columns
+  are identified by their HEADER NAME — a column's position means nothing, and
+  a table may carry a column you have not seen before.
+- Prose is context, with one exception:
+  A SENTENCE CONTAINING MUST, MUST NOT OR SHALL IS BINDING WHEREVER IT APPEARS
+  — in a paragraph, a note, a parenthesis or an aside. Many rules are stated
+  only that way and appear in no table.
+
+What is NOT binding, so you do not implement an illustration:
+
+- A fenced block with no root key, in a section whose contract is a rooted
+  block, is an example.
+- A path, name or value inside a narrative example is illustrative unless a
+  table or a yaml block also declares it.
+
+Read each blueprint you are given IN FULL before writing. A requirement stated
+once, in a sentence, is as binding as one stated in a table — and it is the
+kind most often missed.
+
+Where two blueprints disagree, the more specific wins: a component's own
+blueprint over a pattern it adopts. If neither is more specific, say so in a
+comment rather than choosing — a disagreement resolved silently becomes the
+specification.`
 
 // GenerateTarget generates every file in a manifest target.
 //
@@ -476,7 +558,7 @@ are silent, they are silent — this prompt adds no requirements of its own.`
 func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints map[string]string,
 	bpOrder []string, platBP, root string, onProgress ProgressFunc,
 	checklist []ChecklistItem, bindings []Binding, st *TenantState,
-	keep map[string]bool) ([]GeneratedFile, error) {
+	keep map[string]bool, endpoints []EndpointOperation) ([]GeneratedFile, error) {
 	cache := NewGenerationCache(root)
 	if onProgress == nil {
 		onProgress = func(Progress) {}
@@ -488,6 +570,15 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 	// Who owns which symbol, from the plan. Rebuilt as files are written so an
 	// unplanned helper also gets an owner.
 	owner := claimedSymbols(plan, decls)
+	// "METHOD /path" -> declared Operation, so a file may satisfy its serves
+	// contract through the declared name instead of a literal the platform
+	// convention forbids.
+	endpointOps := map[string]string{}
+	for _, e := range endpoints {
+		if e.Operation != "" {
+			endpointOps[e.Wire()] = e.Operation
+		}
+	}
 
 	for i, f := range ordered {
 		var content string
@@ -549,7 +640,7 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 				return nil, fmt.Errorf("generating %s: %w", f.Path, err)
 			}
 			candidate := stripFence(raw)
-			if v := contractViolation(candidate, f); v != "" {
+			if v := contractViolation(candidate, f, endpointOps); v != "" {
 				lastViolation = v
 				continue
 			}
@@ -600,4 +691,44 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 		return generated, err
 	}
 	return generated, nil
+}
+
+// formatOwnership lists the symbols other files in this plan will declare.
+//
+// Grouped by file so the instruction is actionable — a model told "X is taken"
+// can only avoid it, while one told "X belongs to internal/orchestrator/registry.go"
+// can import it.
+//
+// Only symbols in the SAME package are listed. A symbol in another package is
+// reached by import path and cannot collide, so naming it here would be noise
+// in a prompt that is already large.
+func formatOwnership(plan *Plan, self PlannedFile) string {
+	mine := planPackage(self.Path)
+	byFile := map[string][]string{}
+	var order []string
+	for _, f := range plan.Files {
+		if f.Path == self.Path || planPackage(f.Path) != mine || len(f.Declares) == 0 {
+			continue
+		}
+		syms := append([]string(nil), f.Declares...)
+		sort.Strings(syms)
+		byFile[f.Path] = syms
+		order = append(order, f.Path)
+	}
+	if len(order) == 0 {
+		return ""
+	}
+	sort.Strings(order)
+	var b strings.Builder
+	b.WriteString("--- SYMBOLS OWNED BY OTHER FILES IN THIS PACKAGE ---\n\n")
+	b.WriteString("These are declared by the files listed. Do NOT declare them here —\n")
+	b.WriteString("two files in one Go package cannot declare the same symbol. Use them\n")
+	b.WriteString("directly; they are in your package and need no import.\n\n")
+	for _, path := range order {
+		fmt.Fprintf(&b, "  %s\n      %s\n", path, wrapList(byFile[path], 68, "      "))
+	}
+	b.WriteString("\nIf you need a helper that none of these provides and your own plan entry\n")
+	b.WriteString("does not name, declare it — but keep it unexported and specific to this\n")
+	b.WriteString("file, so a sibling generated at the same time cannot pick the same name.\n")
+	return b.String()
 }

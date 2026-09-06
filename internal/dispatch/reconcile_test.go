@@ -3,8 +3,10 @@ package dispatch
 // A plan is a complete statement of the target, not an addition to it.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -237,5 +239,71 @@ func TestOwnershipSurvivesAPlanThatDropsAFile(t *testing.T) {
 	RecordWritten(root, plan, []GeneratedFile{{Path: "internal/x/new.go"}})
 	if got := PriorPaths(root, "orchestrator"); containsStr(got, "internal/x/old.go") {
 		t.Fatalf("a deleted file is still claimed: %v", got)
+	}
+}
+
+// A hub must carry a statement of what generated it.
+//
+// architecture/cli requires the blueprint version and the provider to be part
+// of a hub's provenance. They were PRINTED and not recorded, so the artifact
+// answered none of it and the one question this product exists to answer had
+// to be reconstructed from a terminal scrollback.
+func TestTheManifestRecordsWhatGeneratedTheFiles(t *testing.T) {
+	root := t.TempDir()
+	plan := &Plan{Target: "orchestrator", Root: "."}
+
+	SetProvenance(&Provenance{
+		GeneratedAt: "2026-09-04T21:00:00Z",
+		Provider:    "claude-code",
+		Model:       "claude-opus-5",
+		Sources: []ProvenanceSource{
+			{Kind: "project", Dir: "blueprints", Revision: "6a6d832", Used: 8},
+		},
+	})
+	defer SetProvenance(nil)
+
+	RecordWritten(root, plan, []GeneratedFile{{Path: "internal/x/a.go"}})
+
+	b, err := os.ReadFile(manifestName(root, "orchestrator"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m writtenManifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Provenance == nil {
+		t.Fatal("the manifest records no provenance")
+	}
+	if m.Provenance.Model != "claude-opus-5" || m.Provenance.Provider != "claude-code" {
+		t.Errorf("the model that generated this is not recorded: %+v", m.Provenance)
+	}
+	if len(m.Provenance.Sources) != 1 || m.Provenance.Sources[0].Revision != "6a6d832" {
+		t.Errorf("the blueprint revision is not recorded: %+v", m.Provenance.Sources)
+	}
+	if m.Provenance.GeneratedAt == "" {
+		t.Error("a provenance record with no time on it invites being read as current")
+	}
+}
+
+// A revision that names a commit the content did not come from is worse than
+// no revision, because it is acted on: an auditor checks that commit out and
+// gets a different corpus.
+func TestADirtyRevisionIsRecordedAsDirty(t *testing.T) {
+	SetProvenance(&Provenance{
+		Sources: []ProvenanceSource{{Kind: "project", Revision: "6a6d832-dirty"}},
+	})
+	defer SetProvenance(nil)
+	root := t.TempDir()
+	RecordWritten(root, &Plan{Target: "orchestrator", Root: "."},
+		[]GeneratedFile{{Path: "a.go"}})
+
+	b, _ := os.ReadFile(manifestName(root, "orchestrator"))
+	var m writtenManifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Provenance.Sources) == 0 || !strings.HasSuffix(m.Provenance.Sources[0].Revision, "-dirty") {
+		t.Fatalf("the uncommitted state was not carried into the record: %+v", m.Provenance)
 	}
 }

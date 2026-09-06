@@ -65,6 +65,40 @@ type writtenManifest struct {
 	// reconcile needs; records answer a different question and a manifest
 	// written before they existed simply has none.
 	Records []FileRecord `json:"records,omitempty"`
+	// Provenance is what produced these files: which blueprint sources, at
+	// which revision, and which model.
+	//
+	// architecture/cli requires it — "the provider that generated a hub, and
+	// the blueprint version it generated from, are part of that hub's
+	// provenance and MUST be recorded". It was PRINTED and not recorded, so a
+	// generated hub carried no statement of what governed it, and the one
+	// question this whole product exists to answer — what does this artifact
+	// come from — had to be reconstructed from a terminal scrollback.
+	Provenance *Provenance `json:"provenance,omitempty"`
+}
+
+// Provenance records what a component was generated from.
+type Provenance struct {
+	// GeneratedAt is when, in UTC. A provenance record with no time on it
+	// invites being read as current.
+	GeneratedAt string `json:"generated_at"`
+	// Sources are the blueprint sources read, each with its revision. A
+	// revision ending "-dirty" means the corpus had uncommitted changes and
+	// the artifact came from a tree that has no name.
+	Sources []ProvenanceSource `json:"sources"`
+	// Model is what the provider reported using. Empty when the provider did
+	// not say, which is recorded as empty rather than guessed at.
+	Model string `json:"model,omitempty"`
+	// Provider is the backend kind — claude-code, ollama, anthropic.
+	Provider string `json:"provider,omitempty"`
+}
+
+// ProvenanceSource is one blueprint source and the revision it was at.
+type ProvenanceSource struct {
+	Kind     string `json:"kind"` // project | custom | core
+	Dir      string `json:"dir"`
+	Revision string `json:"revision,omitempty"`
+	Used     int    `json:"used"`
 }
 
 // PriorRecords returns the previous run's per-file records for a component.
@@ -152,7 +186,10 @@ func RecordWrittenWith(root string, plan *Plan, files []GeneratedFile, blueprint
 			}
 		}
 	}
-	b, err := json.Marshal(writtenManifest{Target: plan.Target, Root: plan.Root, Files: paths, Records: recs})
+	b, err := json.Marshal(writtenManifest{
+		Target: plan.Target, Root: plan.Root, Files: paths, Records: recs,
+		Provenance: currentProvenance,
+	})
 	if err != nil {
 		return
 	}
@@ -290,3 +327,14 @@ func PriorPaths(root, target string) []string {
 	}
 	return m.Files
 }
+
+// currentProvenance is what this run read and what generated it.
+//
+// Package-level because it is a property of the RUN, not of a file: every
+// manifest written by one invocation records the same sources and the same
+// model, and threading it through six call sites would invite one of them
+// recording something different.
+var currentProvenance *Provenance
+
+// SetProvenance records what this run is generating from.
+func SetProvenance(p *Provenance) { currentProvenance = p }

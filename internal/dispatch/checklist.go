@@ -49,7 +49,17 @@ var reChecklistGroup = regexp.MustCompile(`(?m)^###\s+(.+?)\s*$`)
 // The heading is the blueprint's own statement of which component an assertion is
 // addressed to, which is why it is read rather than inferred from wording.
 func ExtractChecklist(source, blueprint string) []ChecklistItem {
-	i := strings.Index(blueprint, "## Verification Checklist")
+	// The HEADING, not a mention of it.
+	//
+	// This was strings.Index over the whole document, so a sentence containing
+	// the words "## Verification Checklist" matched before the section did. A
+	// paragraph in another section explaining that the checklist stays in prose
+	// truncated the search at the next heading and read ZERO assertions — 24
+	// silently vanished from a component's acceptance criteria because somebody
+	// wrote documentation about them.
+	//
+	// A heading is a line that STARTS with it. Nothing else is one.
+	i := headingIndex(blueprint, "## Verification Checklist")
 	if i < 0 {
 		return nil
 	}
@@ -404,4 +414,24 @@ func FailedChecklist(results []ChecklistResult) []ChecklistResult {
 		}
 	}
 	return out
+}
+
+// headingIndex finds a heading at the start of a line, and returns the index of
+// the heading text itself.
+//
+// Returns -1 when the document only MENTIONS the heading. A mention is prose;
+// a heading is structure, and a parser that cannot tell them apart reads the
+// wrong section of every document that discusses its own format.
+func headingIndex(document, heading string) int {
+	if strings.HasPrefix(document, heading) {
+		return 0
+	}
+	if i := strings.Index(document, "\n"+heading+"\n"); i >= 0 {
+		return i + 1
+	}
+	// A heading may be the last line, with no trailing newline.
+	if strings.HasSuffix(document, "\n"+heading) {
+		return len(document) - len(heading)
+	}
+	return -1
 }

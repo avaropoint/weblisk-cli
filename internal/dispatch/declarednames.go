@@ -72,11 +72,11 @@ func ExtractEndpointOperations(blueprint string) []EndpointOperation {
 
 // endpointsSection is the `## Endpoints` section of a blueprint, "" if absent.
 func endpointsSection(blueprint string) string {
-	i := strings.Index(blueprint, "\n## Endpoints")
+	i := headingIndex(blueprint, "## Endpoints")
 	if i < 0 {
 		return ""
 	}
-	rest := blueprint[i+len("\n## Endpoints"):]
+	rest := blueprint[i+len("## Endpoints"):]
 	if end := strings.Index(rest, "\n## "); end >= 0 {
 		rest = rest[:end]
 	}
@@ -95,11 +95,11 @@ type StoreContract struct {
 // Selected by its columns rather than by position on the page: `## Interfaces`
 // may carry more than one table, and "the first one" is not a specification.
 func ExtractStoreContracts(blueprint string) []StoreContract {
-	i := strings.Index(blueprint, "\n## Interfaces")
+	i := headingIndex(blueprint, "## Interfaces")
 	if i < 0 {
 		return nil
 	}
-	rest := blueprint[i+len("\n## Interfaces"):]
+	rest := blueprint[i+len("## Interfaces"):]
 	if end := strings.Index(rest, "\n## "); end >= 0 {
 		rest = rest[:end]
 	}
@@ -279,4 +279,29 @@ func TablesWithColumns(md string, columns ...string) []MarkdownTable {
 		}
 	}
 	return out
+}
+
+// reAdoption reads the frontmatter field that says whether a blueprint's
+// surface is served by every deployment.
+var reAdoption = regexp.MustCompile(`(?m)^adoption:\s*([a-z-]+)`)
+
+// AdoptionOf reports a blueprint's adoption: "required" (the default) or
+// "opt-in".
+//
+// An opt-in surface exists only for a deployment that configures it —
+// federation is the case that named the field: it exists only for
+// communicating with other hubs, and a deployment that does not federate
+// serves none of it and is complete without it.
+//
+// Read from frontmatter ONLY, so an `adoption:` line inside a YAML example in
+// the body cannot change what a blueprint claims about itself.
+func AdoptionOf(blueprint string) string {
+	end := strings.Index(blueprint, "-->")
+	if end < 0 {
+		return "required"
+	}
+	if m := reAdoption.FindStringSubmatch(blueprint[:end]); m != nil {
+		return m[1]
+	}
+	return "required"
 }

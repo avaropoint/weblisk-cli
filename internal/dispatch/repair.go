@@ -620,7 +620,7 @@ func askForFile(provider Provider, prompt string, f PlannedFile) (string, error)
 			return "", err
 		}
 		candidate := stripFence(raw)
-		if v := contractViolation(candidate, f); v != "" {
+		if v := contractViolation(candidate, f, nil); v != "" {
 			lastViolation = v
 			continue
 		}
