@@ -8,6 +8,7 @@ package dispatch
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -202,19 +203,67 @@ func NewProvider() (Provider, error) {
 	return WithTransientRetry(p), nil
 }
 
+// selected is the provider a command chose for this run, from a --provider flag
+// or from asking. It outranks the environment because it is more specific: an
+// operator typing --provider on this invocation means it for this invocation.
+var selected struct {
+	kind  ProviderKind
+	model string
+	set   bool
+}
+
+// UseProvider pins this process to one backend. Called by the command layer once
+// a choice has been made — see Resolve in discover.go.
+func UseProvider(kind ProviderKind, model string) {
+	selected.kind, selected.model, selected.set = kind, model, true
+}
+
+// SelectedProvider reports the pinned choice, if there is one.
+func SelectedProvider() (ProviderKind, string, bool) {
+	return selected.kind, selected.model, selected.set
+}
+
 func newRawProvider() (Provider, error) {
 	api := os.Getenv("WL_AI_PROVIDER")
-	if api == "" {
-		api = "openai"
-	}
 	model := os.Getenv("WL_AI_MODEL")
+	if selected.set {
+		api = string(selected.kind)
+		if selected.model != "" {
+			model = selected.model
+		}
+	}
+	// No choice and no environment: ask the machine what it has rather than
+	// defaulting to "openai" and demanding a key.
+	//
+	// That default is why `weblisk server init` failed out of the box on a
+	// machine with Claude Code installed and logged in — a working provider on
+	// the PATH, and nothing looked. Ambiguity is surfaced rather than resolved:
+	// choosing between a local model and a paid API has cost and data
+	// consequences that are not this function's to decide.
+	if api == "" {
+		c := Resolve(context.Background(), "")
+		switch {
+		case c.Err != nil:
+			return nil, c.Err
+		case c.Ambiguous:
+			return nil, ambiguousProviderError(c.Options)
+		}
+		api = string(c.Kind)
+		if model == "" {
+			model = c.Model
+		}
+	}
 	baseURL := os.Getenv("WL_AI_BASE_URL")
 	apiKey := os.Getenv("WL_AI_KEY")
 
 	// Local coding-agent CLIs are a subprocess, not an HTTP endpoint: no base URL,
 	// no key, and the credential is whatever the tool is already logged in with.
+	switch normaliseKind(ProviderKind(api)) {
+	case ProviderClaudeCode, ProviderCodex:
+		return newLocalCLIProvider(string(normaliseKind(ProviderKind(api))), model)
+	}
 	switch api {
-	case "claude-code", "claude-local", "local-cli":
+	case "local-cli":
 		return newLocalCLIProvider(api, model)
 	}
 
@@ -224,7 +273,7 @@ func newRawProvider() (Provider, error) {
 			baseURL = "https://api.openai.com/v1"
 		}
 		if model == "" {
-			model = "gpt-4o"
+			model = defaultModels[ProviderOpenAI]
 		}
 		if apiKey == "" {
 			return nil, fmt.Errorf("WL_AI_KEY required for OpenAI")
@@ -236,7 +285,10 @@ func newRawProvider() (Provider, error) {
 			baseURL = "http://localhost:11434/v1"
 		}
 		if model == "" {
-			model = "llama3"
+			// Whatever this machine actually has pulled, not a name that may
+			// never have been downloaded — naming an absent model produces a
+			// 404 at generation time, which reads as a broken pipeline.
+			model = discoveredOllamaModel()
 		}
 		if apiKey == "" {
 			apiKey = "ollama"
@@ -248,7 +300,10 @@ func newRawProvider() (Provider, error) {
 			baseURL = "https://api.anthropic.com/v1"
 		}
 		if model == "" {
-			model = "claude-sonnet-4-20250514"
+			// From defaultModels, so the current model is named in ONE place.
+			// This used to say claude-sonnet-4-20250514 — a model id that had
+			// aged out while sitting in a switch arm nobody re-read.
+			model = defaultModels[ProviderAnthropic]
 		}
 		if apiKey == "" {
 			return nil, fmt.Errorf("WL_AI_KEY required for Anthropic")

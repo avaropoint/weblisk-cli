@@ -215,6 +215,25 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 // session persistence are all switched off: this is a single generation from a
 // prompt, and every one of those would either change the output or reach for
 // state that has nothing to do with the hub being generated.
+// codexArgs runs Codex non-interactively.
+//
+// `codex exec` is its documented headless mode: it takes the prompt as an
+// argument and writes the result to stdout, with no TUI and no session.
+//
+// NOT VERIFIED AGAINST A REAL BINARY on the machine this was written on — codex
+// was not installed, and this file's own rule is that inventing a tool's flags
+// produces a provider that looks supported and fails on first use. So two things
+// hold the line: discovery runs `codex --version` before ever offering it, and
+// WL_AI_ARGS overrides this list entirely, so an operator whose codex disagrees
+// can correct it without a new build. Replace this comment with a measurement
+// the first time it is run for real.
+func codexArgs() []string {
+	if custom := splitArgs(os.Getenv("WL_AI_ARGS")); len(custom) > 0 {
+		return custom
+	}
+	return []string{"exec", "--skip-git-repo-check"}
+}
+
 func claudeCodeArgs() []string {
 	return []string{
 		"--print", "--output-format", "json",
@@ -249,6 +268,23 @@ func newLocalCLIProvider(kind, model string) (Provider, error) {
 		return &LocalCLIProvider{
 			Bin: bin, Name: "claude code", Args: claudeCodeArgs(),
 			Model: model, JSON: true, Timeout: timeout,
+		}, nil
+
+	case "codex":
+		configured := os.Getenv("WL_AI_COMMAND")
+		bin, searched := ResolveLocalCLI("codex", configured)
+		if bin == "" {
+			if strings.TrimSpace(configured) != "" {
+				return nil, fmt.Errorf("WL_AI_COMMAND is set to %q, which is not an executable file", configured)
+			}
+			return nil, fmt.Errorf("codex is not installed, or is not where this process can see it.\n"+
+				"Looked on PATH and in:\n  %s\n\n"+
+				"Install it, or set WL_AI_COMMAND to its full path.",
+				strings.Join(searched, "\n  "))
+		}
+		return &LocalCLIProvider{
+			Bin: bin, Name: "codex", Args: codexArgs(),
+			Model: model, JSON: false, Timeout: timeout,
 		}, nil
 
 	case "local-cli":
