@@ -26,6 +26,7 @@ import (
 	"github.com/avaropoint/weblisk-cli/internal/serve"
 	"github.com/avaropoint/weblisk-cli/internal/server"
 	"github.com/avaropoint/weblisk-cli/internal/server/agent"
+	"github.com/avaropoint/weblisk-cli/internal/tenantcmd"
 	"github.com/avaropoint/weblisk-cli/internal/test"
 )
 
@@ -148,6 +149,32 @@ func main() {
 		config.Load(cwd)
 		if err := dispatch.Validate(cwd, rest); err != nil {
 			fatal("validate: %v", err)
+		}
+
+	case "tenant":
+		// One command from a name to a running hub. The operation itself lives
+		// in pkg/tenant so Studio drives the same code — see TENANT_LIFECYCLE.md
+		// on why two implementations of one operation drift by default.
+		cwd, _ := os.Getwd()
+		if err := tenantcmd.Handle(args[1:], cwd); err != nil {
+			fmt.Fprintln(os.Stderr, "  Error:", err)
+			os.Exit(1)
+		}
+
+	case "providers":
+		// What this machine can generate with, and which one a build would take.
+		// Its own verb because "why did my build pick that model" and "why does
+		// my build say no provider" are the two questions this answers, and
+		// neither was answerable before.
+		asJSON := false
+		for _, a := range args {
+			if a == "--json" {
+				asJSON = true
+			}
+		}
+		if err := dispatch.PrintProviders(asJSON); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
 		}
 
 	case "doctor":
@@ -648,6 +675,16 @@ func printHelp() {
 
   Usage:
     weblisk <command> [options]
+
+  Tenant:
+    tenant create <name>    Turn a name into a running hub, in one command
+      --dir <path>          Where to create it (default: ./<name>)
+      --platform <p>        go (default), cloudflare, node, rust
+      --provider <p>        Model backend; omit to be asked when there is a choice
+      --operator <name>     First operator (default: $USER)
+      --json                One progress object per line, for a console
+    providers               What this machine can generate with, and which it picks
+      --json                Machine-readable
 
   Project:
     new <name>              Scaffold a new project from templates

@@ -193,6 +193,15 @@ func HandleProvision(args []string, root string) error {
 	return nil
 }
 
+// ReadSecretLine is readSecretLine, exported for pkg/tenant.
+//
+// One implementation of "read a passphrase without echoing it": the terminal
+// path suppresses echo, the piped path reads a line. A second copy in the
+// tenant command is exactly how one of them ends up echoing.
+func ReadSecretLine(prompt string, showPrompt bool) (string, error) {
+	return readSecretLine(prompt, showPrompt)
+}
+
 // readSecretLine reads one line from stdin without echoing it.
 func readSecretLine(prompt string, showPrompt bool) (string, error) {
 	if showPrompt {

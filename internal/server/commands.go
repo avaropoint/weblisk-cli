@@ -55,9 +55,25 @@ func handleInit(args []string, root string) error {
 	encryptKeys := false
 	verifyOnly := false
 	resume := false
+	provider := ""
+	model := ""
 
 	for i := 0; i < len(args); i++ {
 		switch {
+		// Which model writes this hub is a decision with cost and data
+		// consequences, so it is a flag rather than only an environment
+		// variable — and Studio passes it explicitly rather than hoping the
+		// subprocess inherited the right environment.
+		case args[i] == "--provider" && i+1 < len(args):
+			i++
+			provider = args[i]
+		case strings.HasPrefix(args[i], "--provider="):
+			provider = strings.SplitN(args[i], "=", 2)[1]
+		case args[i] == "--model" && i+1 < len(args):
+			i++
+			model = args[i]
+		case strings.HasPrefix(args[i], "--model="):
+			model = strings.SplitN(args[i], "=", 2)[1]
 		case args[i] == "--platform" && i+1 < len(args):
 			i++
 			platform = args[i]
@@ -81,6 +97,13 @@ func handleInit(args []string, root string) error {
 
 	_ = allowedSigners // Used with --verify-signatures
 	_ = encryptKeys    // Passed to generation context
+
+	// Settled BEFORE any work: discovering halfway through that there is no
+	// usable model wastes whatever the build already did, and discovering it
+	// after a repair loop has started wastes a great deal more.
+	if err := dispatch.ChooseProvider(provider, model); err != nil {
+		return err
+	}
 
 	if verifySignatures {
 		fmt.Println("  Verifying blueprint signatures...")
@@ -134,7 +157,34 @@ func handleInit(args []string, root string) error {
 	}
 	fmt.Println()
 
-	return dispatch.ServerInit(root, platform)
+	if err := dispatch.ServerInit(root, platform); err != nil {
+		return err
+	}
+
+	// The tenant carries its own rules from here on.
+	//
+	// The blueprints that produced this code live in blueprints/, and an agent
+	// opening the repository afterwards knows none of what is in them — so it
+	// makes edits that are locally reasonable and globally wrong. Installed
+	// after generation rather than before, because a failed generation should
+	// not leave skill files describing a tenant that does not exist.
+	kind, _, _ := dispatch.SelectedProvider()
+	files, serr := dispatch.InstallSkills(root, string(kind), platform)
+	if serr != nil {
+		// Reported, not fatal: the hub is generated and works. A tenant without
+		// its skills is a tenant whose next editor is less well informed, which
+		// is worth saying out loud and not worth discarding a build over.
+		fmt.Printf("  [warn] agent skills were not installed: %v\n", serr)
+		return nil
+	}
+	if len(files) > 0 {
+		fmt.Println()
+		fmt.Println("  Agent skills installed — this tenant now explains itself:")
+		for _, f := range files {
+			fmt.Printf("    %s\n", f)
+		}
+	}
+	return nil
 }
 
 // generatedRootMarkers reports the generated artifacts already present in a

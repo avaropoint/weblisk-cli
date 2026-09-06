@@ -1,8 +1,11 @@
 # Creating a tenant
 
-> Design note, not yet implemented. The subject is one thing: turning a name into
-> a running hub that Studio is admitted to, in one command, identically from the
-> CLI and from the GUI.
+> The subject is one thing: turning a name into a running hub that Studio is
+> admitted to, in one command, identically from the CLI and from the GUI.
+>
+> **Built as of 2026-09-06.** `pkg/tenant` is the operation; `weblisk tenant
+> create` and Studio's "New tenant with a hub" are both thin wrappers over it.
+> What is done and what is not is recorded in "Where we are" below.
 
 ## The bar
 
@@ -29,13 +32,14 @@ it is the verb that puts them in order.
 | Secrets | `weblisk secret …` |
 | Inspection | `status`, `agents`, `operators`, `audit` |
 
-| Missing | Why it matters |
+| Was missing | Now |
 |---|---|
-| **`tenant` / `hub` verb** | There is no single operation that creates a tenant. A person must know to run five commands in the right order, and get the ordering right themselves |
-| **Bootstrap** | Nothing issues a first grant. `operator register` assumes an orchestrator is already running and will accept you |
-| **`connect`** | No way to attach to a hub this machine did not create |
-| **Grants** | No invite, list, or revoke. `patterns/principal-identity` specifies them; nothing implements them |
-| **Liveness with authority** | `status` says a hub answers. Nothing says "and I am admitted to it" |
+| **`tenant` verb** | **Done** — `weblisk tenant create <name>`, over `pkg/tenant`. Studio drives the same package through `--json` progress |
+| **Bootstrap** | **Done** — `server provision` writes the secret, starts the hub and claims it in one action; `pkg/tenant` calls it as step 5 |
+| **`connect`** | **Done** — `weblisk operator connect --orch <url>`, address-based, needs no local project |
+| **Liveness with authority** | **Done** — reachable and admitted are asked and reported apart, in the CLI and in Studio's hub panel |
+| **Which model** | **Done** — `weblisk providers` discovers what the machine has; the choice is per tenant over an installation default, and is never guessed when several exist |
+| **Grants** | **Still missing.** No invite, list, or revoke. `patterns/principal-identity` specifies them; nothing implements them |
 
 ## What a tenant is on disk
 
@@ -152,14 +156,26 @@ the tenant lifecycle moves to a public package:
 
 ```
 weblisk-cli/pkg/tenant
-    Create(ctx, Spec) (<-chan Progress, error)
-    Connect(ctx, addr, credential) (*Hub, error)
-    Status(ctx, *Hub) (Status, error)
+    Create(ctx, Spec) (<-chan Progress, error)      built
+    Connect(ctx, addr, credential) (*Hub, error)    still the CLI's operator connect
+    Status(ctx, *Hub) (Status, error)               still server status --json
 ```
 
-- The CLI's `tenant` command is a thin wrapper that prints progress
-- Studio imports the same package and renders progress in the UI
+- The CLI's `tenant` command is a thin wrapper that prints progress — built
+- Studio drives the same package and renders progress in the UI — built
 - Neither owns the operation
+
+**Studio drives it over `--json`, not by importing the package.** The two are
+separate Go modules and separate repositories; a compile-time dependency would
+couple Studio's build to the CLI's internals, and the boundary that already
+works everywhere else here is that Studio commands the CLI and never reaches
+into a tenant's filesystem. The progress stream is the interface — the same
+shape as `providers --json` and `server status --json` — so there is still
+exactly one implementation of the operation.
+
+The steps are a contract: `provider · directory · generate · skills · provision
+· done`. Both front ends render those names, so renaming one breaks both at
+once and is guarded against in `pkg/tenant`'s tests.
 
 `Create` returns a **progress channel** rather than blocking. Hub generation is
 minutes long; a GUI that cannot show what is happening during it will grow its
