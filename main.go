@@ -677,7 +677,7 @@ func printHelp() {
     weblisk <command> [options]
 
   Tenant:
-    tenant create <name>    Turn a name into a running hub, in one command
+    tenant create <name>    Turn a name into a running tenant, in one command
       --dir <path>          Where to create it (default: ./<name>)
       --platform <p>        go (default), cloudflare, node, rust
       --provider <p>        Model backend; omit to be asked when there is a choice

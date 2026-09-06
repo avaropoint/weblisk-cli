@@ -45,7 +45,7 @@ func PrintHelp() {
 
   Usage:
     weblisk tenant create <name> [options]
-      Turn a name into a running hub, with a first operator credential.
+      Turn a name into a running tenant, with a first operator credential.
 
       --dir <path>        Where to create it (default: ./<name>)
       --platform <p>      go (default), cloudflare, node, rust
