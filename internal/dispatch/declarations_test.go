@@ -2,44 +2,21 @@ package dispatch
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestCatchesTheRealDuplicatesFromTheFirstRun replays the hub that produced 73
-// build errors. Layer 2 must name the collisions the compiler found.
-func TestCatchesTheRealDuplicatesFromTheFirstRun(t *testing.T) {
-	dir := os.Getenv("WL_TEST_GENERATED_HUB")
-	if dir == "" {
-		t.Skip("set WL_TEST_GENERATED_HUB to a generated server/ directory")
-	}
-	byFile := map[string][]Declaration{}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Skip(err)
-	}
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".go") {
-			continue
-		}
-		b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
-		if rerr != nil {
-			continue
-		}
-		byFile[e.Name()] = ExtractDeclarations(e.Name(), string(b))
-	}
-	dupes := DuplicateDeclarations(byFile)
-	if len(dupes) == 0 {
-		t.Fatal("no duplicates found in a hub the compiler rejected for redeclaration")
-	}
-	for _, known := range []string{"writeCanonical", "TokenTTL", "ProtocolVersion"} {
-		if _, found := dupes[known]; !found {
-			t.Errorf("%s was declared twice in that build and was not detected", known)
-		}
-	}
-	t.Logf("detected %d duplicate symbols", len(dupes))
-}
+// The detector's real-world case is covered by TestARealRedeclarationIsStillCaught
+// and TestTheSameMethodOnTheSameTypeInTwoFilesIsCaught, both of which carry
+// their own fixtures.
+//
+// It used to be covered by a test that read a generated hub named by
+// WL_TEST_GENERATED_HUB and asserted duplicates were found in it. That test
+// could only ever pass against one historical directory: pointed at a hub that
+// builds cleanly it failed with "no duplicates found in a hub the compiler
+// rejected", which is a false premise rather than a finding. Deleted — a test
+// that cannot be run is a permanent skip that eventually reports a fault that
+// is not there.
 
 func TestGoSignaturesAreExtractedNotJustNames(t *testing.T) {
 	// Names alone leave the 19 signature mismatches unfixable: main.go called

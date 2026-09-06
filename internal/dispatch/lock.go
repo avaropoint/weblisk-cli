@@ -21,9 +21,9 @@ package dispatch
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/avaropoint/weblisk-cli/internal/platform"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -69,12 +69,7 @@ func AcquireTargetLock(root, planRoot string) (release func(), err error) {
 
 // processAlive reports whether a pid names a running process.
 //
-// Signal 0 performs the permission and existence checks without delivering
-// anything, which is the portable way to ask.
-func processAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
-}
+// One implementation, in internal/platform. This was a second copy asking with
+// signal 0, which on Windows always fails — so a lock left behind by a crashed
+// run would have been treated as live forever and every later run refused.
+func processAlive(pid int) bool { return platform.ProcessAlive(pid) }

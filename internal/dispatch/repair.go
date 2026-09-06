@@ -21,6 +21,7 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"github.com/avaropoint/weblisk-cli/internal/platform"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -67,7 +68,12 @@ func RunBuild(runDir, command string) BuildResult {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	// A shell, because a Build line from a platform blueprint is one string with
+	// operators in it — "cd server && go build -o orchestrator ." — not an argv.
+	// Which shell is a platform question: there is no sh on Windows, so every
+	// build and every conformance repair failed there before the command ran.
+	shell, shellArgs := platform.ShellCommand(command)
+	cmd := exec.CommandContext(ctx, shell, shellArgs...)
 	cmd.Dir = runDir
 	out, err := cmd.CombinedOutput()
 	return BuildResult{OK: err == nil, Output: string(out), Command: command}

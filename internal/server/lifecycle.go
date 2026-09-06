@@ -12,6 +12,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/avaropoint/weblisk-cli/internal/platform"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,7 +65,7 @@ func StartDetached(root, component string, port int, extra []string) (RunState, 
 	// Its own process group, so it survives the CLI exiting and a Ctrl-C in the
 	// terminal that launched it does not take the hub down with it. Expressed
 	// per platform — see process_unix.go and process_windows.go.
-	cmd.SysProcAttr = detachAttrs()
+	platform.ConfigureDetached(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return RunState{}, fmt.Errorf("starting %s: %w", component, err)
@@ -107,7 +108,7 @@ func Stop(root, component string) error {
 	}
 	// Asked first. architecture/agent requires an orderly shutdown, and that
 	// path only exists if the component is asked rather than killed.
-	if err := requestStop(p); err != nil {
+	if err := platform.RequestStop(p); err != nil {
 		return fmt.Errorf("signalling %s (pid %d): %w", component, st.PID, err)
 	}
 
@@ -122,7 +123,7 @@ func Stop(root, component string) error {
 
 	// It did not go. Reported rather than silent: a component that ignores
 	// SIGTERM has a bug worth knowing about, and killing it quietly hides that.
-	_ = forceStop(p)
+	_ = platform.ForceStop(p)
 	clearRunState(root, component)
 	return fmt.Errorf("%s did not shut down within %s and was killed — its graceful shutdown path did not complete",
 		component, stopGrace)

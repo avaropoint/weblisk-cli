@@ -27,6 +27,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/avaropoint/weblisk-cli/internal/platform"
 	"os"
 	"path/filepath"
 	"time"
@@ -100,18 +101,10 @@ func clearRunState(root, component string) {
 
 // alive reports whether a pid names a running process.
 //
-// How that is asked differs by platform and has no common spelling — see
-// process_unix.go and process_windows.go.
-func alive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return processAlive(p)
-}
+// Asked in one place, because there were three copies of this — here,
+// dispatch/lock.go and lifecycle.go — and a rule with three implementations has
+// three behaviours. See internal/platform.
+func alive(pid int) bool { return platform.ProcessAlive(pid) }
 
 // StatusOf reports what is known about a component.
 func StatusOf(root, component string) Status {
