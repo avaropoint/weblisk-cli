@@ -193,10 +193,8 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 		fail(StepDirectory, err)
 		return
 	}
-	if existing := generatedMarkers(spec.Root); len(existing) > 0 && !spec.Resume {
-		fail(StepDirectory, fmt.Errorf(
-			"%s already contains generated code (%s) — pass Resume to continue into it, "+
-				"or choose an empty directory", spec.Root, strings.Join(existing, ", ")))
+	if err := checkDirectoryFree(spec.Root, spec.Resume); err != nil {
+		fail(StepDirectory, err)
 		return
 	}
 	if !say(StepDirectory, spec.Root) {
@@ -254,6 +252,24 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 	}}:
 	case <-ctx.Done():
 	}
+}
+
+// checkDirectoryFree refuses a directory that already holds a tenant.
+//
+// Its own function so it can be tested without a model provider installed. The
+// test for this rule used to drive the whole of Create with Provider set to
+// "claude-code" — which exists on the machine it was written on and not on a CI
+// runner, so the run failed at the PROVIDER step and never reached the rule
+// under test. It passed locally and failed the first time CI ran the tests at
+// all. Provider-first is the right production order; a test of a later step
+// must not depend on an earlier one succeeding.
+func checkDirectoryFree(root string, resume bool) error {
+	existing := generatedMarkers(root)
+	if len(existing) == 0 || resume {
+		return nil
+	}
+	return fmt.Errorf("%s already contains generated code (%s) — pass Resume to continue into it, "+
+		"or choose an empty directory", root, strings.Join(existing, ", "))
 }
 
 // generatedMarkers reports the generated artifacts already in a directory, so
