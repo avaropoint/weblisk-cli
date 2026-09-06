@@ -110,3 +110,30 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = saved
 	return <-done
 }
+
+// A cache nobody edited must not report itself edited.
+//
+// Every cached source carries our own .weblisk-fetched marker, and counting it
+// as a change made every revision read "@abc1234-dirty" forever — so a cache
+// that had genuinely been edited was indistinguishable from a pristine one. A
+// warning that is always showing is not a warning.
+func TestOurOwnFetchMarkerDoesNotMakeACacheLookEdited(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		want         bool
+	}{
+		{"only our marker", "?? " + fetchStamp + "\n", false},
+		{"nothing at all", "", false},
+		{"whitespace only", "\n  \n", false},
+		{"a real untracked blueprint", "?? agents/new.md\n", true},
+		{"a real modification", " M platforms/go.md\n", true},
+		{"our marker beside a real change", "?? " + fetchStamp + "\n M platforms/go.md\n", true},
+		{"a staged rename", "R  a.md -> b.md\n", true},
+		// A file whose name merely CONTAINS the marker is not the marker.
+		{"a lookalike path", "?? docs/" + fetchStamp + ".bak\n", true},
+	} {
+		if got := hasRealChanges(tc.status); got != tc.want {
+			t.Errorf("%s: hasRealChanges(%q) = %v; want %v", tc.name, tc.status, got, tc.want)
+		}
+	}
+}

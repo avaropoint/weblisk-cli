@@ -213,11 +213,35 @@ func revisionOf(dir string) string {
 	}
 	// Tracked modifications AND untracked files both count: a blueprint that
 	// has not been added yet still reached the model.
+	//
+	// Except our OWN fetch marker, which every cached source carries. With it
+	// counted, every cache read `@abc1234-dirty` forever — so the flag that
+	// exists to say "somebody edited these blueprints" was permanently on, and
+	// a cache that had genuinely been edited looked exactly like one that had
+	// not. A warning that is always showing is not a warning.
 	status, serr := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
-	if serr == nil && strings.TrimSpace(string(status)) != "" {
+	if serr == nil && hasRealChanges(string(status)) {
 		return rev + "-dirty"
 	}
 	return rev
+}
+
+// hasRealChanges reports whether a porcelain status names anything that is not
+// this program's own bookkeeping.
+func hasRealChanges(status string) bool {
+	for _, line := range strings.Split(status, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Porcelain is "XY path"; the path is what matters here.
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[len(fields)-1] == fetchStamp {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func stampTime(dir string) time.Time {
