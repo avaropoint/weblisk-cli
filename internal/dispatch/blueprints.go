@@ -131,9 +131,31 @@ func offline() bool {
 func ResolveSources(root string) []Source {
 	var out []Source
 
-	// 1. Local project blueprints (highest priority). Never refreshed: this is a
-	// working directory, not a copy, and fetching over someone's edits would be a
-	// cache eating their work.
+	// 0. The corpus you are standing IN, if root is one.
+	//
+	// Without this, running any blueprint command from inside a blueprint
+	// repository read the CACHE — a clone of the remote — and not the files in
+	// front of you. `weblisk validate` in weblisk-blueprints reported on a copy
+	// of origin/main: an edit that added a contract binding showed 1 occurrence
+	// in the working tree, 0 in what validate examined, and an identical finding
+	// count before and after the edit. The command whose entire job is checking
+	// your work was checking somebody else's.
+	//
+	// This is the third shape of one fault. Builds read a cache that tracked a
+	// remote (unpushed commits never arrived); builds clone a local source (so
+	// uncommitted work never arrived); and this. Each time the revision printed
+	// was accurate and the conclusion drawn from it was wrong.
+	//
+	// Highest priority, and never refreshed — it is a working directory, not a
+	// copy, and fetching over somebody's edits would be a cache eating their
+	// work. AnnounceSources prints it with `-dirty` when it has uncommitted
+	// changes, so a build from here says what it read.
+	if isBlueprintCorpus(root) {
+		out = append(out, Source{Dir: root, Kind: "project", Revision: revisionOf(root)})
+	}
+
+	// 1. Local project blueprints (highest priority among nested). Never
+	// refreshed, for the same reason.
 	localDir := filepath.Join(root, "blueprints")
 	if info, err := os.Stat(localDir); err == nil && info.IsDir() {
 		out = append(out, Source{Dir: localDir, Kind: "project", Revision: revisionOf(localDir)})
@@ -263,6 +285,11 @@ func touchStamp(dir string) {
 // still run. The staleness is reported by Describe, so the output says which it
 // was working from.
 func ensureFresh(repoURL, cacheDir string) error {
+	// Every build, not only the one that clones. The cache is created once and
+	// then reused, so a warning on the clone path fires exactly once — on the
+	// build least likely to be the one where somebody has edits in flight.
+	warnIfSourceIsDirty(repoURL)
+
 	entries, err := os.ReadDir(cacheDir)
 	present := err == nil && len(entries) > 0
 
@@ -283,6 +310,43 @@ func ensureFresh(repoURL, cacheDir string) error {
 		touchStamp(cacheDir)
 	}
 	return nil
+}
+
+// warnIfSourceIsDirty says when a local source has changes the clone will drop.
+//
+// A clone takes HEAD. Point WL_BLUEPRINT_SOURCES at a working tree with
+// uncommitted edits and those edits are simply not in the build — the cache is
+// created clean at the last commit, revisionOf reports it clean, because it IS
+// clean, and the announcement reads as "your local blueprints, current".
+//
+// This is the same fault as the one AnnounceSources was written for, one layer
+// down. That one was blueprint work committed and not pushed, so the cache
+// tracked a stale remote. This one is blueprint work not committed at all. Both
+// produce a build against a specification the author believes they replaced,
+// and both are silent — the difference is only which git operation drops the
+// work.
+func warnIfSourceIsDirty(repoURL string) {
+	// Only meaningful for a local path. A URL has no working tree to be dirty.
+	if strings.Contains(repoURL, "://") || strings.Contains(repoURL, "@") {
+		return
+	}
+	if _, err := os.Stat(repoURL); err != nil {
+		return
+	}
+	status, err := exec.Command("git", "-C", repoURL, "status", "--porcelain").Output()
+	if err != nil || !hasRealChanges(string(status)) {
+		return
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(status)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	fmt.Fprintf(os.Stderr,
+		"  [warn] %s has %d uncommitted change(s), and a clone takes the last commit.\n"+
+			"         Those changes are NOT in this build. Commit them, or the build reads\n"+
+			"         the specification you think you replaced.\n", repoURL, n)
 }
 
 func clone(repoURL, cacheDir string) error {
@@ -488,4 +552,27 @@ func AnnounceSources(srcs []Source) {
 		fmt.Println("          tenant, or a path in WL_BLUEPRINT_SOURCES.")
 	}
 	fmt.Println()
+}
+
+// isBlueprintCorpus reports whether dir IS a blueprint corpus rather than a
+// project that has one.
+//
+// Detected by schemas/common.md plus at least one blueprint family directory.
+// Specific on purpose: a lone `architecture/` directory is a shape plenty of
+// unrelated repositories have, and treating one as a corpus would make a build
+// read a stranger's markdown as its specification. schemas/common.md is this
+// corpus's own root document and nothing else has it.
+func isBlueprintCorpus(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if info, err := os.Stat(filepath.Join(dir, "schemas", "common.md")); err != nil || info.IsDir() {
+		return false
+	}
+	for _, family := range []string{"architecture", "protocol", "patterns", "agents"} {
+		if info, err := os.Stat(filepath.Join(dir, family)); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }

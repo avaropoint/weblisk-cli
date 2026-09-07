@@ -134,7 +134,11 @@ func blueprintType(blueprint string) string {
 //
 // schemas is keyed as "schemas/agent.md"; corpus is every other blueprint.
 func ValidateCorpus(corpus map[string]string) []Finding {
-	findings := ValidateStructure(corpus)
+	// First, because everything after this reads parsed blocks. A block that
+	// does not parse contributes no bindings, and no bindings breaks no rule —
+	// so without this the corpus can be unreadable and report clean.
+	findings := validateMachineReadBlocksParse(corpus)
+	findings = append(findings, ValidateStructure(corpus)...)
 	findings = append(findings, validateDeclaredNames(corpus)...)
 	findings = append(findings, validateEndpointServers(corpus)...)
 	findings = append(findings, validateSectionConstructs(corpus)...)

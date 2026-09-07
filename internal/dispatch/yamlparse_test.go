@@ -9,7 +9,7 @@ import (
 )
 
 var reFenceForTest = regexp.MustCompile("(?s)```yaml\\n(.*?)```")
-var reMachineRead = regexp.MustCompile(`^\s*(requires|types)\s*:`)
+var reMachineRead = regexp.MustCompile(`^\s*(requires|types|contracts)\s*:`)
 
 // Every block generation READS must parse. This is the hard line.
 //
@@ -17,6 +17,16 @@ var reMachineRead = regexp.MustCompile(`^\s*(requires|types)\s*:`)
 // definition; both are consumed by the pipeline, so one that does not parse is
 // a contract nobody read. Measured at 247 blocks, and it must stay at zero
 // failures.
+//
+// `contracts:` was added 2026-09-06 and is the most consequential of the three.
+// A contract block declares every behaviour and binding a component must
+// satisfy, so one that does not parse means the whole declaration is silently
+// absent — and `weblisk validate` reported "Validation passed" on exactly that,
+// because an unparseable block yields no bindings and no bindings breaks no
+// rule. Caught when a rule beginning with a backtick — which cannot start a
+// YAML plain scalar — broke architecture/admin's block, and only the ratchet
+// below noticed. The corpus had zero such blocks at the time this line was
+// added, so this is holding a property, not fixing a backlog.
 //
 // Found this way: `{ type: string[] }` inside a flow mapping. `[` opens a flow
 // sequence, so fourteen values in architecture/change-management had never

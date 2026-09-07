@@ -46,6 +46,14 @@ func Validate(root string, args []string) error {
 		issues++
 	} else {
 		fmt.Printf("  [ok] %d blueprint source(s) resolved\n", len(dirs))
+		// WHICH ones, and at what revision. "2 sources resolved" is the sentence
+		// that let this command report on a clone of origin/main while an edited
+		// working tree sat in front of it — the count was right and said nothing
+		// about what was read. Describe() carries the kind, the revision and
+		// `-dirty`, which is the whole answer to "is this my work".
+		for _, src := range ResolveSources(root) {
+			fmt.Printf("    %s\n", src.Describe())
+		}
 		passed++
 
 		// The corpus against its own schemas.
@@ -308,6 +316,25 @@ func validateSingleFile(root, file string) error {
 	fmt.Println()
 	fmt.Printf("  Validating: %s\n\n", file)
 
+	// A blueprint is validated against the corpus rules, not against the
+	// generic YAML checks below.
+	//
+	// It was not, and the gap was invisible in the worst way: `weblisk validate
+	// architecture/admin.md` printed "Validation passed" for a blueprint whose
+	// `contracts:` block could not be parsed at all. Nothing was checked, so
+	// nothing failed, and the message said what a passing check says. Anyone
+	// editing one blueprint — which is how blueprints are edited — was being
+	// told their change was sound by a function that had not looked at it.
+	//
+	// The whole corpus is loaded even when one file is named, because the rules
+	// that matter most are relationships BETWEEN blueprints: a binding resolves
+	// against another document's declarations, and a rule restated in two
+	// places is only visible from both. Findings are then filtered to the file
+	// asked about.
+	if strings.EqualFold(filepath.Ext(file), ".md") {
+		return validateSingleBlueprint(root, file, content)
+	}
+
 	// Check YAML is non-empty
 	if len(strings.TrimSpace(content)) == 0 {
 		fmt.Println("  [error] File is empty")
@@ -403,4 +430,59 @@ func loadCorpus(dirs []string) map[string]string {
 		}
 	}
 	return corpus
+}
+
+// validateSingleBlueprint runs the corpus rules and reports the ones for one file.
+func validateSingleBlueprint(root, file, content string) error {
+	dirs := resolvedSources(root)
+	corpus := loadCorpus(dirs)
+	if len(corpus) == 0 {
+		// Better than validating it alone: alone, every cross-document rule
+		// reports the other document as missing, and a page of false faults is
+		// worse than an honest refusal.
+		fmt.Println("  [warn] no blueprint sources resolved — a blueprint cannot be checked")
+		fmt.Println("         on its own, because most of what makes it correct is its")
+		fmt.Println("         relationship to the others. Run: weblisk blueprints update")
+		return fmt.Errorf("no corpus to check against")
+	}
+
+	// The file as it is on disk right now, which may differ from what the
+	// resolved sources hold — this is usually run on an edit in progress.
+	name := normaliseBlueprintName(root, file)
+	corpus[name] = content
+
+	var mine []Finding
+	for _, f := range ValidateCorpus(corpus) {
+		if f.Blueprint == name {
+			mine = append(mine, f)
+		}
+	}
+	if len(mine) == 0 {
+		fmt.Printf("  [ok] conforms to its schema, checked against %d blueprint(s)\n\n", len(corpus))
+		return nil
+	}
+	faults := Faults(mine)
+	fmt.Printf("  [%s] %d finding(s)\n\n", map[bool]string{true: "fail", false: "warn"}[faults > 0], len(mine))
+	fmt.Print(FormatFindings(mine))
+	fmt.Println()
+	if faults > 0 {
+		return fmt.Errorf("%d fault(s) in %s", faults, file)
+	}
+	return nil
+}
+
+// normaliseBlueprintName turns a path as typed into the name the corpus uses.
+//
+// The corpus is keyed by the path relative to a blueprint SOURCE — "architecture/admin.md"
+// — and a person types whatever their shell completed, which may be absolute,
+// may start with "./", and may be relative to a source root rather than to cwd.
+func normaliseBlueprintName(root, file string) string {
+	name := filepath.ToSlash(strings.TrimPrefix(filepath.Clean(file), "./"))
+	for _, dir := range resolvedSources(root) {
+		if rel, err := filepath.Rel(dir, filepath.Join(root, file)); err == nil &&
+			!strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return name
 }
