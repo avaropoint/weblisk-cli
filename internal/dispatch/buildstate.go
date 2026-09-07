@@ -213,6 +213,21 @@ func ReadBuildVerdict(root string) BuildVerdict {
 
 // MarkBuildTerminal records how a build ended, so a later reader can tell a
 // finished build from a crashed one.
+//
+// It PRESERVES the last known state rather than replacing it. The first version
+// wrote `BuildState{Status: terminal}`, which discarded the position and the
+// provider's quota — so after a build ended, `weblisk build status` could say
+// "failed" and not how far it got or what the quota was, which is exactly what
+// somebody asks next. Observed on a completed build: `quota: (none recorded)`.
+//
+// A terminal record is the one a person reads LONG after the fact, when the
+// stream is gone and the process with it. It is the worst place to throw
+// context away.
 func MarkBuildTerminal(root, terminal, detail string) {
-	recordBuildState(root, BuildState{Status: terminal}, terminal, detail, true)
+	last := BuildState{Status: terminal}
+	if prev := ReadBuildVerdict(root); prev.Build != nil {
+		last = prev.Build.State
+		last.Status = terminal
+	}
+	recordBuildState(root, last, terminal, detail, true)
 }

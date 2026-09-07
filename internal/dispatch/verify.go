@@ -644,7 +644,44 @@ const (
 	OutcomeNotApplicable Outcome = "not-applicable"
 	// OutcomeUnchecked — nothing mechanical applies.
 	OutcomeUnchecked Outcome = "unchecked"
+	// OutcomeInconclusive — a check APPLIED and could not settle the question,
+	// because the source defeated it rather than contradicted it.
+	//
+	// Distinct from every other outcome and the distinction matters:
+	//
+	//	unchecked      no check exists for this assertion
+	//	failed         a check settled it AGAINST the source
+	//	inconclusive   a check ran and the source could not be read
+	//
+	// Collapsing the third into the second is how one run reported 25
+	// "structural checks disagree with the specification" when what it meant
+	// was that a generated route table is a loop over constants this tool
+	// cannot resolve. The detail said "cannot tell"; the verdict said
+	// "refuted". A checker that reports what it does not know as a fault is a
+	// checker people learn to ignore, and 25 of them at once teaches that
+	// lesson in one sitting.
+	OutcomeInconclusive Outcome = "inconclusive"
 )
+
+// inconclusivePrefix marks a check's detail as unresolvable rather than failed.
+//
+// A sentinel on the detail string, because the alternative is a fourth return
+// value on every structural check to serve the two that need it. Defined here
+// and consumed in exactly one place (evaluateItem), so the producer and the
+// reader cannot drift; `markInconclusive` is the only way to write it and a
+// guard asserts the marker never reaches printed output.
+const inconclusivePrefix = "\x00inconclusive\x00"
+
+// markInconclusive labels a detail as "a check ran and could not settle this".
+func markInconclusive(detail string) string { return inconclusivePrefix + detail }
+
+// splitInconclusive reports whether a detail was marked, and strips the marker.
+func splitInconclusive(detail string) (string, bool) {
+	if strings.HasPrefix(detail, inconclusivePrefix) {
+		return strings.TrimPrefix(detail, inconclusivePrefix), true
+	}
+	return detail, false
+}
 
 // reConditional matches an assertion whose obligation is conditional.
 //
@@ -913,10 +950,12 @@ var structuralChecks = []structuralCheck{
 			// route table is a loop over constants is a confident zero, and it
 			// refuted twenty-one correct assertions in one run.
 			if len(c.UnroutableCalls) > 0 {
-				return false, "cannot tell whether a handler is registered for " +
+				// INCONCLUSIVE, not refuted. This tool could not read the route
+				// table; that is a fact about the tool, not about the hub.
+				return false, markInconclusive("cannot tell whether a handler is registered for " +
 						strings.Join(missing, ", ") + " — " +
 						plural(len(c.UnroutableCalls), "mux registration") +
-						" in " + firstUnroutable(c) + " could not be resolved to a path",
+						" in " + firstUnroutable(c) + " could not be resolved to a path"),
 					routeHosts(c)
 			}
 			// Nothing owns a route that does not exist, so the blame is the file

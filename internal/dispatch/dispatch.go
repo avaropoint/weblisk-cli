@@ -1171,16 +1171,30 @@ func reportChecklist(results []ChecklistResult) {
 		return
 	}
 	verified, failed, necessary, notApplicable, unchecked := ChecklistCounts(results)
-	fmt.Printf("  Structural checks (advisory): %d verified, %d refuted, %d necessary-conditions-hold, %d not-applicable, %d no check\n",
-		verified, failed, necessary, notApplicable, unchecked)
+	inconclusive := ChecklistInconclusive(results)
+	fmt.Printf("  Structural checks (advisory): %d verified, %d refuted, %d inconclusive, %d necessary-conditions-hold, %d not-applicable, %d no check\n",
+		verified, failed, inconclusive, necessary, notApplicable, unchecked)
 	for _, r := range results {
 		if r.Outcome == OutcomeFailed {
 			fmt.Printf("    [refuted] %s\n              %s\n", r.Item.Text, r.Detail)
 		}
 	}
+	// Listed apart, and AFTER the refutations, because they are not findings
+	// about the component — they are gaps in this tool. One run printed 25 of
+	// them as "checks disagree with the specification" when every one meant
+	// "the route table is a loop over constants I cannot resolve".
+	for _, r := range results {
+		if r.Outcome == OutcomeInconclusive {
+			fmt.Printf("    [inconclusive] %s\n                   %s\n", r.Item.Text, r.Detail)
+		}
+	}
 	if failed > 0 {
 		fmt.Printf("    %d structural check(s) disagree with the specification as read by the model.\n"+
 			"    Neither is authoritative here — read both.\n", failed)
+	}
+	if inconclusive > 0 {
+		fmt.Printf("    %d could not be settled either way — this tool could not read the source,\n"+
+			"    which says nothing about whether the component is correct.\n", inconclusive)
 	}
 	fmt.Println()
 }

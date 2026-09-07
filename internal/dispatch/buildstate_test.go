@@ -208,3 +208,55 @@ func TestStatusReportsFailureWithoutFailing(t *testing.T) {
 		t.Errorf("reporting a failed build returned an error: %v", err)
 	}
 }
+
+// A terminal record keeps the context a person will ask for.
+//
+// The first version wrote BuildState{Status: terminal}, discarding the position
+// and the provider's quota. Observed on a real completed build:
+// `quota: (none recorded)`. A terminal record is the one read LONG after the
+// fact — the stream gone, the process gone — so it is the worst place to throw
+// context away. "It failed" invites "how far did it get, and was it the quota?"
+func TestATerminalRecordKeepsTheLastKnownState(t *testing.T) {
+	root := t.TempDir()
+	recordBuildState(root, BuildState{
+		Index: 21, Total: 33, File: "internal/orchestrator/routes.go",
+		Status: "generating", Quota: "89% of a weekly window used",
+	}, "", "", true)
+
+	MarkBuildTerminal(root, "failed", "1 conformance test failed")
+
+	v := ReadBuildVerdict(root)
+	if v.Status != "failed" {
+		t.Fatalf("status = %q, want failed", v.Status)
+	}
+	st := v.Build.State
+	if st.Index != 21 || st.Total != 33 {
+		t.Errorf("position lost: %d/%d — a reader cannot tell how far it got", st.Index, st.Total)
+	}
+	if st.File != "internal/orchestrator/routes.go" {
+		t.Errorf("the file it died on was lost: %q", st.File)
+	}
+	if st.Quota == "" {
+		t.Error("the provider quota was lost — it is the first thing to suspect on a long build")
+	}
+	if st.Status != "failed" {
+		t.Errorf("state status = %q, want the terminal one", st.Status)
+	}
+	if !strings.Contains(v.Why, "1 conformance test failed") {
+		t.Errorf("the reason was lost: %s", v.Why)
+	}
+}
+
+// And it must work when there is no prior state — a build that dies before it
+// records anything must still record HOW it died.
+func TestATerminalRecordWorksWithNoPriorState(t *testing.T) {
+	root := t.TempDir()
+	MarkBuildTerminal(root, "failed", "no provider available")
+	v := ReadBuildVerdict(root)
+	if v.Status != "failed" {
+		t.Fatalf("status = %q, want failed", v.Status)
+	}
+	if !strings.Contains(v.Why, "no provider available") {
+		t.Errorf("the reason was lost: %s", v.Why)
+	}
+}

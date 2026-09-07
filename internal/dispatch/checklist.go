@@ -309,6 +309,14 @@ func evaluateOne(item ChecklistItem, ctx *CheckContext) ChecklistResult {
 		r.Check = sc.name
 		switch {
 		case !ok:
+			// A check that could not READ the source has not refuted anything.
+			// See OutcomeInconclusive: reporting the two the same way produced
+			// 25 "checks disagree" from a route table this tool cannot resolve.
+			if stripped, unresolved := splitInconclusive(detail); unresolved {
+				r.Outcome, r.Detail = OutcomeInconclusive, stripped
+				r.Files = blame
+				return r
+			}
 			r.Outcome, r.Detail = OutcomeFailed, detail
 			r.Files = blame
 			if len(r.Files) == 0 {
@@ -387,6 +395,25 @@ func ChecklistSummary(results []ChecklistResult) (verified, failed, necessary, u
 // one needs nobody. Folding them inflates "needs review by hand" with work that
 // does not exist.
 func ChecklistCounts(results []ChecklistResult) (verified, failed, necessary, notApplicable, unchecked int) {
+	v, f, n, na, u, _ := checklistTally(results)
+	return v, f, n, na, u
+}
+
+// ChecklistInconclusive counts the assertions a check applied to and could not
+// settle, because the source defeated it.
+//
+// Its own accessor rather than a sixth return value on ChecklistCounts, so the
+// three existing callers keep working and nothing has to pretend it cares.
+// Counted apart from `unchecked` because they are different facts: unchecked
+// means no check exists, inconclusive means one ran and could not read the
+// source. Lumped together, a tool that cannot parse a generated route table
+// looks like a specification nobody has written checks for.
+func ChecklistInconclusive(results []ChecklistResult) int {
+	_, _, _, _, _, inconclusive := checklistTally(results)
+	return inconclusive
+}
+
+func checklistTally(results []ChecklistResult) (verified, failed, necessary, notApplicable, unchecked, inconclusive int) {
 	for _, r := range results {
 		switch r.Outcome {
 		case OutcomeVerified:
@@ -397,6 +424,8 @@ func ChecklistCounts(results []ChecklistResult) (verified, failed, necessary, no
 			necessary++
 		case OutcomeNotApplicable:
 			notApplicable++
+		case OutcomeInconclusive:
+			inconclusive++
 		default:
 			unchecked++
 		}
