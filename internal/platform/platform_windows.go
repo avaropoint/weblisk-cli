@@ -144,3 +144,19 @@ func ForceStop(p *os.Process) error {
 	}
 	return p.Kill()
 }
+
+func startInOwnGroup(cmd *exec.Cmd) {
+	// configureDetached already asks for CREATE_NEW_PROCESS_GROUP, which is the
+	// nearest equivalent Windows offers without a Job Object. A true tree kill
+	// needs a Job Object; that is worth doing when a Windows provider is
+	// actually driven this way, and inventing it untested would be worse than
+	// saying it is not done.
+	configureDetached(cmd)
+}
+
+func killGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	return cmd.Process.Kill()
+}

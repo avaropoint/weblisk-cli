@@ -96,8 +96,27 @@ type LocalCLIProvider struct {
 	observed   string
 	observedMu sync.Mutex
 	JSON       bool          // parse stdout as a result envelope
-	Timeout    time.Duration // 0 means defaultLocalCLITimeout
+	Timeout    time.Duration // 0 means defaultLocalCLITimeout (non-streaming only)
 	Dir        string        // working directory, "" means inherit
+	// Stream drives the CLI with --output-format stream-json and watches its
+	// events, so liveness is observed rather than assumed. See
+	// localcli_stream.go for why that replaces a total deadline.
+	Stream bool
+	// IdleTimeout is how long the provider may be SILENT. 0 means
+	// defaultIdleTimeout. Total elapsed time is never an abort condition.
+	IdleTimeout time.Duration
+	// OnActivity, when set, is called as the stream progresses. This is what a
+	// console shows instead of a spinner.
+	OnActivity func(ProviderActivity)
+	// TotalCap bounds one call's total wall time. 0 means only the absolute
+	// backstop applies.
+	//
+	// This is NOT the deadline that was removed. That one bounded every call,
+	// including the generation calls that legitimately take longer than any
+	// number somebody would pick. This bounds ADVISORY calls, where running out
+	// of time is a normal outcome because nothing depends on the answer. See
+	// advisory.go.
+	TotalCap time.Duration
 }
 
 // defaultLocalCLITimeout bounds one call. Generation from blueprints is
@@ -132,6 +151,9 @@ func flattenMessages(messages []Message) string {
 }
 
 func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
+	if p.Stream {
+		return p.chatStreaming(messages)
+	}
 	timeout := p.Timeout
 	if timeout <= 0 {
 		timeout = defaultLocalCLITimeout
@@ -251,6 +273,7 @@ func claudeCodeArgs() []string {
 // that looks supported and fails on first use.
 func newLocalCLIProvider(kind, model string) (Provider, error) {
 	timeout := parseTimeoutEnv(os.Getenv("WL_AI_TIMEOUT"))
+	idle := parseTimeoutEnv(os.Getenv("WL_AI_IDLE_TIMEOUT"))
 
 	switch kind {
 	case "claude-code", "claude-local":
@@ -268,6 +291,14 @@ func newLocalCLIProvider(kind, model string) (Provider, error) {
 		return &LocalCLIProvider{
 			Bin: bin, Name: "claude code", Args: claudeCodeArgs(),
 			Model: model, JSON: true, Timeout: timeout,
+			// Streamed, so liveness is observed. WL_AI_TIMEOUT is still read
+			// and still bounds the non-streaming path, but it no longer decides
+			// whether a working call is allowed to finish — see
+			// localcli_stream.go on why a total deadline was the wrong control.
+			Stream: true, IdleTimeout: idle,
+			// So a console can say whether the model is alive rather than
+			// showing a spinner and hoping. See observe.go.
+			OnActivity: observeActivity,
 		}, nil
 
 	case "codex":

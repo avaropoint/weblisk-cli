@@ -96,6 +96,30 @@ func isTransient(err error) bool {
 	if err == nil {
 		return false
 	}
+	// OUR decision to stop waiting is never a provider condition.
+	//
+	// An idle abort means the stream went silent and we abandoned it. Nothing
+	// about the provider changed, so a retry reproduces it exactly — and it
+	// did: six retries of a ten-minute deadline, sixty minutes spent reaching
+	// the answer the first attempt already had. A deterministic local abort
+	// cannot be waited out.
+	switch err.(type) {
+	case *idleAbort:
+		// The stream went silent and we abandoned it. Retrying reproduces it
+		// exactly — and did: six retries of a ten-minute deadline, sixty
+		// minutes spent reaching the answer the first attempt already had.
+		return false
+	case *advisoryExhausted:
+		// An advisory step ran out of the budget derived for it. Retrying
+		// spends the budget again to reach the same place.
+		//
+		// Classified by TYPE, not left to word matching. It happened to be
+		// classified correctly by accident — its message contains no transient
+		// phrase — and an accident is not a rule: rewording the sentence would
+		// have silently made an advisory timeout retryable again, which is the
+		// exact shape of the original stall.
+		return false
+	}
 	if f := FaultOf(err); f != nil {
 		switch f.Class() {
 		case FaultTransient:
@@ -134,7 +158,7 @@ func withTransientRetry(onRetry func(attempt int, wait time.Duration, err error)
 		if attempt == transientAttempts {
 			break
 		}
-		wait := transientBackoff(attempt)
+		wait := waitFor(attempt, err)
 		if onRetry != nil {
 			onRetry(attempt, wait, err)
 		}
@@ -221,5 +245,77 @@ func Underlying(p Provider) Provider {
 			return p
 		}
 		p = u.Unwrap()
+	}
+}
+
+// quotaWaitCap bounds a wait derived from the provider's own reset time.
+//
+// A five-hour window that has just rolled over means a reset four hours away,
+// and no build should sit on that. Beyond the cap the run fails with the reset
+// time in the message, which is a person's decision to make and not ours.
+const quotaWaitCap = 10 * time.Minute
+
+// waitFor decides how long to wait before the next attempt.
+//
+// # Ask the provider before guessing
+//
+// A backoff table is a guess at "when will this clear". When the provider has
+// told us — `rate_limit_event` carries `resetsAt`, a unix time — we are holding
+// the real answer while consulting the guess. So the reset time wins when it is
+// known, present, in the future and within the cap.
+//
+// This matters in both directions. A reset two minutes away should be waited
+// for, where the table would have given up after 45 seconds. A reset four hours
+// away should not be waited for at all, where the table would have burned its
+// whole window discovering that.
+func waitFor(attempt int, err error) time.Duration {
+	if rl := LastRateLimit(); rl != nil && rl.ResetsAt > 0 {
+		until := time.Until(time.Unix(rl.ResetsAt, 0))
+		if until > 0 && until <= quotaWaitCap {
+			// A second past the reset, because waiting until exactly the reset
+			// races the provider's own clock.
+			return until + time.Second
+		}
+	}
+	return transientBackoff(attempt)
+}
+
+// QuotaNote describes the provider's quota state for a person, or "".
+//
+// Said BEFORE a build rather than after it fails. A run that starts at 92% of a
+// five-hour window and dies forty minutes in was predictable at minute zero,
+// and nothing said so — the utilisation was in the stream all along and was
+// parsed by nobody.
+func QuotaNote() string {
+	rl := LastRateLimit()
+	if rl == nil {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "provider quota: %.0f%% of a %s window used", rl.Utilization*100, humanWindow(rl.Type))
+	if rl.ResetsAt > 0 {
+		if until := time.Until(time.Unix(rl.ResetsAt, 0)); until > 0 {
+			fmt.Fprintf(&b, ", resets in %s", until.Round(time.Minute))
+		}
+	}
+	if rl.Overage {
+		b.WriteString(" (on overage)")
+	}
+	if rl.Status != "" && rl.Status != "allowed" {
+		fmt.Fprintf(&b, " — status %q", rl.Status)
+	}
+	return b.String()
+}
+
+func humanWindow(t string) string {
+	switch t {
+	case "five_hour":
+		return "five-hour"
+	case "weekly", "seven_day":
+		return "weekly"
+	case "":
+		return "rate"
+	default:
+		return strings.ReplaceAll(t, "_", "-")
 	}
 }

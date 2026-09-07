@@ -43,3 +43,24 @@ func RequestStop(p *os.Process) error { return p.Signal(syscall.SIGTERM) }
 
 // ForceStop ends a process that would not go.
 func ForceStop(p *os.Process) error { return p.Signal(syscall.SIGKILL) }
+
+func startInOwnGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+// killGroup signals the whole group. A negative pid is the group, per kill(2).
+func killGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	// The group id equals the leader's pid, because Setpgid was set with no
+	// Pgid — the child became its own leader.
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err == nil {
+		return nil
+	}
+	// No group (Setpgid was not set, or the leader is gone): the process alone.
+	return cmd.Process.Kill()
+}

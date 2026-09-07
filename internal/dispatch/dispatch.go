@@ -272,12 +272,21 @@ func ComponentInit(root, target, platform string) error {
 			return fmt.Errorf("%s", strings.TrimRight(b.String(), "\n"))
 		}
 
+		generationStarted := time.Now()
 		files, gerr := GenerateTarget(provider, plan, platform, graph.Map, graph.Order, platBP, root,
 			printProgress, req.Checklist, req.Bindings, st, keep, req.EndpointOps)
 		if gerr != nil {
 			return gerr
 		}
-		fmt.Printf("\n  [ok] Generated %d files in %s/\n\n", len(files), plan.Root)
+		generationTook := time.Since(generationStarted)
+		fmt.Printf("\n  [ok] Generated %d files in %s/ (%s)\n\n", len(files), plan.Root,
+			generationTook.Round(time.Second))
+		// What the provider said about its own quota while doing that work.
+		// Reported here because the next steps also need it, and because a run
+		// that ends on a limit should have been able to see it coming.
+		if note := QuotaNote(); note != "" {
+			fmt.Printf("  %s\n\n", note)
+		}
 		RecordWrittenWith(root, plan, files, graph.Map)
 
 		// Whether running the component found a fault. Held rather than returned
@@ -341,7 +350,17 @@ func ComponentInit(root, target, platform string) error {
 		}
 
 		// What the blueprints say, as read by the model — the authority.
-		if verdicts, verr := SelfVerify(provider, files, req.Checklist); verr == nil {
+		//
+		// Bounded, because this step's failure is a warning and the build
+		// continues without it. Unbounded it once spent sixty-five minutes on
+		// commentary the build does not depend on; the budget comes from how
+		// long generation itself took, since this step reads every generated
+		// file and scales with them. See advisory.go.
+		advisory, bounded := AdvisoryProvider(provider, generationTook)
+		if !bounded {
+			fmt.Printf("  [note] this provider cannot be time-bounded, so verification runs unbounded\n")
+		}
+		if verdicts, verr := SelfVerify(advisory, files, req.Checklist); verr == nil {
 			reportVerdicts(verdicts, req.Checklist)
 		} else {
 			fmt.Printf("  [warn] verification against the assertions could not be read: %v\n\n", verr)
@@ -1097,6 +1116,10 @@ func writeGeneratedFiles(targetDir string, files []GeneratedFile) (int, error) {
 // A retry names the reason. "Retrying main.go" tells somebody nothing; "retrying
 // main.go — the response began with prose" tells them whether to change model.
 func printProgress(p Progress) {
+	// Structure first, then prose. A console reads the structure and a person
+	// reads the sentence; emitting only the sentence is what left Studio with a
+	// spinner and a log it could not interrogate.
+	observeProgress(p)
 	switch p.Status {
 	case "generating":
 		fmt.Printf("  [%d/%d] %s\n", p.Step, p.Total, p.Path)

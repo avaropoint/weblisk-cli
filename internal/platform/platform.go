@@ -48,3 +48,16 @@ func ExtraInstallDirs() []string { return extraInstallDirs() }
 // ConfigureDetached sets whatever a command needs in order to outlive the
 // process that started it.
 func ConfigureDetached(cmd *exec.Cmd) { configureDetached(cmd) }
+
+// StartInOwnGroup makes cmd the leader of a new process group, so that
+// KillGroup can take its children with it.
+//
+// Needed because killing only the process leaves its children holding the
+// stdout pipe open. A stalled provider abandoned for silence would keep the
+// reader blocked on a pipe nothing would ever write to again — the abort was
+// detected and did not take effect.
+func StartInOwnGroup(cmd *exec.Cmd) { startInOwnGroup(cmd) }
+
+// KillGroup kills cmd's process group, or cmd alone where the platform has no
+// group to kill.
+func KillGroup(cmd *exec.Cmd) error { return killGroup(cmd) }

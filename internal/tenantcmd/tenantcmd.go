@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/avaropoint/weblisk-cli/internal/operator"
 	wserver "github.com/avaropoint/weblisk-cli/internal/server"
@@ -178,11 +179,48 @@ func handleCreate(args []string, cwd string) error {
 	return nil
 }
 
+// liveState is the last liveness line printed, and when.
+//
+// Generation now reports liveness every couple of seconds, which is what a
+// console wants and a terminal does not: forty minutes of it is twelve hundred
+// near-identical rows, and the steps that matter scroll away between them.
+var (
+	lastLiveLine time.Time
+	lastLiveText string
+)
+
+// liveInterval is how often a terminal is told the model is still working.
+//
+// Thirty seconds, because the purpose in a terminal is reassurance rather than
+// measurement — anything finer is answered by `weblisk build status`, which
+// reads the same state on demand and does not have to guess when somebody is
+// looking.
+const liveInterval = 30 * time.Second
+
 func printStep(p tenant.Progress) {
 	if p.Err != "" {
 		fmt.Printf("  x %s: %s\n", p.Step, p.Err)
 		return
 	}
+
+	// A pure liveness sample: no file position, just "the model is working".
+	// Rate-limited, and always printed when it says something new about being
+	// STUCK — a build going quiet is the one thing worth interrupting for.
+	if p.Build != nil && p.Build.Total == 0 && p.Build.IdleSeconds != nil {
+		quiet := *p.Build.IdleSeconds
+		stuck := quiet > 60
+		if !stuck && time.Since(lastLiveLine) < liveInterval {
+			return
+		}
+		if p.Message == lastLiveText {
+			return
+		}
+		lastLiveLine = time.Now()
+		lastLiveText = p.Message
+		fmt.Printf("  . %-10s %s\n", p.Step, p.Message)
+		return
+	}
+
 	fmt.Printf("  . %-10s %s\n", p.Step, p.Message)
 }
 
