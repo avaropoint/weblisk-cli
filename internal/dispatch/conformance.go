@@ -317,12 +317,16 @@ var l1Tests = []conformanceTest{
 			return true, "", fmt.Sprintf("%d error responses carry a JSON `error` field", seen)
 		},
 	},
-	// Registration tests need an ML-DSA-65 signing key and the mock agent
-	// architecture/testing specifies. Declared so they are reported unrun rather
-	// than quietly absent — an assertion nobody checked is not one that passed.
-	{id: "L1-03", name: "Registration", applies: map[string]bool{"orchestrator": true}},
-	{id: "L1-04", name: "Registration Rejects Bad Signature", applies: map[string]bool{"orchestrator": true}},
-	{id: "L1-05", name: "Registration Rejects Stale Timestamp", applies: map[string]bool{"orchestrator": true}},
+}
+
+// init appends the registration tests.
+//
+// They live in conformance_register.go with the mock agent they need, rather
+// than inline here: the harness is 250 lines of key generation, canonical
+// manifest bytes and three refusal shapes, and inlining it would bury the other
+// seven tests. Appended in init so there is still exactly one list.
+func init() {
+	l1Tests = append(l1Tests, registrationTests...)
 }
 
 // ConformanceSummary counts outcomes. Unrun is separate from failed, and from

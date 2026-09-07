@@ -181,6 +181,7 @@ func TestTheStepNamesAreStable(t *testing.T) {
 		StepGenerate:  "generate",
 		StepSkills:    "skills",
 		StepProvision: "provision",
+		StepAccept:    "accept",
 		StepDone:      "done",
 	} {
 		if string(step) != want {

@@ -37,6 +37,9 @@
 //  5. provision  hub identity, bootstrap secret, start, claim — one action,
 //     because the secret exists only between steps and a person
 //     holding it in a terminal is the whole safety argument
+//  6. accept     ask the running tenant whether it works, over HTTP, the way
+//     its clients will. Without this, "created" meant only that
+//     the generator returned — see accept.go
 package tenant
 
 import (
@@ -45,6 +48,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/avaropoint/weblisk-cli/internal/dispatch"
 	wserver "github.com/avaropoint/weblisk-cli/internal/server"
@@ -88,6 +92,7 @@ const (
 	StepGenerate  Step = "generate"
 	StepSkills    Step = "skills"
 	StepProvision Step = "provision"
+	StepAccept    Step = "accept"
 	StepDone      Step = "done"
 )
 
@@ -95,6 +100,14 @@ const (
 type Progress struct {
 	Step    Step   `json:"step"`
 	Message string `json:"message"`
+	// Build is structured state during generation, when there is any.
+	//
+	// Message is a sentence for a person; this is fields for a console. Without
+	// it a front end can only render the sentence, which is why Studio watched
+	// a build for sixty-five minutes with nothing to say about it — the
+	// liveness, the position and the provider's quota were all in the text
+	// stream as prose and none of them was answerable.
+	Build *dispatch.BuildState `json:"build,omitempty"`
 	// Err ends the operation. The channel closes after it.
 	Err string `json:"error,omitempty"`
 	// Result is present on the final message, and only then.
@@ -110,6 +123,11 @@ type Result struct {
 	Provider string   `json:"provider"`
 	Model    string   `json:"model,omitempty"`
 	Skills   []string `json:"skills,omitempty"`
+	// Checks is what the finished tenant answered when asked whether it works.
+	// Present even when everything passed: a caller that wants to show "6 of 6"
+	// needs the passes, and a result carrying only failures cannot tell "all
+	// good" from "nothing was asked".
+	Checks []Check `json:"checks,omitempty"`
 }
 
 // Create produces a tenant and returns progress as it happens.
@@ -206,10 +224,40 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 	if !say(StepGenerate, "building the hub from the blueprints — this takes minutes") {
 		return
 	}
+	// Structured build state, forwarded onto the same channel the steps use.
+	//
+	// Non-blocking: generation must not be paced by whether anybody is reading
+	// the console. A dropped activity sample costs nothing — the next one
+	// carries the same answer two seconds later — whereas a generation stalled
+	// because a browser closed is the fault detached builds were introduced to
+	// fix, reintroduced one layer down.
+	restore := dispatch.ObserveBuild(spec.Root, &dispatch.BuildObserver{
+		File: func(st dispatch.BuildState) {
+			s := st
+			select {
+			case out <- Progress{Step: StepGenerate, Message: s.Describe(), Build: &s}:
+			default:
+			}
+		},
+		Activity: func(st dispatch.BuildState) {
+			s := st
+			select {
+			case out <- Progress{Step: StepGenerate, Message: s.Describe(), Build: &s}:
+			default:
+			}
+		},
+	})
 	if err := dispatch.ServerInit(spec.Root, platform); err != nil {
+		// Recorded before the observer is removed, so `weblisk build status`
+		// can tell a build that FAILED from one whose process merely vanished.
+		// Without it both read as "died", and only one of them has a reason.
+		dispatch.MarkBuildTerminal(spec.Root, "failed", err.Error())
+		restore()
 		fail(StepGenerate, err)
 		return
 	}
+	dispatch.MarkBuildTerminal(spec.Root, "completed", "")
+	restore()
 
 	// 4. Skills — after generation, so a failed build leaves no files
 	// describing a tenant that does not exist.
@@ -224,8 +272,44 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 		return
 	}
 
-	// 5. Provision — identity, bootstrap, start, claim, in one action.
-	if !say(StepProvision, "starting the hub and claiming the first operator") {
+	// 5. Provision — build, start, then claim the first operator.
+	//
+	// Starting is done HERE, and it was not. wserver.Provision establishes a
+	// credential "against a tenant that is already generated and running" and
+	// refuses one that is not; this step announced that it was "starting the hub
+	// and claiming the first operator" and called Provision with nothing in
+	// between. So `weblisk tenant create` failed at its final step on every
+	// fresh directory, after the whole generation had succeeded:
+	//
+	//	x provision: the tenant's orchestrator is not running
+	//	  Start it first: weblisk server start --detach
+	//
+	// TENANT_LIFECYCLE said provision "writes the secret, starts the hub and
+	// claims it in one action". Provision's own doc comment said it does not
+	// start anything. Two documents disagreed and the code satisfied neither —
+	// and the advice printed at the end was correct, which is why this read as
+	// a step to do next rather than as a defect.
+	if !say(StepProvision, "building and starting the orchestrator") {
+		return
+	}
+	port := spec.Port
+	if port == 0 {
+		port = defaultOrchestratorPort
+	}
+	if st := wserver.StatusOf(spec.Root, "orchestrator"); !st.Running {
+		if _, err := wserver.StartDetached(spec.Root, "orchestrator", port, nil); err != nil {
+			fail(StepProvision, fmt.Errorf("the tenant was generated but will not start: %w", err))
+			return
+		}
+	}
+	// Detached means started, not yet listening. Provision's first act is to
+	// ask, and asking a socket that is not open yet fails for a tenant that is
+	// seconds from being fine.
+	if err := waitForOrchestrator(ctx, spec.Root); err != nil {
+		fail(StepProvision, err)
+		return
+	}
+	if !say(StepProvision, "claiming the first operator") {
 		return
 	}
 	pr, perr := wserver.Provision(wserver.ProvisionRequest{
@@ -240,6 +324,44 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 		return
 	}
 
+	// 6. Accept. The tenant is up; ask it whether it actually works before
+	// telling anybody it does.
+	if !say(StepAccept, "asking the tenant whether it works") {
+		return
+	}
+	checks := Accept(ctx, pr.OrchestratorURL)
+	var failed, fatal int
+	for _, c := range checks {
+		if c.OK {
+			continue
+		}
+		failed++
+		if c.Fatal {
+			fatal++
+		}
+		if !say(StepAccept, "✕ "+c.Name+": "+c.Detail) {
+			return
+		}
+	}
+	if fatal > 0 {
+		// The directory is left as it is. A tenant that generated but does not
+		// run is the thing somebody needs to look at, and deleting it would
+		// destroy the evidence along with minutes of paid generation.
+		fail(StepAccept, fmt.Errorf("the tenant was built and started but does not work: %d of %d checks failed. Its files are at %s",
+			failed, len(checks), spec.Root))
+		return
+	}
+	if failed > 0 {
+		// Not fatal, and not silent. These are capabilities this tenant does not
+		// have — usually because it was generated from an older specification.
+		if !say(StepAccept, fmt.Sprintf("%d of %d checks failed; the tenant runs but is missing the capabilities above",
+			failed, len(checks))) {
+			return
+		}
+	} else if !say(StepAccept, fmt.Sprintf("%d of %d checks passed", len(checks), len(checks))) {
+		return
+	}
+
 	select {
 	case out <- Progress{Step: StepDone, Message: "tenant is running", Result: &Result{
 		Root:     spec.Root,
@@ -249,6 +371,7 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 		Provider: string(choice.Kind),
 		Model:    model,
 		Skills:   skills,
+		Checks:   checks,
 	}}:
 	case <-ctx.Done():
 	}
@@ -289,4 +412,41 @@ func bracket(s string) string {
 		return ""
 	}
 	return " (" + s + ")"
+}
+
+// defaultOrchestratorPort matches `weblisk server start`'s default, so a tenant
+// created with no port lands where the CLI's other commands look for it.
+const defaultOrchestratorPort = 9800
+
+// orchestratorStartTimeout bounds the wait for a freshly started hub.
+//
+// A first start generates an ML-DSA-65 key pair and opens a store, so it is
+// slower than a restart. Finite because a hub that never listens has failed,
+// and waiting forever reports that as nothing at all.
+const orchestratorStartTimeout = 30 * time.Second
+
+// waitForOrchestrator blocks until the hub records itself as running.
+func waitForOrchestrator(ctx context.Context, root string) error {
+	deadline := time.Now().Add(orchestratorStartTimeout)
+	for {
+		st := wserver.StatusOf(root, "orchestrator")
+		if st.Running {
+			return nil
+		}
+		// A recorded run whose process is gone is a CRASH, and it is reported as
+		// one immediately rather than waited out — the log is the diagnosis and
+		// thirty seconds of polling delays reaching it.
+		if st.Stale {
+			return fmt.Errorf("the orchestrator started and then exited — see `weblisk server logs`")
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the orchestrator did not begin listening within %s — see `weblisk server logs`",
+				orchestratorStartTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }

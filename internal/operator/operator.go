@@ -1163,7 +1163,30 @@ func (e *TokenError) Error() string {
 }
 
 // NotApproved reports a hub that knows this operator and has not approved it.
-func (e *TokenError) NotApproved() bool { return e.Status == 401 || e.Status == 403 }
+//
+// A signature failure is NOT that, and lumping the two together produced the
+// most misleading message this flow has: an operator whose LOCAL KEY did not
+// match the one the tenant holds for that name was told "registered, and this
+// hub has not approved this operator yet", and went looking for an admin to
+// approve something that was never going to be approved.
+//
+// Measured against a live tenant carrying two identities both called lloyd —
+// one from ~/.weblisk/keys, one from Studio's per-account directory. The tenant
+// said "operator token signature verification failed", which is exactly right.
+func (e *TokenError) NotApproved() bool {
+	return (e.Status == 401 || e.Status == 403) && !e.SignatureRejected()
+}
+
+// SignatureRejected reports a tenant that holds a DIFFERENT key for this name.
+//
+// The name is taken and the key does not match it. Approval cannot fix that —
+// either use the identity that name was registered with, or pick another name.
+func (e *TokenError) SignatureRejected() bool {
+	b := strings.ToLower(e.Body)
+	return strings.Contains(b, "signature verification failed") ||
+		strings.Contains(b, "signature is invalid") ||
+		strings.Contains(b, "invalid signature")
+}
 
 // EndpointAbsent reports a hub that does not serve the token endpoint at all —
 // it predates that part of the protocol.

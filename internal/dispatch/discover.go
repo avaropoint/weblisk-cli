@@ -158,7 +158,19 @@ func probeLocalCLI(ctx context.Context, kind ProviderKind, binary, label string)
 		return st
 	}
 	st.Available = true
-	st.Detail = fmt.Sprintf("%s (%s)", bin, strings.TrimSpace(firstOutputLine(string(outBytes))))
+	// Installed and runnable is what --version proves, and it is ALL it proves.
+	// A coding-agent CLI keeps its credentials in the OS keychain, so there is no
+	// cheap portable way to know whether it is logged in — and `claude --version`
+	// succeeds identically either way. Measured.
+	//
+	// Said here rather than implied, because "available" was being read as "will
+	// work": discovery offered claude-code, a tenant build started, and thirty
+	// seconds later it stopped with "Not logged in · Please run /login". The
+	// pre-flight in RequireProvider is what actually verifies it — one real call
+	// before any generation — and that division is right. What was wrong was
+	// claiming more here than this probe can see.
+	st.Detail = fmt.Sprintf("%s (%s) — installed; login is checked when a build starts",
+		bin, strings.TrimSpace(firstOutputLine(string(outBytes))))
 	st.Model = defaultModels[kind]
 	return st
 }

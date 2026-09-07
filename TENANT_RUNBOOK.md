@@ -44,7 +44,7 @@ The passphrase is read from **stdin**, never argv:
 printf '%s\n' "$PASSPHRASE" | weblisk tenant create "Acme Corp" --provider claude-code
 ```
 
-Five steps, in an order where each depends on the one before:
+Six steps, in an order where each depends on the one before:
 
 ```
 provider   → settled BEFORE any work; no usable model discovered after ten
@@ -52,8 +52,22 @@ provider   → settled BEFORE any work; no usable model discovered after ten
 directory  → refused if it already holds a tenant, unless --resume
 generate   → the orchestrator, from the blueprints, cached per file
 skills     → .claude/skills/*/SKILL.md into the tenant (Claude Code only)
-provision  → identity, bootstrap secret, start, claim — one action
+provision  → go build, start detached, wait for it to listen, write the
+             bootstrap secret, claim the first operator
+accept     → ask the running tenant whether it WORKS: health, and every
+             method-and-path the CLI and Studio actually issue
 ```
+
+`provision` starts the hub itself. It did not, and the step said it did: the
+underlying `server provision` establishes a credential against a tenant that is
+already running and refuses one that is not, so this command failed at its last
+step on every fresh directory — after the whole generation had succeeded — with
+`the orchestrator is not running / Start it first: weblisk server start --detach`.
+Correct advice, which is why it read as a next step rather than as a defect.
+
+`accept` is why "created" now means something. A non-fatal failure there does
+not fail the build; it names a capability that tenant does not have, usually
+because it was generated from an older specification.
 
 Options: `--dir <path>` · `--platform go|cloudflare|node|rust` ·
 `--model <name>` · `--operator <name>` · `--resume`
@@ -100,10 +114,23 @@ weblisk operator connect --orch http://localhost:9860 --name lloyd --json
 
 - One identity per account, reused for **every** tenant. The passphrase is the
   one that identity was created with, not a per-tenant secret.
-- The first operator of a tenant is auto-approved; every later one needs an
-  existing admin.
-- Repeating it inside the same second is refused as a **replay** — the tenant
-  will not accept the same signed request twice. Wait a moment.
+- The first operator of a tenant is auto-approved; every later one lands at
+  `pending` and needs an existing admin to admit them:
+
+  ```
+  weblisk operators list                  # who is waiting
+  weblisk operators approve alice         # admit them
+  weblisk operators role alice operator   # viewer | auditor | operator | admin
+  weblisk operators revoke alice --confirm
+  ```
+
+  The approved operator then runs `weblisk operator token` themselves — approval
+  never hands a token to whoever ran it.
+- Repeating a connect inside the same second is refused as a **replay** — the
+  tenant will not accept the same signed request twice. Wait a moment.
+- A tenant built before 2026-09-06 has **no approve route** and cannot admit
+  anybody; `weblisk operators approve` will say so. Regenerate it with
+  `weblisk tenant create … --resume` to pick the route up.
 
 ---
 
@@ -117,7 +144,9 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:9860/v1/audit
 ```
 
 Expect `401` without a token and `405` for a wrong method — both are the tenant
-behaving correctly.
+behaving correctly. **`404` is not**: it means this tenant does not serve that
+route at all, which is what `weblisk tenant create` now checks for itself at the
+`accept` step rather than leaving to be found by a command months later.
 
 ---
 

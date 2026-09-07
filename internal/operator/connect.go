@@ -47,6 +47,14 @@ const (
 	PendingApprovalState ConnectState = "pending_approval"
 	// UnreachableState — no hub answered, or it is not one of ours.
 	UnreachableState ConnectState = "unreachable"
+
+	// RefusedState is a tenant that answered and said no.
+	//
+	// Distinct from unreachable, which says nothing answered. Reporting a
+	// refusal as unreachable sends an operator to check whether the tenant is
+	// running, when the tenant is running and has told them exactly what is
+	// wrong.
+	RefusedState ConnectState = "refused"
 )
 
 // ConnectResult is what a caller needs in order to proceed, or to explain why
@@ -150,6 +158,17 @@ func Connect(address, name, passphrase string) (ConnectResult, error) {
 				"this hub does not serve POST /v1/admin/operators/token (HTTP %d). "+
 					"It predates that part of the protocol, so no operator token can be "+
 					"issued by it — regenerate the hub from current blueprints.", te.Status)
+			return res, nil
+		}
+		if errors.As(terr, &te) && te.SignatureRejected() {
+			// The name is taken by a DIFFERENT key. No amount of approving
+			// fixes that, so it must not be reported as awaiting approval —
+			// and the tenant answered, so it is not unreachable either.
+			res.State = RefusedState
+			res.Detail = "this tenant already knows an operator called " + name +
+				", registered with a different key than the one here. Approval cannot " +
+				"resolve that — connect with the identity that name was registered " +
+				"with (--keys-dir), or choose another operator name."
 			return res, nil
 		}
 		if errors.As(terr, &te) && te.NotApproved() {

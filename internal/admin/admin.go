@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/avaropoint/weblisk-cli/internal/operator"
+	"github.com/avaropoint/weblisk-cli/pkg/tenant"
 )
 
 // Client communicates with the orchestrator admin API.
@@ -68,26 +69,64 @@ func NewClient(args []string) (*Client, error) {
 	return c, nil
 }
 
-func (c *Client) get(path string) ([]byte, error) {
-	body, err := c.doGet(path)
+func (c *Client) get(path string) ([]byte, error) { return c.call("GET", path, nil) }
+
+func (c *Client) post(path string, payload any) ([]byte, error) {
+	return c.call("POST", path, payload)
+}
+
+// There is deliberately no put or del helper. Every PUT and DELETE this CLI
+// issues goes through route(), which takes its method and its path together
+// from pkg/tenant/routes.go — a bare del("/some/path") is how the wrong path
+// gets written by hand, and it is what shipped.
+
+// call issues one admin request, refreshing the token once on a 401.
+//
+// One implementation, not one per verb. When get and post were separate copies
+// there was no put and no delete, so `operators role` was written as a POST and
+// `operators revoke` invented POST /operators/{name}/revoke — a method and a
+// route the orchestrator has never served. Both commands had never worked.
+func (c *Client) call(method, path string, payload any) ([]byte, error) {
+	body, err := c.do(method, path, payload)
 	if err != nil && strings.Contains(err.Error(), "authentication failed") {
-		// 401 retry: attempt token refresh and retry once
 		if newToken, refreshErr := operator.RefreshToken(); refreshErr == nil {
 			c.Token = newToken
-			return c.doGet(path)
+			return c.do(method, path, payload)
 		}
 		return nil, fmt.Errorf("session expired. Run: weblisk operator register")
 	}
 	return body, err
 }
 
-func (c *Client) doGet(path string) ([]byte, error) {
-	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
+// route issues one declared AdminRoute.
+//
+// The method and the path arrive together from pkg/tenant/routes.go, so a
+// command cannot pick the wrong verb for a path — which is exactly what
+// `operators role` did, using POST against a route the tenant serves as PUT,
+// undetected because both halves looked right on their own.
+func (c *Client) route(r tenant.AdminRoute, payload any) ([]byte, error) {
+	return c.call(r.Method, r.Path, payload)
+}
+
+func (c *Client) do(method, path string, payload any) ([]byte, error) {
+	var bodyReader io.Reader
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("encode request: %w", err)
+		}
+		bodyReader = strings.NewReader(string(data))
+	}
+
+	req, err := http.NewRequest(method, c.BaseURL+path, bodyReader)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -98,64 +137,22 @@ func (c *Client) doGet(path string) ([]byte, error) {
 	body, _ := io.ReadAll(resp.Body)
 
 	switch resp.StatusCode {
-	case 200:
+	case 200, 201, 202, 204:
 		return body, nil
 	case 401:
 		return nil, fmt.Errorf("authentication failed. Run: weblisk operator token --refresh")
 	case 403:
 		return nil, fmt.Errorf("permission denied (insufficient role)")
+	// 404 and 405 are named apart from each other and from a plain HTTP error.
+	// Said as "not found" they read as "no such operator" when what they mean is
+	// that this CLI is asking for something this orchestrator does not serve —
+	// which is a version mismatch, and the reader needs to be told which.
 	case 404:
-		return nil, fmt.Errorf("not found")
-	default:
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-}
-
-func (c *Client) post(path string, payload any) ([]byte, error) {
-	body, err := c.doPost(path, payload)
-	if err != nil && strings.Contains(err.Error(), "authentication failed") {
-		// 401 retry: attempt token refresh and retry once
-		if newToken, refreshErr := operator.RefreshToken(); refreshErr == nil {
-			c.Token = newToken
-			return c.doPost(path, payload)
-		}
-		return nil, fmt.Errorf("session expired. Run: weblisk operator register")
-	}
-	return body, err
-}
-
-func (c *Client) doPost(path string, payload any) ([]byte, error) {
-	var bodyReader io.Reader
-	if payload != nil {
-		data, _ := json.Marshal(payload)
-		bodyReader = strings.NewReader(string(data))
-	}
-
-	req, err := http.NewRequest("POST", c.BaseURL+path, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("connection failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	switch resp.StatusCode {
-	case 200, 201:
-		return body, nil
-	case 401:
-		return nil, fmt.Errorf("authentication failed. Run: weblisk operator token --refresh")
-	case 403:
-		return nil, fmt.Errorf("permission denied (insufficient role)")
-	case 404:
-		return nil, fmt.Errorf("not found")
+		return nil, fmt.Errorf("%s %s: the orchestrator has no such route or record\n"+
+			"  If the record exists, this CLI is newer than the orchestrator at %s", method, path, c.BaseURL)
+	case 405:
+		return nil, fmt.Errorf("%s %s: the orchestrator serves that route but not that method\n"+
+			"  This CLI disagrees with the orchestrator at %s about the request", method, path, c.BaseURL)
 	default:
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
@@ -1119,7 +1116,7 @@ func OperatorsList(args []string) error {
 		return err
 	}
 
-	body, err := c.get("/v1/admin/operators")
+	body, err := c.route(tenant.OperatorList(), nil)
 	if err != nil {
 		return err
 	}
@@ -1138,14 +1135,26 @@ func OperatorsList(args []string) error {
 
 	fmt.Println()
 	fmt.Printf("  %-12s %-10s %-10s %s\n", "NAME", "ROLE", "STATUS", "REGISTERED")
+	var pending []string
 	for _, op := range result.Operators {
+		status := getString(op, "status")
+		if status == "pending" {
+			pending = append(pending, getString(op, "name"))
+		}
 		fmt.Printf("  %-12s %-10s %-10s %s\n",
 			getString(op, "name"),
 			getString(op, "role"),
-			getString(op, "status"),
+			status,
 			getString(op, "registered"))
 	}
 	fmt.Println()
+
+	// A pending operator is a person waiting on someone reading this list. In a
+	// column of statuses that reads as data; said, it reads as something to do.
+	if len(pending) > 0 {
+		fmt.Printf("  %d waiting for approval: %s\n", len(pending), strings.Join(pending, ", "))
+		fmt.Printf("  Admit one with: weblisk operators approve %s\n\n", pending[0])
+	}
 	return nil
 }
 
@@ -1156,7 +1165,7 @@ func OperatorsDescribe(name string, args []string) error {
 		return err
 	}
 
-	body, err := c.get("/v1/admin/operators/" + name)
+	body, err := c.route(tenant.OperatorGet(name), nil)
 	if err != nil {
 		return err
 	}
@@ -1206,12 +1215,41 @@ func OperatorsRevoke(name string, args []string) error {
 		return err
 	}
 
-	_, err = c.post("/v1/admin/operators/"+name+"/revoke", nil)
+	// DELETE /v1/admin/operators/{name} — architecture/admin's Operator
+	// Management table. This was POST /{name}/revoke, which the orchestrator
+	// answers 404, so revoking an operator had never once succeeded.
+	_, err = c.route(tenant.OperatorRemove(name), nil)
 	if err != nil {
 		return err
 	}
 
 	fmt.Printf("✓ Operator '%s' revoked. Public key invalidated, token expired.\n", name)
+	return nil
+}
+
+// OperatorsApprove admits a registered operator (admin only).
+//
+// The first operator of a hub is auto-approved at registration. Every one after
+// that lands at status "pending" and stays there until an admin calls this —
+// which for a long time nothing could, because the route did not exist. See
+// architecture/admin, "Admitting the operators after the first".
+func OperatorsApprove(name string, args []string) error {
+	c, err := NewClient(args)
+	if err != nil {
+		return err
+	}
+
+	body, err := c.route(tenant.OperatorApprove(name), nil)
+	if err != nil {
+		return err
+	}
+
+	if c.JSONOutput {
+		fmt.Println(string(body))
+		return nil
+	}
+
+	fmt.Printf("\u2713 Operator '%s' approved. They obtain a token with: weblisk operator token\n", name)
 	return nil
 }
 
@@ -1227,8 +1265,9 @@ func OperatorsRole(name, role string, args []string) error {
 		return err
 	}
 
+	// PUT, not POST — the orchestrator answers POST here with 405.
 	payload := map[string]string{"role": role}
-	_, err = c.post("/v1/admin/operators/"+name+"/role", payload)
+	_, err = c.route(tenant.OperatorRole(name), payload)
 	if err != nil {
 		return err
 	}

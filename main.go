@@ -65,6 +65,17 @@ func main() {
 		}
 
 	case "build":
+		// `build status` reports on a GENERATION in this directory; `build`
+		// with anything else compiles a project. Two different acts under one
+		// word, distinguished by the subcommand rather than by a new verb,
+		// because "what is my build doing" is the question a person asks of
+		// the command they just ran.
+		if len(rest) > 0 && rest[0] == "status" {
+			if err := dispatch.HandleBuild(rest); err != nil {
+				fatal("build status: %v", err)
+			}
+			break
+		}
 		root, opts := parseBuildArgs(rest)
 		config.Load(root)
 		if err := build.Build(root, opts); err != nil {
@@ -460,6 +471,13 @@ func main() {
 			if err := admin.OperatorsDescribe(rest[1], rest[2:]); err != nil {
 				fatal("operators describe: %v", err)
 			}
+		case "approve":
+			if len(rest) < 2 {
+				fatal("Usage: weblisk operators approve <name>")
+			}
+			if err := admin.OperatorsApprove(rest[1], rest[2:]); err != nil {
+				fatal("operators approve: %v", err)
+			}
 		case "revoke":
 			if len(rest) < 2 {
 				fatal("Usage: weblisk operators revoke <name> --confirm")
@@ -491,7 +509,7 @@ func main() {
 				fatal("operators role: %v", err)
 			}
 		default:
-			fatal("Unknown operators command: %s\n  Try: weblisk operators list|describe|revoke|role", rest[0])
+			fatal("Unknown operators command: %s\n  Try: weblisk operators list|describe|approve|revoke|role", rest[0])
 		}
 
 	// ── Observations Commands ────────────────────────────────

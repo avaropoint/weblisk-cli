@@ -35,7 +35,7 @@ it is the verb that puts them in order.
 | Was missing | Now |
 |---|---|
 | **`tenant` verb** | **Done** — `weblisk tenant create <name>`, over `pkg/tenant`. Studio drives the same package through `--json` progress |
-| **Bootstrap** | **Done** — `server provision` writes the secret, starts the hub and claims it in one action; `pkg/tenant` calls it as step 5 |
+| **Bootstrap** | **Done** — `pkg/tenant`'s step 5 builds and starts the hub, waits for it to listen, then `server provision` writes the secret and claims it. `Provision` itself does NOT start anything; this table said it did, its own doc comment said it did not, and `pkg/tenant` satisfied neither — so `tenant create` failed at its last step on every fresh directory |
 | **`connect`** | **Done** — `weblisk operator connect --orch <url>`, address-based, needs no local project |
 | **Liveness with authority** | **Done** — reachable and admitted are asked and reported apart, in the CLI and in Studio's hub panel |
 | **Which model** | **Done** — `weblisk providers` discovers what the machine has; the choice is per tenant over an installation default, and is never guessed when several exist |
@@ -174,8 +174,24 @@ shape as `providers --json` and `server status --json` — so there is still
 exactly one implementation of the operation.
 
 The steps are a contract: `provider · directory · generate · skills · provision
-· done`. Both front ends render those names, so renaming one breaks both at
-once and is guarded against in `pkg/tenant`'s tests.
+· accept · done`. Both front ends render those names, so renaming one breaks
+both at once and is guarded against in `pkg/tenant`'s tests.
+
+**`accept` asks the finished tenant whether it works**, over HTTP, the way its
+clients will — health, and then every method-and-path the CLI and Studio
+actually issue. It exists because "created" used to mean only that the
+generator returned without an error, and under that definition three operator
+commands shipped broken against every generated tenant: `operators revoke`
+posted to a route that answers 404, `operators role` used POST where the tenant
+serves PUT, and no approve route existed at all, so a tenant's second operator
+registered and waited forever. Every build reported success the whole time.
+
+The probes are unauthenticated on purpose. The question is not "may I do this"
+but "does this tenant serve this", and the auth middleware answers that first:
+`401` is a pass, `404` means the route is absent, `405` means the client and the
+server disagree about the method. A failed non-fatal check does not fail the
+build — it is a capability that tenant does not have, and saying so is the
+point.
 
 `Create` returns a **progress channel** rather than blocking. Hub generation is
 minutes long; a GUI that cannot show what is happening during it will grow its
