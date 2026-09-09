@@ -203,6 +203,30 @@ type claudeCodeEnvelope struct {
 //
 // Returns nil when the text is not an envelope, so a caller can fall back
 // rather than invent a classification from a parse failure.
+// faultFromCLI reads a coding-agent CLI envelope into a fault.
+//
+// Claude Code and Grok print different JSON on failure. A classifier that only
+// understood one of them would swallow the other's error as "not an envelope"
+// and fall through to a less useful subprocess exit string.
+func faultFromCLI(provider, raw string) *ProviderFault {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, "{") {
+		return nil
+	}
+	var generic map[string]any
+	if json.Unmarshal([]byte(raw), &generic) != nil {
+		return nil
+	}
+	if t, _ := generic["type"].(string); t == "error" {
+		msg, _ := generic["message"].(string)
+		if msg == "" {
+			msg = raw
+		}
+		return &ProviderFault{Provider: provider, Message: msg, Raw: raw}
+	}
+	return faultFromClaudeCode(provider, raw)
+}
+
 func faultFromClaudeCode(provider, raw string) *ProviderFault {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(raw, "{") {

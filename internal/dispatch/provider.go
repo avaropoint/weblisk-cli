@@ -2,9 +2,10 @@ package dispatch
 
 // LLM Provider
 //
-// Abstraction over LLM backends. Supports OpenAI, Ollama,
-// Anthropic, Cloudflare Workers AI, and OpenAI-compatible.
-// Configured via WL_AI_* environment variables.
+// Abstraction over LLM backends. The catalog in catalog.go names the
+// first-class ones (local CLIs, local HTTP, hosted APIs). Anything else is
+// an OpenAI-compatible URL (WL_AI_BASE_URL) or a local binary (local-cli).
+// Configured via WL_AI_* environment variables, --provider, or discovery.
 
 import (
 	"bytes"
@@ -232,101 +233,113 @@ func newRawProvider() (Provider, error) {
 			model = selected.model
 		}
 	}
-	// No choice and no environment: ask the machine what it has rather than
-	// defaulting to "openai" and demanding a key.
+	// No choice and no environment: take the highest-weighted backend this
+	// machine can actually run, rather than defaulting to "openai" and
+	// demanding a key.
 	//
 	// That default is why `weblisk server init` failed out of the box on a
 	// machine with Claude Code installed and logged in — a working provider on
-	// the PATH, and nothing looked. Ambiguity is surfaced rather than resolved:
-	// choosing between a local model and a paid API has cost and data
-	// consequences that are not this function's to decide.
+	// the PATH, and nothing looked. Walking the catalog from the top is the
+	// operator default; --provider still pins, and a pinned backend that cannot
+	// run is still an error rather than a silent fall-back.
 	if api == "" {
 		c := Resolve(context.Background(), "")
-		switch {
-		case c.Err != nil:
+		if c.Err != nil {
 			return nil, c.Err
-		case c.Ambiguous:
-			return nil, ambiguousProviderError(c.Options)
+		}
+		if c.Ambiguous {
+			k, m := Default(c.Options)
+			c = Choice{Kind: k, Model: m}
 		}
 		api = string(c.Kind)
 		if model == "" {
 			model = c.Model
 		}
 	}
-	baseURL := os.Getenv("WL_AI_BASE_URL")
-	apiKey := os.Getenv("WL_AI_KEY")
+	kind := normaliseKind(ProviderKind(api))
 
 	// Local coding-agent CLIs are a subprocess, not an HTTP endpoint: no base URL,
 	// no key, and the credential is whatever the tool is already logged in with.
-	switch normaliseKind(ProviderKind(api)) {
-	case ProviderClaudeCode, ProviderCodex:
-		return newLocalCLIProvider(string(normaliseKind(ProviderKind(api))), model)
-	}
-	switch api {
-	case "local-cli":
-		return newLocalCLIProvider(api, model)
+	switch kind {
+	case ProviderClaudeCode, ProviderGrok, ProviderCodex, ProviderLocalCLI:
+		return newLocalCLIProvider(string(kind), model)
 	}
 
-	switch api {
-	case "openai":
+	baseURL := strings.TrimRight(os.Getenv("WL_AI_BASE_URL"), "/")
+	b := lookupBackend(kind)
+	if b == nil {
 		if baseURL == "" {
-			baseURL = "https://api.openai.com/v1"
-		}
-		if model == "" {
-			model = defaultModels[ProviderOpenAI]
-		}
-		if apiKey == "" {
-			return nil, fmt.Errorf("WL_AI_KEY required for OpenAI")
-		}
-		return &OpenAIProvider{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: apiKey, Model: model}, nil
-
-	case "ollama":
-		if baseURL == "" {
-			baseURL = "http://localhost:11434/v1"
-		}
-		if model == "" {
-			// Whatever this machine actually has pulled, not a name that may
-			// never have been downloaded — naming an absent model produces a
-			// 404 at generation time, which reads as a broken pipeline.
-			model = discoveredOllamaModel()
-		}
-		if apiKey == "" {
-			apiKey = "ollama"
-		}
-		return &OpenAIProvider{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: apiKey, Model: model}, nil
-
-	case "anthropic":
-		if baseURL == "" {
-			baseURL = "https://api.anthropic.com/v1"
-		}
-		if model == "" {
-			// From defaultModels, so the current model is named in ONE place.
-			// This used to say claude-sonnet-4-20250514 — a model id that had
-			// aged out while sitting in a switch arm nobody re-read.
-			model = defaultModels[ProviderAnthropic]
-		}
-		if apiKey == "" {
-			return nil, fmt.Errorf("WL_AI_KEY required for Anthropic")
-		}
-		return &AnthropicProvider{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: apiKey, Model: model}, nil
-
-	case "cloudflare":
-		if baseURL == "" {
-			return nil, fmt.Errorf("WL_AI_BASE_URL required for Cloudflare AI")
-		}
-		if model == "" {
-			model = "@cf/meta/llama-3-8b-instruct"
-		}
-		return &OpenAIProvider{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: apiKey, Model: model}, nil
-
-	default:
-		if baseURL == "" {
-			return nil, fmt.Errorf("WL_AI_BASE_URL required for custom provider %q", api)
+			return nil, fmt.Errorf("WL_AI_BASE_URL required for custom provider %q — "+
+				"this pipeline drives %s; anything else is an OpenAI-compatible HTTP endpoint "+
+				"or local-cli", api, strings.Join(kindNames(), ", "))
 		}
 		if model == "" {
 			model = "default"
 		}
-		return &OpenAIProvider{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: apiKey, Model: model}, nil
+		return &OpenAIProvider{BaseURL: baseURL, APIKey: os.Getenv("WL_AI_KEY"), Model: model}, nil
+	}
+	return buildHTTPProvider(b, baseURL, model)
+}
+
+func buildHTTPProvider(b *backend, baseURL, model string) (Provider, error) {
+	if baseURL == "" {
+		baseURL = b.BaseURL
+	}
+	if b.Driver == driverOllama && baseURL == "" {
+		baseURL = "http://localhost:11434/v1"
+	}
+	if b.RequiresURL && baseURL == "" {
+		return nil, fmt.Errorf("WL_AI_BASE_URL required for %s", b.Label)
+	}
+	if baseURL == "" {
+		return nil, fmt.Errorf("WL_AI_BASE_URL required for %s", b.Label)
+	}
+	if model == "" {
+		if b.Driver == driverOllama {
+			// Whatever this machine actually has pulled, not a name that may
+			// never have been downloaded — naming an absent model produces a
+			// 404 at generation time, which reads as a broken pipeline.
+			model = discoveredOllamaModel()
+		} else if b.Local {
+			st := probeLocalOpenAI(context.Background(), *b)
+			if st.Model != "" {
+				model = st.Model
+			} else {
+				model = defaultModels[b.Kind]
+			}
+		} else {
+			model = defaultModels[b.Kind]
+		}
+	}
+	if model == "" {
+		model = "default"
+	}
+
+	key := apiKeyFor(b)
+	switch b.Driver {
+	case driverAnthropic:
+		if key == "" {
+			return nil, fmt.Errorf("%s required for %s", b.keyHint(), b.Label)
+		}
+		return &AnthropicProvider{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: key, Model: model}, nil
+	case driverOllama:
+		if key == "" {
+			key = "ollama"
+		}
+		return &OpenAIProvider{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: key, Model: model}, nil
+	default:
+		if !b.Local && key == "" && !b.RequiresURL {
+			return nil, fmt.Errorf("%s required for %s", b.keyHint(), b.Label)
+		}
+		// Cloudflare needs a URL and accepts an empty key (some gateways do).
+		// Local OpenAI-compatible servers (LM Studio) typically need none.
+		if b.RequiresURL && key == "" {
+			key = os.Getenv("WL_AI_KEY")
+		}
+		if key == "" && b.Local {
+			key = string(b.Kind)
+		}
+		return &OpenAIProvider{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: key, Model: model}, nil
 	}
 }
 

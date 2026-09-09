@@ -50,8 +50,8 @@ func PrintHelp() {
 
       --dir <path>        Where to create it (default: ./<name>)
       --platform <p>      go (default), cloudflare, node, rust
-      --provider <p>      Model backend. Omit to be asked when there is a choice
-                          — see 'weblisk providers'
+      --provider <p>      Model backend. Omit to take the highest-weighted
+                          available on this machine — see 'weblisk providers'
       --model <m>         Model name, when the provider takes one
       --operator <name>   First operator (default: $USER)
       --port <n>          Orchestrator port

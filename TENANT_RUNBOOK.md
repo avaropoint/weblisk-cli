@@ -20,12 +20,14 @@ weblisk providers            # what this machine offers, and which it would pick
 weblisk providers --json     # the same, for a console
 ```
 
-Discovery probes for Claude Code and Codex (a binary that exists **and** runs),
-for an Ollama that answers **and** has a model pulled, and for the two API keys.
-Preference is local first: `claude-code · codex · ollama · anthropic · openai`.
-
-When several are available a build **asks** rather than guessing. Pin one with
-`--provider`, `WL_AI_PROVIDER`, or per tenant in Studio.
+Discovery probes for local coding-agent CLIs (a binary that exists **and**
+runs — Claude Code, Grok, Codex), for local HTTP servers that answer **and**
+have a model loaded (Ollama, LM Studio), and for hosted API keys (`XAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and the others in `weblisk providers`).
+Weight is local first: `claude-code · grok · codex · ollama · lmstudio · …`.
+When nobody pins a backend, a build takes the highest-weighted one this
+workstation can actually run. Pin one with `--provider`, `WL_AI_PROVIDER`,
+or per tenant in Studio.
 
 ---
 
@@ -51,7 +53,9 @@ provider   → settled BEFORE any work; no usable model discovered after ten
              minutes of generation would waste all of it
 directory  → refused if it already holds a tenant, unless --resume
 generate   → the orchestrator, from the blueprints, cached per file
-skills     → .claude/skills/*/SKILL.md into the tenant (Claude Code only)
+skills     → .agents/skills (and .claude or .grok) for the tenant verb
+             — blueprints, hubs, tenants, operators, plus go when the
+             platform is Go. Agent/domain/gateway verbs add their own.
 provision  → go build, start detached, wait for it to listen, write the
              bootstrap secret, claim the first operator
 accept     → ask the running tenant whether it WORKS: health, and every
@@ -184,7 +188,6 @@ GET  /api/providers         # discovered, and what this tenant would use
 | Symptom | Cause |
 |---|---|
 | `WL_AI_KEY required for OpenAI` | no provider chosen and none discovered — run `weblisk providers` |
-| `more than one model provider is available` | several found and nobody chose — pass `--provider` |
 | `the passphrase does not open it` | the account's existing identity, wrong passphrase — it is one identity for every tenant |
 | `already been seen` | a replay, inside the tenant's window. Wait a moment |
 | `not started` while it is serving | started by hand rather than `--detach` |

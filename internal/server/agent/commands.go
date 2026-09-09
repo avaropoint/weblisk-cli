@@ -66,7 +66,11 @@ func handleCreate(name string, args []string, root string) error {
 	fmt.Printf("  AI Model:  %s\n", dispatch.DiscoverProvider())
 	fmt.Println()
 
-	return dispatch.AgentCreate(root, name, platform)
+	if err := dispatch.AgentCreate(root, name, platform); err != nil {
+		return err
+	}
+	dispatch.InstallAndNoteSkills(root, platform, "agent")
+	return nil
 }
 
 func handleStart(name string, args []string, root string) error {

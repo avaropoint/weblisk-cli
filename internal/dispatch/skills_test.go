@@ -7,20 +7,16 @@ import (
 	"testing"
 )
 
-// An empty embed.FS compiles perfectly and installs nothing. This is the check
-// that the files are actually in the binary.
 func TestTheSkillsAreActuallyEmbedded(t *testing.T) {
-	if n := embeddedSkillCount(); n < 3 {
+	if n := embeddedSkillCount(); n < 8 {
 		t.Fatalf("%d skill file(s) embedded; the //go:embed pattern is not matching", n)
 	}
-	for _, name := range skillsForPlatform("go") {
+	for _, name := range SkillsFor("tenant", "go") {
 		body, err := skillFiles.ReadFile("skills/" + name + "/SKILL.md")
 		if err != nil {
 			t.Errorf("skill %s is named but not embedded: %v", name, err)
 			continue
 		}
-		// Claude Code reads the frontmatter to decide whether a skill is
-		// relevant. A skill with no description is one that never loads.
 		s := string(body)
 		if !strings.HasPrefix(s, "---\n") {
 			t.Errorf("%s has no frontmatter", name)
@@ -34,74 +30,104 @@ func TestTheSkillsAreActuallyEmbedded(t *testing.T) {
 	}
 }
 
-// Only for the tool whose format this is. Writing Claude Code skill files into
-// a tenant generated with Ollama leaves files nothing reads, in somebody else's
-// repository.
-func TestSkillsAreOnlyWrittenForTheToolThatReadsThem(t *testing.T) {
-	for _, provider := range []string{"ollama", "anthropic", "openai", "codex", ""} {
-		root := t.TempDir()
-		written, err := InstallSkills(root, provider, "go")
-		if err != nil {
-			t.Fatalf("%s: %v", provider, err)
-		}
-		if len(written) != 0 {
-			t.Errorf("%s: wrote %v", provider, written)
-		}
-		if _, statErr := os.Stat(filepath.Join(root, ".claude")); statErr == nil {
-			t.Errorf("%s: a .claude directory was created", provider)
+func TestAVerbSelectsItsSkills(t *testing.T) {
+	got := SkillsFor("tenant", "go")
+	for _, want := range []string{"tenants", "blueprints", "hubs", "operators", "go"} {
+		if !hasName(got, want) {
+			t.Errorf("tenant/go missing %s: %v", want, got)
 		}
 	}
-	// And the aliases resolve, so `claude` is not a different answer from
-	// `claude-code`.
-	for _, provider := range []string{"claude-code", "claude", "claude-local"} {
+	got = SkillsFor("agent", "rust")
+	if hasName(got, "go") {
+		t.Errorf("a rust agent was given the Go skill: %v", got)
+	}
+	if !hasName(got, "agents") || !hasName(got, "blueprints") {
+		t.Errorf("agent/rust = %v", got)
+	}
+	if hasName(SkillsFor("server", "go"), "tenants") {
+		t.Error("server init installed the tenant skill; that verb is tenant create")
+	}
+}
+
+func TestEveryProviderGetsTheVendorNeutralPath(t *testing.T) {
+	for _, provider := range []string{"ollama", "anthropic", "openai", "xai", ""} {
 		root := t.TempDir()
-		written, err := InstallSkills(root, provider, "go")
+		written, err := InstallSkills(root, provider, "go", "server")
 		if err != nil {
 			t.Fatalf("%s: %v", provider, err)
 		}
-		if len(written) != 3 {
-			t.Errorf("%s: wrote %d skills, want 3", provider, len(written))
+		if len(written) == 0 {
+			t.Errorf("%s: wrote nothing", provider)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".agents", "skills", "hubs", "SKILL.md")); err != nil {
+			t.Errorf("%s: .agents/skills/hubs missing: %v", provider, err)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".claude")); err == nil {
+			t.Errorf("%s: a .claude directory was created", provider)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".grok")); err == nil {
+			t.Errorf("%s: a .grok directory was created", provider)
 		}
 	}
 }
 
-// The platform skill is only installed when it matches. A Rust tenant carrying
-// Go's routing rules is worse than carrying none.
+func TestTheGeneratingToolGetsItsNativePath(t *testing.T) {
+	root := t.TempDir()
+	written, err := InstallSkills(root, "claude-code", "go", "server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(written, ".claude/skills/hubs/SKILL.md") {
+		t.Errorf("claude-code did not write its native path: %v", written)
+	}
+	if !containsPath(written, ".agents/skills/hubs/SKILL.md") {
+		t.Errorf("claude-code did not write .agents: %v", written)
+	}
+
+	root = t.TempDir()
+	written, err = InstallSkills(root, "grok", "go", "tenant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(written, ".grok/skills/tenants/SKILL.md") {
+		t.Errorf("grok did not write its native path: %v", written)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude")); err == nil {
+		t.Error("grok wrote Claude Code's skill path")
+	}
+}
+
 func TestThePlatformSkillFollowsThePlatform(t *testing.T) {
 	root := t.TempDir()
-	written, err := InstallSkills(root, "claude-code", "rust")
+	written, err := InstallSkills(root, "claude-code", "rust", "server")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range written {
-		if strings.Contains(f, "go-hub") {
+		if strings.Contains(f, "/go/") {
 			t.Errorf("a rust tenant was given the Go skill: %v", written)
 		}
 	}
-	if len(written) != 2 {
-		t.Errorf("wrote %v; want the two universal skills", written)
-	}
 }
 
-// Given freely, and theirs once written.
 func TestATenantsOwnEditIsNeverOverwritten(t *testing.T) {
 	root := t.TempDir()
-	if _, err := InstallSkills(root, "claude-code", "go"); err != nil {
+	if _, err := InstallSkills(root, "claude-code", "go", "server"); err != nil {
 		t.Fatal(err)
 	}
-	dest := filepath.Join(root, ".claude", "skills", "reading-blueprints", "SKILL.md")
-	const mine = "---\nname: reading-blueprints\ndescription: mine now\n---\n\nOur own rules.\n"
+	dest := filepath.Join(root, ".claude", "skills", "hubs", "SKILL.md")
+	const mine = "---\nname: hubs\ndescription: mine now\n---\n\nOur own rules.\n"
 	if err := os.WriteFile(dest, []byte(mine), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// A second run — which is what --resume does.
-	written, err := InstallSkills(root, "claude-code", "go")
+	written, err := InstallSkills(root, "claude-code", "go", "server")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(written) != 0 {
-		t.Errorf("re-installed %v over an existing tenant", written)
+	for _, f := range written {
+		if strings.Contains(f, ".claude/skills/hubs") {
+			t.Errorf("re-installed %v over an existing tenant edit", written)
+		}
 	}
 	after, err := os.ReadFile(dest)
 	if err != nil {
@@ -110,4 +136,44 @@ func TestATenantsOwnEditIsNeverOverwritten(t *testing.T) {
 	if string(after) != mine {
 		t.Error("the tenant's own edit was overwritten")
 	}
+}
+
+func TestALocalBlueprintSkillOutranksTheEmbed(t *testing.T) {
+	root := t.TempDir()
+	custom := filepath.Join(root, "blueprints", "skills", "hubs")
+	if err := os.MkdirAll(custom, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const body = "---\nname: hubs\ndescription: local override\n---\n\nLOCAL.\n"
+	if err := os.WriteFile(filepath.Join(custom, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallSkills(root, "claude-code", "go", "server"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, ".claude", "skills", "hubs", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != body {
+		t.Errorf("installed %q, want the local override", got)
+	}
+}
+
+func hasName(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPath(list []string, want string) bool {
+	for _, s := range list {
+		if filepath.ToSlash(s) == want {
+			return true
+		}
+	}
+	return false
 }

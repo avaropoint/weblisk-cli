@@ -36,7 +36,7 @@ func TestAnUnknownProviderNamesTheOnesThatExist(t *testing.T) {
 	if c.Err == nil {
 		t.Fatal("an unknown provider was accepted")
 	}
-	for _, want := range []string{"claude-code", "ollama", "anthropic"} {
+	for _, want := range []string{"claude-code", "grok", "ollama", "anthropic", "xai"} {
 		if !strings.Contains(c.Err.Error(), want) {
 			t.Errorf("the error does not list %q: %v", want, c.Err)
 		}
@@ -53,6 +53,11 @@ func TestTheOldNamesStillResolve(t *testing.T) {
 		"local":        ProviderOllama,
 		"ollama":       ProviderOllama,
 		"anthropic":    ProviderAnthropic,
+		"grok-cli":     ProviderGrok,
+		"grok-code":    ProviderGrok,
+		"grok-api":     ProviderXAI,
+		"x-ai":         ProviderXAI,
+		"google":       ProviderGemini,
 	} {
 		if got := normaliseKind(ProviderKind(in)); got != want {
 			t.Errorf("normaliseKind(%q) = %q; want %q", in, got, want)
@@ -100,18 +105,44 @@ func TestEveryProviderSaysWhy(t *testing.T) {
 	}
 }
 
-// Ambiguity is a question, not a failure — and the question names the options
-// and the flag that answers it.
-func TestAnAmbiguousMachineIsToldHowToChoose(t *testing.T) {
-	err := ambiguousProviderError([]ProviderInfo{
-		{Kind: ProviderClaudeCode, Label: "Claude Code", Local: true},
-		{Kind: ProviderOllama, Label: "Ollama", Local: true, Model: "codellama:70b"},
-	})
-	msg := err.Error()
-	for _, want := range []string{"claude-code", "ollama", "--provider", "will not guess"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("the message omits %q:\n%s", want, msg)
-		}
+// When nobody has chosen, the operator default walks the catalog from the
+// top and takes the first backend this machine can actually run. Several
+// available is not a question.
+func TestAnUnspecifiedMachineTakesTheHighestWeightedAvailable(t *testing.T) {
+	usable := []ProviderInfo{
+		{Kind: ProviderOpenAI, Available: true, Model: "gpt-4o"},
+		{Kind: ProviderGrok, Available: true},
+		{Kind: ProviderOllama, Available: true, Model: "llama3.1"},
+	}
+	c := chooseFromUsable(usable, usable)
+	if c.Err != nil {
+		t.Fatalf("several available failed: %v", c.Err)
+	}
+	if c.Ambiguous {
+		t.Fatal("several available was treated as a question rather than a default")
+	}
+	if c.Kind != ProviderGrok {
+		t.Errorf("got %q, want grok — the highest-weighted among these that exists", c.Kind)
+	}
+	if !strings.Contains(c.Why, "highest-weighted") {
+		t.Errorf("why = %q, want it to say this is the ranking", c.Why)
+	}
+
+	// A higher-weighted backend that is not actually available is skipped.
+	skipped := []ProviderInfo{
+		{Kind: ProviderClaudeCode, Available: false},
+		{Kind: ProviderGrok, Available: true},
+		{Kind: ProviderOpenAI, Available: true, Model: "gpt-4o"},
+	}
+	c = chooseFromUsable([]ProviderInfo{skipped[1], skipped[2]}, skipped)
+	if c.Kind != ProviderGrok {
+		t.Errorf("got %q, want grok after skipping unavailable claude-code", c.Kind)
+	}
+
+	only := []ProviderInfo{{Kind: ProviderOllama, Available: true, Model: "codellama:70b"}}
+	c = chooseFromUsable(only, only)
+	if c.Kind != ProviderOllama || c.Why != "the only provider available on this machine" {
+		t.Errorf("sole provider = %q (%s)", c.Kind, c.Why)
 	}
 }
 
@@ -120,6 +151,9 @@ func TestAnAmbiguousMachineIsToldHowToChoose(t *testing.T) {
 func TestModelDefaultsAreCentralAndCurrent(t *testing.T) {
 	if defaultModels[ProviderAnthropic] != "claude-opus-5" {
 		t.Errorf("anthropic default = %q", defaultModels[ProviderAnthropic])
+	}
+	if defaultModels[ProviderXAI] != "grok-4.6" {
+		t.Errorf("xai default = %q", defaultModels[ProviderXAI])
 	}
 	// A dated suffix is the shape of a model id that has been copied from
 	// somewhere stale — the current ids carry none.
@@ -134,9 +168,69 @@ func TestModelDefaultsAreCentralAndCurrent(t *testing.T) {
 	}
 	// The CLI-backed kinds deliberately name no model: the tool has its own,
 	// and overriding it here would contradict a choice made in that tool.
-	for _, k := range []ProviderKind{ProviderClaudeCode, ProviderCodex} {
+	for _, k := range []ProviderKind{ProviderClaudeCode, ProviderGrok, ProviderCodex} {
 		if defaultModels[k] != "" {
 			t.Errorf("%s names a model (%q); it should defer to the tool", k, defaultModels[k])
 		}
+	}
+}
+
+func TestTheCatalogNamesGrokAndTheGenericEscapes(t *testing.T) {
+	kinds := map[ProviderKind]bool{}
+	for _, s := range Available(context.Background()) {
+		kinds[s.Kind] = true
+	}
+	for _, want := range []ProviderKind{ProviderClaudeCode, ProviderGrok, ProviderXAI, ProviderOllama, ProviderOpenAI} {
+		if !kinds[want] {
+			t.Errorf("Available() does not list %s", want)
+		}
+	}
+}
+
+func TestAVendorKeyMakesTheHostedProviderAvailable(t *testing.T) {
+	t.Setenv("WL_AI_KEY", "")
+	t.Setenv("XAI_API_KEY", "xai-test")
+	c := Resolve(context.Background(), "xai")
+	if c.Err != nil {
+		t.Fatalf("xai with XAI_API_KEY set was refused: %v", c.Err)
+	}
+	if c.Kind != ProviderXAI {
+		t.Errorf("kind = %q, want xai", c.Kind)
+	}
+	if c.Model != "grok-4.6" {
+		t.Errorf("model = %q, want grok-4.6", c.Model)
+	}
+}
+
+func TestAnUnknownNameWithABaseURLIsACustomEndpoint(t *testing.T) {
+	t.Setenv("WL_AI_BASE_URL", "http://127.0.0.1:9999/v1")
+	t.Setenv("WL_AI_MODEL", "my-local-llama")
+	c := Resolve(context.Background(), "vllm")
+	if c.Err != nil {
+		t.Fatalf("a named OpenAI-compatible endpoint was refused: %v", c.Err)
+	}
+	if c.Kind != "vllm" {
+		t.Errorf("kind = %q, want vllm", c.Kind)
+	}
+	if c.Model != "my-local-llama" {
+		t.Errorf("model = %q, want my-local-llama", c.Model)
+	}
+}
+
+func TestGrokIsPreferredOverHostedAPIs(t *testing.T) {
+	opts := []ProviderInfo{
+		{Kind: ProviderOpenAI, Available: true, Model: "gpt-4o"},
+		{Kind: ProviderGrok, Available: true},
+		{Kind: ProviderXAI, Available: true, Model: "grok-4.6"},
+	}
+	if k, _ := Default(opts); k != ProviderGrok {
+		t.Errorf("Default = %q; a local Grok CLI outranks a keyed API", k)
+	}
+	both := []ProviderInfo{
+		{Kind: ProviderGrok, Available: true},
+		{Kind: ProviderClaudeCode, Available: true},
+	}
+	if k, _ := Default(both); k != ProviderClaudeCode {
+		t.Errorf("Default = %q; claude-code remains first among local CLIs", k)
 	}
 }

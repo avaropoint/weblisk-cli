@@ -120,6 +120,29 @@ func TestDescribeSaysWhatIsHappening(t *testing.T) {
 // constructed with the callback attached. Removing that single line leaves
 // every test above passing and Studio with no liveness at all, which is the
 // shape of a guard on a helper nothing calls.
+func TestTheGrokProviderIsWiredToTheObserver(t *testing.T) {
+	fake := filepath.Join(t.TempDir(), "grok")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WL_AI_COMMAND", fake)
+
+	p, err := newLocalCLIProvider("grok", "")
+	if err != nil {
+		t.Fatalf("could not construct the provider: %v", err)
+	}
+	lp, ok := p.(*LocalCLIProvider)
+	if !ok {
+		t.Fatalf("provider is %T", p)
+	}
+	if !lp.Stream {
+		t.Error("grok is not streamed, so liveness cannot be observed at all")
+	}
+	if lp.OnActivity == nil {
+		t.Fatal("the provider has no activity callback")
+	}
+}
+
 func TestTheClaudeCodeProviderIsWiredToTheObserver(t *testing.T) {
 	fake := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {

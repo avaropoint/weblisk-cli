@@ -168,22 +168,7 @@ func handleInit(args []string, root string) error {
 	// makes edits that are locally reasonable and globally wrong. Installed
 	// after generation rather than before, because a failed generation should
 	// not leave skill files describing a tenant that does not exist.
-	kind, _, _ := dispatch.SelectedProvider()
-	files, serr := dispatch.InstallSkills(root, string(kind), platform)
-	if serr != nil {
-		// Reported, not fatal: the hub is generated and works. A tenant without
-		// its skills is a tenant whose next editor is less well informed, which
-		// is worth saying out loud and not worth discarding a build over.
-		fmt.Printf("  [warn] agent skills were not installed: %v\n", serr)
-		return nil
-	}
-	if len(files) > 0 {
-		fmt.Println()
-		fmt.Println("  Agent skills installed — this tenant now explains itself:")
-		for _, f := range files {
-			fmt.Printf("    %s\n", f)
-		}
-	}
+	dispatch.InstallAndNoteSkills(root, platform, "server")
 	return nil
 }
 
@@ -354,7 +339,7 @@ func PrintHelp() {
     cloudflare   Cloudflare Worker, edge deployment
 
   Environment:
-    WL_AI_PROVIDER   AI backend (ollama, openai, anthropic, cloudflare)
+    WL_AI_PROVIDER   AI backend (see: weblisk providers)
     WL_AI_MODEL      Model name
     WL_AI_KEY        API key (if required)
     WL_ORCH_PORT     Orchestrator port (default: 9800)

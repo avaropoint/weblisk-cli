@@ -86,6 +86,12 @@ var requiredRoutes = []AdminRoute{
 	OperatorApprove(probeSubject),
 	OperatorRole(probeSubject),
 	OperatorRemove(probeSubject),
+	// Model config is the hub's, not Studio's. Missing these is a capability
+	// this tenant does not have (non-fatal on 404) until it is regenerated.
+	Model(),
+	SetModel(),
+	ModelProviders(),
+	Complete(),
 }
 
 // Accept asks a freshly built tenant whether it works, and reports every answer.

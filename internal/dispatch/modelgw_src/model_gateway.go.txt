@@ -1,0 +1,628 @@
+package orchestrator
+
+// Model configuration for this hub. Studio connects to these routes; it does
+// not use a provider configured on Studio itself.
+//
+// Completions run HERE, against the backend in .weblisk/model.json. A 501
+// would send the operator back to Studio's llm.json, which is the leak these
+// routes exist to close. The table of backends is a compact copy of the CLI
+// catalog — this file is stdlib-only so a generated hub does not import the CLI.
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+type hubModelConfig struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model,omitempty"`
+	BaseURL   string `json:"base_url,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"`
+}
+
+type hubProviderInfo struct {
+	Kind      string `json:"kind"`
+	Label     string `json:"label"`
+	Available bool   `json:"available"`
+	Detail    string `json:"detail"`
+	Path      string `json:"path,omitempty"`
+	Model     string `json:"model,omitempty"`
+	NeedsKey  string `json:"needs_key,omitempty"`
+	Local     bool   `json:"local"`
+}
+
+var hubModelMu sync.Mutex
+
+func hubModelPath() string {
+	root, err := os.Getwd()
+	if err != nil {
+		return ".weblisk/model.json"
+	}
+	return filepath.Join(root, ".weblisk", "model.json")
+}
+
+func loadHubModel() hubModelConfig {
+	var c hubModelConfig
+	data, err := os.ReadFile(hubModelPath())
+	if err != nil {
+		return c
+	}
+	_ = json.Unmarshal(data, &c)
+	c.Provider = strings.ToLower(strings.TrimSpace(c.Provider))
+	c.Model = strings.TrimSpace(c.Model)
+	c.BaseURL = strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	c.APIKeyEnv = strings.TrimSpace(c.APIKeyEnv)
+	return c
+}
+
+func wrapModelGateway(inner http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/admin/model", requireHubBearer(hubModelGet))
+	mux.HandleFunc("PUT /v1/admin/model", requireHubBearer(hubModelPut))
+	mux.HandleFunc("GET /v1/admin/model/providers", requireHubBearer(hubModelProviders))
+	mux.HandleFunc("POST /v1/admin/complete", requireHubBearer(hubModelComplete))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p == "/v1/admin/model" || strings.HasPrefix(p, "/v1/admin/model/") || p == "/v1/admin/complete" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+func requireHubBearer(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		a := r.Header.Get("Authorization")
+		if !strings.HasPrefix(a, "Bearer ") || strings.TrimSpace(a[7:]) == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthenticated","message":"authentication required"}}`))
+			return
+		}
+		next(w, r)
+	}
+}
+
+func hubModelGet(w http.ResponseWriter, _ *http.Request) {
+	hubModelWriteJSON(w, http.StatusOK, loadHubModel())
+}
+
+func hubModelPut(w http.ResponseWriter, r *http.Request) {
+	var c hubModelConfig
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&c); err != nil {
+		hubModelWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "could not read the body"})
+		return
+	}
+	c.Provider = strings.ToLower(strings.TrimSpace(c.Provider))
+	if c.Provider == "" {
+		hubModelWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "a provider is required"})
+		return
+	}
+	c.Model = strings.TrimSpace(c.Model)
+	c.BaseURL = strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	c.APIKeyEnv = strings.TrimSpace(c.APIKeyEnv)
+	hubModelMu.Lock()
+	defer hubModelMu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(hubModelPath()), 0o700); err != nil {
+		hubModelWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	data, _ := json.MarshalIndent(c, "", "  ")
+	if err := os.WriteFile(hubModelPath(), append(data, '\n'), 0o600); err != nil {
+		hubModelWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	hubModelWriteJSON(w, http.StatusOK, c)
+}
+
+func hubModelProviders(w http.ResponseWriter, r *http.Request) {
+	hubModelWriteJSON(w, http.StatusOK, hubDiscoverProviders(r.Context()))
+}
+
+func hubModelComplete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		System   string `json:"system"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&req); err != nil {
+		hubModelWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "could not read the body"})
+		return
+	}
+	cfg := loadHubModel()
+	if cfg.Provider == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"this tenant has no model configured"}`))
+		return
+	}
+	if len(req.Messages) == 0 && strings.TrimSpace(req.System) == "" {
+		hubModelWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "provide a message"})
+		return
+	}
+	msgs := make([]hubChatMsg, 0, len(req.Messages)+1)
+	if strings.TrimSpace(req.System) != "" {
+		msgs = append(msgs, hubChatMsg{Role: "system", Content: req.System})
+	}
+	for _, m := range req.Messages {
+		msgs = append(msgs, hubChatMsg{Role: m.Role, Content: m.Content})
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = cfg.Model
+	}
+
+	hubModelMu.Lock()
+	defer hubModelMu.Unlock()
+	text, used, err := hubRunComplete(r.Context(), cfg, msgs, model)
+	if err != nil {
+		hubModelWriteJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	hubModelWriteJSON(w, http.StatusOK, map[string]string{
+		"content":  text,
+		"provider": cfg.Provider,
+		"model":    used,
+	})
+}
+
+func hubModelWriteJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// --- completions -----------------------------------------------------------
+
+type hubChatMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+const hubCompleteTimeout = 2 * time.Minute
+
+func hubRunComplete(ctx context.Context, cfg hubModelConfig, msgs []hubChatMsg, model string) (string, string, error) {
+	kind := hubNormaliseKind(cfg.Provider)
+	if model == "" {
+		model = hubDefaultModel(kind)
+	}
+	ctx, cancel := context.WithTimeout(ctx, hubCompleteTimeout)
+	defer cancel()
+	switch kind {
+	case "claude-code", "grok", "codex", "local-cli":
+		text, err := hubExecCLI(ctx, kind, msgs, model)
+		return text, model, err
+	default:
+		text, err := hubHTTPComplete(ctx, kind, cfg, msgs, model)
+		return text, model, err
+	}
+}
+
+func hubNormaliseKind(p string) string {
+	switch p {
+	case "claude", "claude-local", "claude_code":
+		return "claude-code"
+	case "grok-cli", "grok-code", "grok-build":
+		return "grok"
+	case "codex-cli":
+		return "codex"
+	case "x-ai", "grok-api":
+		return "xai"
+	case "local":
+		return "ollama"
+	case "google", "google-ai":
+		return "gemini"
+	case "deep-seek":
+		return "deepseek"
+	case "cf":
+		return "cloudflare"
+	default:
+		return p
+	}
+}
+
+type hubHTTPDefault struct {
+	Label, URL, KeyEnv, Model string
+	Local                     bool
+	Anthropic                 bool
+}
+
+// Align with weblisk-cli/internal/dispatch/catalog.go. A generated hub cannot
+// import that package; this is the row it needs to drive a completion.
+var hubHTTPCatalog = map[string]hubHTTPDefault{
+	"ollama":     {Label: "Ollama", URL: "http://localhost:11434/v1", Model: "llama3.1", Local: true},
+	"lmstudio":   {Label: "LM Studio", URL: "http://localhost:1234/v1", Local: true},
+	"anthropic":  {Label: "Anthropic API", URL: "https://api.anthropic.com/v1", KeyEnv: "ANTHROPIC_API_KEY", Model: "claude-opus-5", Anthropic: true},
+	"xai":        {Label: "xAI API", URL: "https://api.x.ai/v1", KeyEnv: "XAI_API_KEY", Model: "grok-4.6"},
+	"openai":     {Label: "OpenAI API", URL: "https://api.openai.com/v1", KeyEnv: "OPENAI_API_KEY", Model: "gpt-4o"},
+	"gemini":     {Label: "Google Gemini API", URL: "https://generativelanguage.googleapis.com/v1beta/openai", KeyEnv: "GEMINI_API_KEY", Model: "gemini-2.5-pro"},
+	"groq":       {Label: "Groq API", URL: "https://api.groq.com/openai/v1", KeyEnv: "GROQ_API_KEY", Model: "llama-3.3-70b-versatile"},
+	"mistral":    {Label: "Mistral API", URL: "https://api.mistral.ai/v1", KeyEnv: "MISTRAL_API_KEY", Model: "mistral-large-latest"},
+	"deepseek":   {Label: "DeepSeek API", URL: "https://api.deepseek.com/v1", KeyEnv: "DEEPSEEK_API_KEY", Model: "deepseek-chat"},
+	"openrouter": {Label: "OpenRouter", URL: "https://openrouter.ai/api/v1", KeyEnv: "OPENROUTER_API_KEY", Model: "openai/gpt-4o"},
+}
+
+func hubDefaultModel(kind string) string {
+	if d, ok := hubHTTPCatalog[kind]; ok {
+		return d.Model
+	}
+	return ""
+}
+
+func hubExecCLI(ctx context.Context, kind string, msgs []hubChatMsg, model string) (string, error) {
+	name, args, jsonOut, promptFile := hubCLISpec(kind)
+	bin := hubLookCLI(name)
+	if bin == "" {
+		return "", fmt.Errorf("%s is not installed, or is not where this hub can see it", name)
+	}
+	if model != "" {
+		args = append(append([]string{}, args...), "--model", model)
+	}
+	prompt := hubFlatten(msgs)
+	cleanup := func() {}
+	if promptFile != "" {
+		f, err := os.CreateTemp("", "weblisk-prompt-*.txt")
+		if err != nil {
+			return "", fmt.Errorf("writing prompt file: %w", err)
+		}
+		path := f.Name()
+		cleanup = func() { _ = os.Remove(path) }
+		if _, err := f.WriteString(prompt); err != nil {
+			_ = f.Close()
+			cleanup()
+			return "", err
+		}
+		if err := f.Close(); err != nil {
+			cleanup()
+			return "", err
+		}
+		args = append(args, promptFile, path)
+	} else {
+		args = append(args, prompt)
+	}
+	defer cleanup()
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdout.String())
+		}
+		if detail == "" {
+			detail = err.Error()
+		}
+		return "", fmt.Errorf("%s: %s", name, detail)
+	}
+	raw := strings.TrimSpace(stdout.String())
+	if raw == "" {
+		return "", fmt.Errorf("%s returned no output", name)
+	}
+	if !jsonOut {
+		return raw, nil
+	}
+	text, _, isErr := hubParseCLI(raw)
+	if isErr {
+		return "", fmt.Errorf("%s: %s", name, text)
+	}
+	return text, nil
+}
+
+func hubCLISpec(kind string) (bin string, args []string, jsonOut bool, promptFile string) {
+	switch kind {
+	case "grok":
+		return "grok", []string{
+			"--output-format", "json",
+			"--no-subagents", "--disable-web-search", "--no-plan", "--verbatim",
+			"--tools", "",
+		}, true, "--prompt-file"
+	case "codex":
+		return "codex", []string{"exec", "--skip-git-repo-check"}, false, ""
+	default:
+		return "claude", []string{
+			"--print", "--output-format", "json",
+			"--tools", "",
+			"--strict-mcp-config",
+			"--disable-slash-commands",
+			"--no-session-persistence",
+		}, true, ""
+	}
+}
+
+func hubFlatten(msgs []hubChatMsg) string {
+	var b strings.Builder
+	for i, m := range msgs {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		if len(msgs) > 1 && m.Role != "" {
+			b.WriteString(strings.ToUpper(m.Role[:1]) + m.Role[1:] + ":\n")
+		}
+		b.WriteString(m.Content)
+	}
+	return b.String()
+}
+
+func hubParseCLI(raw string) (text, model string, isErr bool) {
+	var obj map[string]any
+	if json.Unmarshal([]byte(raw), &obj) != nil {
+		return raw, "", false
+	}
+	if t, _ := obj["type"].(string); t == "error" {
+		msg, _ := obj["message"].(string)
+		if msg == "" {
+			msg = raw
+		}
+		return msg, "", true
+	}
+	if errFlag, _ := obj["is_error"].(bool); errFlag {
+		msg := hubStringFrom(obj, "result", "text", "message")
+		if msg == "" {
+			msg = raw
+		}
+		return msg, hubStringFrom(obj, "model"), true
+	}
+	text = hubStringFrom(obj, "result", "text", "content")
+	model = hubStringFrom(obj, "model")
+	if text == "" {
+		return raw, model, false
+	}
+	return text, model, false
+}
+
+func hubStringFrom(obj map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := obj[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func hubHTTPComplete(ctx context.Context, kind string, cfg hubModelConfig, msgs []hubChatMsg, model string) (string, error) {
+	def := hubHTTPCatalog[kind]
+	base := cfg.BaseURL
+	if base == "" {
+		base = strings.TrimRight(def.URL, "/")
+	}
+	if base == "" {
+		return "", fmt.Errorf("this hub does not know how to drive %q — set a base_url on the model config", cfg.Provider)
+	}
+	keyEnv := cfg.APIKeyEnv
+	if keyEnv == "" {
+		keyEnv = def.KeyEnv
+	}
+	key := ""
+	if keyEnv != "" {
+		key = os.Getenv(keyEnv)
+	}
+	if def.Anthropic || kind == "anthropic" {
+		if key == "" {
+			return "", fmt.Errorf("%s is not set", keyEnv)
+		}
+		return hubAnthropicChat(ctx, base, key, model, msgs)
+	}
+	if key == "" && def.Local {
+		key = kind
+	}
+	if key == "" && def.KeyEnv != "" && !def.Local {
+		return "", fmt.Errorf("%s is not set", keyEnv)
+	}
+	return hubOpenAIChat(ctx, base, key, model, msgs)
+}
+
+func hubOpenAIChat(ctx context.Context, base, key, model string, msgs []hubChatMsg) (string, error) {
+	body, err := json.Marshal(map[string]any{"model": model, "messages": msgs})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("provider answered %d: %s", resp.StatusCode, hubTrimErr(raw))
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("provider response is not JSON")
+	}
+	if out.Error != nil && out.Error.Message != "" {
+		return "", fmt.Errorf("%s", out.Error.Message)
+	}
+	if len(out.Choices) == 0 {
+		return "", fmt.Errorf("provider returned no choices")
+	}
+	return out.Choices[0].Message.Content, nil
+}
+
+func hubAnthropicChat(ctx context.Context, base, key, model string, msgs []hubChatMsg) (string, error) {
+	var system string
+	var api []hubChatMsg
+	for _, m := range msgs {
+		if m.Role == "system" {
+			system = m.Content
+			continue
+		}
+		api = append(api, m)
+	}
+	body, err := json.Marshal(map[string]any{
+		"model": model, "max_tokens": 8192, "system": system, "messages": api,
+	})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/messages", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("anthropic answered %d: %s", resp.StatusCode, hubTrimErr(raw))
+	}
+	var out struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("anthropic response is not JSON")
+	}
+	if out.Error != nil && out.Error.Message != "" {
+		return "", fmt.Errorf("%s", out.Error.Message)
+	}
+	var text strings.Builder
+	for _, c := range out.Content {
+		if c.Type == "text" {
+			text.WriteString(c.Text)
+		}
+	}
+	return text.String(), nil
+}
+
+func hubTrimErr(raw []byte) string {
+	s := strings.TrimSpace(string(raw))
+	if len(s) > 400 {
+		return s[:400]
+	}
+	return s
+}
+
+// --- discovery -------------------------------------------------------------
+
+func hubDiscoverProviders(ctx context.Context) []hubProviderInfo {
+	out := []hubProviderInfo{
+		hubProbeCLI("claude-code", "Claude Code", "claude"),
+		hubProbeCLI("grok", "Grok CLI", "grok"),
+		hubProbeCLI("codex", "Codex CLI", "codex"),
+		hubProbeOllama(ctx),
+	}
+	for _, kind := range []string{"lmstudio", "anthropic", "xai", "openai", "gemini", "groq", "mistral", "deepseek", "openrouter"} {
+		def := hubHTTPCatalog[kind]
+		st := hubProviderInfo{Kind: kind, Label: def.Label, Local: def.Local, Model: def.Model, NeedsKey: def.KeyEnv}
+		if def.Local {
+			if hubHTTPAlive(ctx, def.URL+"/models") {
+				st.Available = true
+				st.Detail = "answering at " + def.URL
+			} else {
+				st.Detail = "nothing answering at " + def.URL
+			}
+		} else if def.KeyEnv != "" && os.Getenv(def.KeyEnv) != "" {
+			st.Available = true
+			st.Detail = def.KeyEnv + " is set"
+		} else if def.KeyEnv != "" {
+			st.Detail = def.KeyEnv + " is not set"
+		} else {
+			st.Detail = "no default probe"
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+func hubProbeCLI(kind, label, bin string) hubProviderInfo {
+	st := hubProviderInfo{Kind: kind, Label: label, Local: true}
+	if p := hubLookCLI(bin); p != "" {
+		st.Available = true
+		st.Path = p
+		st.Detail = "installed at " + p
+		return st
+	}
+	st.Detail = bin + " is not on PATH"
+	return st
+}
+
+func hubProbeOllama(ctx context.Context) hubProviderInfo {
+	st := hubProviderInfo{Kind: "ollama", Label: "Ollama", Local: true, Model: "llama3.1"}
+	if hubHTTPAlive(ctx, "http://localhost:11434/api/tags") {
+		st.Available = true
+		st.Detail = "answering at http://localhost:11434"
+		return st
+	}
+	st.Detail = "nothing answering at http://localhost:11434"
+	return st
+}
+
+func hubHTTPAlive(ctx context.Context, url string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	return resp.StatusCode < 500
+}
+
+func hubLookCLI(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	dirs := []string{
+		filepath.Join(home, ".local/bin"),
+		filepath.Join(home, ".claude/local"),
+		filepath.Join(home, ".grok/bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+	}
+	for _, d := range dirs {
+		cand := filepath.Join(d, name)
+		if info, err := os.Stat(cand); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return cand
+		}
+	}
+	return ""
+}

@@ -26,53 +26,27 @@ package dispatch
 // Resolution order, most specific first:
 //
 //	1. an explicit --provider (or WL_AI_PROVIDER)  — somebody said
-//	2. the preference order, among what is AVAILABLE — claude, codex, ollama, api
+//	2. the catalog weight, among what is AVAILABLE — walk from highest to
+//	   lowest and take the first that this workstation can actually run
 //
 // A default is only ever chosen from providers that were actually found, so the
 // CLI cannot select something that will fail on first use. When more than one is
-// available and nobody has chosen, that is reported as a CHOICE rather than
-// resolved silently — the caller decides whether to prompt (a terminal) or to
-// surface it (Studio, which asks before the build).
+// available and nobody has chosen, the highest-weighted one is the operator
+// default. That is not a guess at cost or data residency: it is the ranking the
+// catalog already states, applied to evidence. --provider still pins.
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
-	"sort"
-	"strconv"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
-
-	"golang.org/x/term"
 )
-
-// ProviderKind is a backend this pipeline knows how to drive.
-type ProviderKind string
-
-const (
-	ProviderClaudeCode ProviderKind = "claude-code"
-	ProviderCodex      ProviderKind = "codex"
-	ProviderOllama     ProviderKind = "ollama"
-	ProviderAnthropic  ProviderKind = "anthropic"
-	ProviderOpenAI     ProviderKind = "openai"
-)
-
-// preferenceOrder is the order a default is taken in when nobody has chosen.
-//
-// Local coding-agent CLIs first because they need no key and no billing
-// relationship — an operator who already has one is the case where "it just
-// works" is achievable. Ollama next: also local and free, but a small local
-// model produces materially weaker code from the same blueprints, so it is not
-// preferred over a subscription that is already present. Keyed APIs last,
-// because reaching for somebody's key without being asked is a cost decision
-// this program has no standing to make.
-var preferenceOrder = []ProviderKind{
-	ProviderClaudeCode, ProviderCodex, ProviderOllama, ProviderAnthropic, ProviderOpenAI,
-}
 
 // ProviderStatus is one backend and whether it can be used right now.
 type ProviderInfo struct {
@@ -94,23 +68,6 @@ type ProviderInfo struct {
 	Local bool `json:"local"`
 }
 
-// defaultModels are the models used when nobody names one.
-//
-// Current as of 2026-09. These are checked into a program that outlives them,
-// so they are in one place rather than scattered through newRawProvider — the
-// previous defaults (claude-sonnet-4-20250514, gpt-4o, llama3) had all aged out
-// of relevance while sitting in four different switch arms.
-var defaultModels = map[ProviderKind]string{
-	// Left empty on purpose for the CLI-backed kinds: the tool has its own
-	// configured model and its own login, and overriding it here would silently
-	// contradict a choice the operator made in that tool.
-	ProviderClaudeCode: "",
-	ProviderCodex:      "",
-	ProviderOllama:     "llama3.1",
-	ProviderAnthropic:  "claude-opus-5",
-	ProviderOpenAI:     "gpt-4o",
-}
-
 // probeTimeout bounds one discovery probe. Short: this runs before a build, and
 // a provider that cannot answer in two seconds is not the one to reach for.
 const probeTimeout = 2 * time.Second
@@ -121,19 +78,51 @@ const probeTimeout = 2 * time.Second
 // first. Never returns an empty slice — a machine with nothing installed still
 // gets the list, with each entry saying what is missing.
 func Available(ctx context.Context) []ProviderInfo {
-	out := []ProviderInfo{
-		probeLocalCLI(ctx, ProviderClaudeCode, "claude", "Claude Code"),
-		probeLocalCLI(ctx, ProviderCodex, "codex", "Codex CLI"),
-		probeOllama(ctx),
-		probeKeyed(ProviderAnthropic, "Anthropic API", "ANTHROPIC_API_KEY"),
-		probeKeyed(ProviderOpenAI, "OpenAI API", "OPENAI_API_KEY"),
+	out := make([]ProviderInfo, len(backends), len(backends)+2)
+	var wg sync.WaitGroup
+	for i, b := range backends {
+		wg.Add(1)
+		go func(i int, b backend) {
+			defer wg.Done()
+			out[i] = probeBackend(ctx, b)
+		}(i, b)
 	}
-	rank := map[ProviderKind]int{}
-	for i, k := range preferenceOrder {
-		rank[k] = i
+	wg.Wait()
+	// Generic escapes, only when the operator configured them. Listing
+	// local-cli as "not installed" on every machine would be noise; listing it
+	// when WL_AI_COMMAND is set is how an arbitrary local tool becomes a
+	// choice rather than a secret environment variable.
+	if cmd := strings.TrimSpace(os.Getenv("WL_AI_COMMAND")); cmd != "" {
+		out = append(out, probeConfiguredLocalCLI(ctx, cmd))
 	}
-	sort.SliceStable(out, func(i, j int) bool { return rank[out[i].Kind] < rank[out[j].Kind] })
+	if base := strings.TrimSpace(os.Getenv("WL_AI_BASE_URL")); base != "" && !catalogOwnsBaseURL(base) {
+		out = append(out, probeCustomEndpoint(ctx, base))
+	}
 	return out
+}
+
+func probeBackend(ctx context.Context, b backend) ProviderInfo {
+	switch b.Driver {
+	case driverLocalCLI:
+		return probeLocalCLI(ctx, b.Kind, b.Binary, b.Label)
+	case driverOllama:
+		return probeOllama(ctx)
+	case driverAnthropic:
+		return probeKeyed(b)
+	case driverOpenAI:
+		if b.Local {
+			return probeLocalOpenAI(ctx, b)
+		}
+		if b.RequiresURL && strings.TrimSpace(os.Getenv("WL_AI_BASE_URL")) == "" {
+			st := probeKeyed(b)
+			st.Available = false
+			st.Detail = "no endpoint — set WL_AI_BASE_URL"
+			return st
+		}
+		return probeKeyed(b)
+	default:
+		return ProviderInfo{Kind: b.Kind, Label: b.Label, Detail: "unknown driver"}
+	}
 }
 
 // probeLocalCLI finds a coding-agent CLI and confirms it runs.
@@ -239,28 +228,165 @@ func pickOllamaModel(models []struct {
 
 // probeKeyed reports an API-backed provider, which is available exactly when its
 // key is present.
-func probeKeyed(kind ProviderKind, label, keyEnv string) ProviderInfo {
-	st := ProviderInfo{Kind: kind, Label: label, NeedsKey: keyEnv, Model: defaultModels[kind]}
-	// WL_AI_KEY is the pipeline's own variable and outranks the vendor one: an
-	// operator who set it meant it for this program specifically.
-	if os.Getenv("WL_AI_KEY") != "" || os.Getenv(keyEnv) != "" {
+func probeKeyed(b backend) ProviderInfo {
+	st := ProviderInfo{Kind: b.Kind, Label: b.Label, Local: b.Local, Model: b.DefaultModel}
+	if len(b.KeyEnvs) > 0 {
+		st.NeedsKey = b.KeyEnvs[0]
+	} else {
+		st.NeedsKey = "WL_AI_KEY"
+	}
+	if apiKeyFor(&b) != "" {
 		st.Available = true
 		st.Detail = "key present"
 		return st
 	}
-	st.Detail = "no key — set " + keyEnv + " (or WL_AI_KEY)"
+	st.Detail = "no key — set " + b.keyHint()
 	return st
+}
+
+// probeLocalOpenAI asks a local OpenAI-compatible server what it is holding.
+//
+// LM Studio, llama.cpp, vLLM and similar all answer GET /v1/models. A server
+// that is not running is unavailable; a server with no models is the same
+// shape as an empty Ollama — reported with the address, not offered.
+func probeLocalOpenAI(ctx context.Context, b backend) ProviderInfo {
+	st := ProviderInfo{Kind: b.Kind, Label: b.Label, Local: true}
+	base := strings.TrimRight(envOr("WL_AI_BASE_URL", b.BaseURL), "/")
+	if base == "" {
+		st.Detail = "no endpoint — set WL_AI_BASE_URL"
+		return st
+	}
+	ids, detail, ok := listOpenAIModels(ctx, base)
+	st.Detail = detail
+	if !ok {
+		return st
+	}
+	st.Available = true
+	if want := defaultModels[b.Kind]; want != "" {
+		st.Model = pickNamedModel(ids, want)
+	} else if len(ids) > 0 {
+		st.Model = ids[0]
+	}
+	return st
+}
+
+func listOpenAIModels(ctx context.Context, base string) (ids []string, detail string, ok bool) {
+	cctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, "GET", base+"/models", nil)
+	if err != nil {
+		return nil, "not a usable address: " + base, false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "nothing answered at " + base + " — start the local server, or set WL_AI_BASE_URL", false
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&body) != nil {
+		return nil, "the server at " + base + " did not answer with a model list", false
+	}
+	if len(body.Data) == 0 {
+		return nil, "a server is running at " + base + " with no models loaded", false
+	}
+	ids = make([]string, 0, len(body.Data))
+	for _, m := range body.Data {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids, fmt.Sprintf("%s — %d model(s): %s", base, len(ids), strings.Join(ids, ", ")), true
+}
+
+func pickNamedModel(ids []string, want string) string {
+	for _, id := range ids {
+		if id == want || strings.HasPrefix(id, want+":") {
+			return id
+		}
+	}
+	if len(ids) == 0 {
+		return want
+	}
+	return ids[0]
+}
+
+func probeConfiguredLocalCLI(ctx context.Context, command string) ProviderInfo {
+	st := ProviderInfo{Kind: ProviderLocalCLI, Label: "local CLI", Local: true}
+	bin, searched := ResolveLocalCLI(filepath.Base(command), command)
+	if bin == "" {
+		st.Detail = fmt.Sprintf("WL_AI_COMMAND=%q was not found. Looked on PATH and in: %s",
+			command, strings.Join(searched, ", "))
+		return st
+	}
+	st.Path = bin
+	cctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	if err := exec.CommandContext(cctx, bin, "--version").Run(); err != nil {
+		st.Detail = fmt.Sprintf("%s is at %s but did not run: %v", command, bin, err)
+		return st
+	}
+	st.Available = true
+	st.Detail = bin + " — WL_AI_COMMAND"
+	return st
+}
+
+func probeCustomEndpoint(ctx context.Context, base string) ProviderInfo {
+	st := ProviderInfo{
+		Kind:  ProviderKind("custom"),
+		Label: "custom OpenAI-compatible",
+		Local: isLocalURL(base),
+	}
+	base = strings.TrimRight(base, "/")
+	ids, detail, ok := listOpenAIModels(ctx, base)
+	if !ok {
+		// A configured URL that does not answer /v1/models is still a choice:
+		// some OpenAI-compatible servers implement chat but not the models
+		// list. Offer it; generation will fail with the server's own error if
+		// the URL is wrong.
+		st.Available = true
+		st.Model = envOr("WL_AI_MODEL", "default")
+		st.Detail = "WL_AI_BASE_URL=" + base + " — " + detail
+		return st
+	}
+	st.Available = true
+	st.Detail = "WL_AI_BASE_URL — " + detail
+	if m := os.Getenv("WL_AI_MODEL"); m != "" {
+		st.Model = m
+	} else if len(ids) > 0 {
+		st.Model = ids[0]
+	}
+	return st
+}
+
+func catalogOwnsBaseURL(base string) bool {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	for _, b := range backends {
+		if b.BaseURL != "" && strings.TrimRight(b.BaseURL, "/") == base {
+			return true
+		}
+	}
+	return false
+}
+
+func isLocalURL(u string) bool {
+	u = strings.ToLower(u)
+	return strings.Contains(u, "localhost") || strings.Contains(u, "127.0.0.1") || strings.Contains(u, "[::1]")
 }
 
 // Choice is the outcome of resolving which provider to use.
 type Choice struct {
-	// Kind is what to use. Empty when Ambiguous or when nothing is available.
+	// Kind is what to use. Empty when nothing is available.
 	Kind  ProviderKind `json:"kind,omitempty"`
 	Model string       `json:"model,omitempty"`
 	// Why says how this was arrived at, in a sentence a build log can carry.
 	Why string `json:"why,omitempty"`
-	// Ambiguous is set when several providers are available and nobody chose.
-	// It is not an error: it is the moment to ask.
+	// Ambiguous is retained for callers that still inspect it. Resolve no
+	// longer sets it: the operator default is the highest-weighted available
+	// backend, not a question.
 	Ambiguous bool           `json:"ambiguous,omitempty"`
 	Options   []ProviderInfo `json:"options,omitempty"`
 	// Err is set when nothing usable was found at all.
@@ -275,8 +401,9 @@ type Choice struct {
 // tenant to a local model for data-residency reasons must not have the build
 // quietly send that tenant's blueprints to an API instead.
 //
-// With no request: one available provider is used, several is a question, none
-// is an error naming every place that was looked.
+// With no request: the highest-weighted available provider is the operator
+// default, walking the catalog until one can actually run. None is an error
+// naming every place that was looked.
 func Resolve(ctx context.Context, requested string) Choice {
 	found := Available(ctx)
 	byKind := map[ProviderKind]ProviderInfo{}
@@ -285,9 +412,20 @@ func Resolve(ctx context.Context, requested string) Choice {
 	}
 
 	if r := ProviderKind(strings.TrimSpace(strings.ToLower(requested))); r != "" {
-		st, known := byKind[normaliseKind(r)]
+		canon := normaliseKind(r)
+		st, known := byKind[canon]
 		if !known {
-			return Choice{Err: fmt.Errorf("unknown provider %q — this pipeline drives %s",
+			// An OpenAI-compatible URL or a configured local binary is how this
+			// pipeline drives something that is not in the catalog. Refusing a
+			// name the operator typed, while those variables are set, is the
+			// generic path that used to exist only in newRawProvider — which
+			// ChooseProvider never reached.
+			if c := resolveGeneric(canon); c.Kind != "" || c.Err != nil {
+				return c
+			}
+			return Choice{Err: fmt.Errorf("unknown provider %q — this pipeline drives %s\n"+
+				"  For anything else: WL_AI_BASE_URL (OpenAI-compatible HTTP) or "+
+				"WL_AI_PROVIDER=local-cli with WL_AI_COMMAND",
 				requested, strings.Join(kindNames(), ", "))}
 		}
 		if !st.Available {
@@ -302,6 +440,12 @@ func Resolve(ctx context.Context, requested string) Choice {
 			usable = append(usable, s)
 		}
 	}
+	return chooseFromUsable(usable, found)
+}
+
+// chooseFromUsable is the operator default: walk the catalog from highest
+// weight to lowest and take the first backend this machine can actually run.
+func chooseFromUsable(usable, found []ProviderInfo) Choice {
 	switch len(usable) {
 	case 0:
 		return Choice{Err: fmt.Errorf("no usable model provider was found.\n%s\n\n"+
@@ -309,50 +453,65 @@ func Resolve(ctx context.Context, requested string) Choice {
 			indentDetails(found), strings.Join(kindNames(), "  ")), Options: found}
 	case 1:
 		return Choice{Kind: usable[0].Kind, Model: usable[0].Model,
-			Why: "the only provider available on this machine"}
+			Why: "the only provider available on this machine", Options: usable}
 	default:
-		// Several. Reported as a choice rather than resolved, because picking
-		// between a local model and a paid API is a decision with cost and data
-		// consequences that belong to the operator.
-		return Choice{Ambiguous: true, Options: usable}
+		k, m := Default(usable)
+		if k == "" {
+			return Choice{Err: fmt.Errorf("no usable model provider was found"), Options: found}
+		}
+		return Choice{Kind: k, Model: m,
+			Why: "highest-weighted available on this machine", Options: usable}
 	}
 }
 
-// Default picks from what is available, in preference order.
-//
-// Used when a caller has offered the choice and been told to just get on with
-// it. Separate from Resolve so that "nobody chose" and "nobody wants to be
-// asked" stay different states.
+// Default picks from what is available, walking the catalog from highest
+// weight to lowest. An unavailable higher-weighted backend is skipped, not
+// substituted for — the next row that can actually run wins.
 func Default(options []ProviderInfo) (ProviderKind, string) {
-	for _, want := range preferenceOrder {
+	for _, want := range preferenceOrder() {
 		for _, s := range options {
 			if s.Kind == want && s.Available {
 				return s.Kind, s.Model
 			}
 		}
 	}
+	// Configured extras (local-cli, a custom URL) are not in the catalog, so
+	// they would otherwise lose to "nothing" even when they are the only
+	// usable backend on the machine.
+	for _, s := range options {
+		if s.Available {
+			return s.Kind, s.Model
+		}
+	}
 	return "", ""
+}
+
+// resolveGeneric accepts a name that is not in the catalog when the operator
+// has configured a way to reach it.
+func resolveGeneric(k ProviderKind) Choice {
+	if k == ProviderLocalCLI {
+		if strings.TrimSpace(os.Getenv("WL_AI_COMMAND")) == "" {
+			return Choice{Err: fmt.Errorf("local-cli was requested but WL_AI_COMMAND is not set")}
+		}
+		return Choice{Kind: ProviderLocalCLI, Model: os.Getenv("WL_AI_MODEL"), Why: "requested explicitly"}
+	}
+	if strings.TrimSpace(os.Getenv("WL_AI_BASE_URL")) != "" {
+		model := os.Getenv("WL_AI_MODEL")
+		if model == "" {
+			model = "default"
+		}
+		return Choice{Kind: k, Model: model, Why: "custom OpenAI-compatible endpoint"}
+	}
+	return Choice{}
 }
 
 // normaliseKind accepts the aliases that already exist in the wild.
 func normaliseKind(k ProviderKind) ProviderKind {
-	switch k {
-	case "claude", "claude-local", "claude_code":
-		return ProviderClaudeCode
-	case "codex-cli":
-		return ProviderCodex
-	case "local":
-		return ProviderOllama
+	k = ProviderKind(strings.ToLower(string(k)))
+	if canon, ok := aliasToKind[k]; ok {
+		return canon
 	}
 	return k
-}
-
-func kindNames() []string {
-	out := make([]string, 0, len(preferenceOrder))
-	for _, k := range preferenceOrder {
-		out = append(out, string(k))
-	}
-	return out
 }
 
 func indentDetails(all []ProviderInfo) string {
@@ -383,8 +542,8 @@ func firstOutputLine(s string) string {
 // Not "no provider configured" — that is the opposite of the truth and sends an
 // operator looking for something to install. It lists what was found, says how
 // to pick, and names the flag.
-// AmbiguousError is the exported form, for pkg/tenant — which is public API and
-// cannot reach into internal/ from outside the module, but is inside it.
+// AmbiguousError is retained for callers that still surface a choice. The
+// operator default no longer produces this: it walks the catalog instead.
 func AmbiguousError(options []ProviderInfo) error { return ambiguousProviderError(options) }
 
 func ambiguousProviderError(options []ProviderInfo) error {
@@ -418,22 +577,20 @@ func discoveredOllamaModel() string {
 // ChooseProvider settles which backend this run uses, before any work starts.
 //
 // `requested` is a --provider flag or a tenant's stored preference; empty means
-// nobody has said. On an interactive terminal an ambiguous machine is a question
-// worth asking — that is the flow the operator asked for: discover, offer, then
-// build. Everywhere else (Studio's subprocess, CI, a script) there is nobody to
-// ask, so the ambiguity is returned as an error that names the options and the
-// flag, and the caller offers the choice in its own idiom.
+// nobody has said, and the highest-weighted backend this workstation can
+// actually run is the operator default. An explicit name still wins, and still
+// fails rather than falling back if that backend cannot be used.
 func ChooseProvider(requested, model string) error {
 	c := Resolve(context.Background(), requested)
 	if c.Err != nil {
 		return c.Err
 	}
 	if c.Ambiguous {
-		picked, ok := askForProvider(c.Options)
-		if !ok {
-			return ambiguousProviderError(c.Options)
-		}
-		c = Choice{Kind: picked.Kind, Model: picked.Model, Why: "chosen at the prompt"}
+		// Defensive: Resolve no longer leaves the default path ambiguous, but
+		// a caller that constructed a Choice by hand still gets the ranking
+		// rather than a prompt that hangs in Studio's pipe.
+		k, m := Default(c.Options)
+		c = Choice{Kind: k, Model: m, Why: "highest-weighted available on this machine", Options: c.Options}
 	}
 	if model != "" {
 		c.Model = model
@@ -447,69 +604,20 @@ func ChooseProvider(requested, model string) error {
 		fmt.Printf(" — %s", c.Why)
 	}
 	fmt.Println()
+	if others := otherAvailable(c.Kind, c.Options); others != "" {
+		fmt.Printf("  Also available: %s. Pin one with --provider.\n", others)
+	}
 	return nil
 }
 
-// askForProvider offers the choice on a terminal, and only on a terminal.
-//
-// Guarded on stdin being a character device: Studio runs this binary with a pipe
-// for stdin, and a prompt written into a pipe is a build that hangs forever with
-// no indication why.
-func askForProvider(options []ProviderInfo) (ProviderInfo, bool) {
-	if !stdinIsTerminal() {
-		return ProviderInfo{}, false
-	}
-	fmt.Println()
-	fmt.Println("  More than one model provider is available here:")
-	for i, s := range options {
-		where := "off this machine"
-		if s.Local {
-			where = "on this machine"
-		}
-		model := s.Model
-		if model == "" {
-			model = "its own configured model"
-		}
-		fmt.Printf("    %d) %-12s %s, %s\n", i+1, s.Kind, model, where)
-	}
-	def, _ := Default(options)
-	fmt.Printf("  Choose [1-%d], or Enter for %s: ", len(options), def)
-
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil && strings.TrimSpace(line) == "" {
-		return ProviderInfo{}, false
-	}
-	answer := strings.TrimSpace(line)
-	if answer == "" {
-		for _, s := range options {
-			if s.Kind == def {
-				return s, true
-			}
-		}
-		return ProviderInfo{}, false
-	}
-	if n, convErr := strconv.Atoi(answer); convErr == nil && n >= 1 && n <= len(options) {
-		return options[n-1], true
-	}
-	// A name rather than a number, because people type "ollama".
-	want := normaliseKind(ProviderKind(strings.ToLower(answer)))
+func otherAvailable(picked ProviderKind, options []ProviderInfo) string {
+	var names []string
 	for _, s := range options {
-		if s.Kind == want {
-			return s, true
+		if s.Available && s.Kind != picked {
+			names = append(names, string(s.Kind))
 		}
 	}
-	return ProviderInfo{}, false
-}
-
-// stdinIsTerminal reports whether there is a person to ask.
-//
-// term.IsTerminal, not a ModeCharDevice check on the FileInfo. /dev/null IS a
-// character device, so the mode test says "terminal" for `< /dev/null` — which
-// is exactly how a non-interactive caller invokes this. Measured: the menu
-// printed, the read returned EOF, and the build failed with the prompt already
-// on screen. A test running under `go test` would have hung instead.
-func stdinIsTerminal() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
+	return strings.Join(names, ", ")
 }
 
 // PrintProviders shows what this machine offers, and which would be used.
@@ -526,6 +634,7 @@ func PrintProviders(asJSON bool) error {
 	fmt.Println()
 	fmt.Println("  Model providers")
 	fmt.Println()
+	c := Resolve(context.Background(), "")
 	for _, s := range all {
 		mark := "·"
 		if s.Available {
@@ -535,26 +644,28 @@ func PrintProviders(asJSON bool) error {
 		if s.Local {
 			where = "local"
 		}
-		fmt.Printf("  %s %-12s %-16s %s\n", mark, s.Kind, s.Label+" ("+where+")", s.Detail)
+		tag := ""
+		if c.Kind == s.Kind && s.Available && c.Err == nil {
+			tag = "  ← default"
+		}
+		fmt.Printf("  %s %-12s %-16s %s%s\n", mark, s.Kind, s.Label+" ("+where+")", s.Detail, tag)
 		if s.Available && s.Model != "" {
 			fmt.Printf("      model: %s\n", s.Model)
 		}
 	}
 	fmt.Println()
-	c := Resolve(context.Background(), "")
 	switch {
 	case c.Err != nil:
 		fmt.Printf("  Nothing usable: %v\n", c.Err)
-	case c.Ambiguous:
-		def, model := Default(c.Options)
-		fmt.Printf("  Several are available, so a build will ask. Without an answer it takes %s", def)
-		if model != "" {
-			fmt.Printf(" (%s)", model)
-		}
-		fmt.Println(".")
-		fmt.Println("  Pin one with --provider, WL_AI_PROVIDER, or per tenant in Studio.")
 	default:
-		fmt.Printf("  A build here uses %s — %s.\n", c.Kind, c.Why)
+		fmt.Printf("  A build here uses %s", c.Kind)
+		if c.Model != "" {
+			fmt.Printf(" (%s)", c.Model)
+		}
+		fmt.Printf(" — %s.\n", c.Why)
+		if others := otherAvailable(c.Kind, c.Options); others != "" {
+			fmt.Printf("  Also available: %s. Pin one with --provider, WL_AI_PROVIDER, or per tenant in Studio.\n", others)
+		}
 	}
 	fmt.Println()
 	return nil

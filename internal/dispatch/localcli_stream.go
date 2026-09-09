@@ -347,9 +347,10 @@ func (p *LocalCLIProvider) runStreaming(ctx context.Context, args []string, onAc
 				if ev.Type == "assistant" && ev.Message.Model != "" {
 					answeredBy = ev.Message.Model
 				}
-				// The terminal envelope. `result` is the type the final line
-				// carries, and it is the one faultFromClaudeCode reads.
-				if ev.Type == "result" {
+				// The terminal envelope. Claude Code and Grok's
+				// streaming-messages-json both end on `result`. Grok also
+				// emits `error` as a terminal line.
+				if ev.Type == "result" || ev.Type == "error" {
 					finalLine = string(line)
 				}
 			}
@@ -396,24 +397,23 @@ func (p *LocalCLIProvider) runStreaming(ctx context.Context, args []string, onAc
 
 	res := &streamResult{Final: final, Activity: act, RateLimit: rl, Model: model}
 	if final != "" {
-		var env struct {
-			Result  string `json:"result"`
-			IsError bool   `json:"is_error"`
+		text, used, isErr := parseCLICompletion(final)
+		if used != "" && res.Model == "" {
+			res.Model = used
 		}
-		if json.Unmarshal([]byte(final), &env) == nil {
-			res.Text = env.Result
-			if env.IsError {
-				if f := faultFromClaudeCode(p.Name, final); f != nil {
-					return res, f
-				}
+		res.Text = text
+		if isErr {
+			if f := faultFromCLI(p.Name, final); f != nil {
+				return res, f
 			}
+			return res, &ProviderFault{Provider: p.Name, Message: text, Raw: final}
 		}
 	}
 	if waitErr != nil {
 		// A non-zero exit that still produced a terminal envelope is described
 		// by that envelope; the exit code adds nothing.
 		if final != "" {
-			if f := faultFromClaudeCode(p.Name, final); f != nil {
+			if f := faultFromCLI(p.Name, final); f != nil {
 				return res, f
 			}
 		}
@@ -439,14 +439,20 @@ func (p *LocalCLIProvider) runStreaming(ctx context.Context, args []string, onAc
 // by running it, which is the only way this kind of thing is ever found.
 func (p *LocalCLIProvider) chatStreaming(messages []Message) (string, error) {
 	args := append([]string(nil), p.Args...)
-	args = replaceOutputFormat(args, "stream-json")
-	if !hasFlag(args, "--verbose") {
-		args = append(args, "--verbose")
+	if !p.NativeStream {
+		args = replaceOutputFormat(args, "stream-json")
+		if !hasFlag(args, "--verbose") {
+			args = append(args, "--verbose")
+		}
 	}
 	if p.Model != "" {
 		args = append(args, "--model", p.Model)
 	}
-	args = append(args, flattenMessages(messages))
+	args, cleanup, err := p.appendPrompt(args, flattenMessages(messages))
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
 
 	res, err := p.runStreaming(context.Background(), args, p.OnActivity)
 	if res != nil && res.RateLimit != nil {

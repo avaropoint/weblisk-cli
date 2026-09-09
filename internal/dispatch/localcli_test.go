@@ -165,15 +165,119 @@ func TestLocalProvidersAreSelectableAndNeedNoKey(t *testing.T) {
 
 func TestHostedProvidersStillRequireTheirKey(t *testing.T) {
 	// The local additions must not have loosened the hosted paths.
-	for _, k := range []string{"WL_AI_KEY", "WL_AI_BASE_URL", "WL_AI_MODEL", "WL_AI_COMMAND"} {
+	for _, k := range []string{
+		"WL_AI_KEY", "WL_AI_BASE_URL", "WL_AI_MODEL", "WL_AI_COMMAND",
+		"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY",
+	} {
 		os.Unsetenv(k)
 	}
-	for _, provider := range []string{"openai", "anthropic"} {
+	for _, provider := range []string{"openai", "anthropic", "xai"} {
 		t.Setenv("WL_AI_PROVIDER", provider)
 		t.Setenv("WL_AI_KEY", "")
 		os.Unsetenv("WL_AI_KEY")
 		if _, err := NewProvider(); err == nil {
-			t.Errorf("%s was accepted with no WL_AI_KEY", provider)
+			t.Errorf("%s was accepted with no key", provider)
 		}
+	}
+}
+
+func TestGrokIsALocalCLIAndNeedsNoKey(t *testing.T) {
+	for _, k := range []string{"WL_AI_KEY", "XAI_API_KEY", "WL_AI_MODEL", "WL_AI_BASE_URL"} {
+		os.Unsetenv(k)
+	}
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "grok")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WL_AI_PROVIDER", "grok")
+	t.Setenv("WL_AI_COMMAND", tool)
+	p, err := NewProvider()
+	if err != nil {
+		t.Fatalf("grok with a local binary was refused: %v", err)
+	}
+	lp, ok := Underlying(p).(*LocalCLIProvider)
+	if !ok {
+		t.Fatalf("grok built %T, want *LocalCLIProvider", Underlying(p))
+	}
+	if lp.PromptFileFlag != "--prompt-file" {
+		t.Errorf("PromptFileFlag = %q, want --prompt-file (argv cannot hold a hub prompt)", lp.PromptFileFlag)
+	}
+	if !lp.NativeStream {
+		t.Error("grok must keep its own streaming format; rewriting it to Claude's stream-json would fail")
+	}
+	if !lp.Stream {
+		t.Error("grok is not streamed, so a long generation is bounded by a wall clock again")
+	}
+	hasSingle := false
+	for _, a := range lp.Args {
+		if a == "--output-format" {
+			hasSingle = true
+		}
+	}
+	if !hasSingle {
+		t.Errorf("grok args = %q, want --output-format streaming-messages-json", lp.Args)
+	}
+}
+
+func TestParseCLICompletionReadsGrokAndClaudeEnvelopes(t *testing.T) {
+	text, model, isErr := parseCLICompletion(`{"text":"hello from grok","modelUsage":{"grok-4.6":{}}}`)
+	if isErr || text != "hello from grok" || model != "grok-4.6" {
+		t.Errorf("grok json = %q %q err=%v", text, model, isErr)
+	}
+	text, model, isErr = parseCLICompletion(`{"result":"hello from claude","model":"claude-opus-5","is_error":false}`)
+	if isErr || text != "hello from claude" || model != "claude-opus-5" {
+		t.Errorf("claude json = %q %q err=%v", text, model, isErr)
+	}
+	text, _, isErr = parseCLICompletion(`{"type":"error","message":"Not logged in"}`)
+	if !isErr || text != "Not logged in" {
+		t.Errorf("grok error = %q err=%v", text, isErr)
+	}
+}
+
+func TestALargePromptIsPassedAsAFile(t *testing.T) {
+	p := &LocalCLIProvider{PromptFileFlag: "--prompt-file"}
+	body := strings.Repeat("blueprint ", 1000)
+	args, cleanup, err := p.appendPrompt(nil, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if len(args) != 2 || args[0] != "--prompt-file" {
+		t.Fatalf("args = %q", args)
+	}
+	got, err := os.ReadFile(args[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != body {
+		t.Errorf("prompt file did not carry the prompt (%d bytes, want %d)", len(got), len(body))
+	}
+	cleanup()
+	if _, err := os.Stat(args[1]); !os.IsNotExist(err) {
+		t.Error("prompt file was left behind")
+	}
+}
+
+func TestAVendorKeyIsEnoughForXAI(t *testing.T) {
+	os.Unsetenv("WL_AI_KEY")
+	t.Setenv("WL_AI_PROVIDER", "xai")
+	t.Setenv("XAI_API_KEY", "xai-test")
+	p, err := NewProvider()
+	if err != nil {
+		t.Fatalf("xai with XAI_API_KEY was refused: %v", err)
+	}
+	op, ok := Underlying(p).(*OpenAIProvider)
+	if !ok {
+		t.Fatalf("xai built %T, want *OpenAIProvider", Underlying(p))
+	}
+	if op.BaseURL != "https://api.x.ai/v1" {
+		t.Errorf("base URL = %q", op.BaseURL)
+	}
+	if op.Model != "grok-4.6" {
+		t.Errorf("model = %q, want grok-4.6", op.Model)
+	}
+	if op.APIKey != "xai-test" {
+		t.Errorf("key was not taken from XAI_API_KEY")
 	}
 }

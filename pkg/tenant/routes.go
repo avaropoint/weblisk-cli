@@ -76,3 +76,19 @@ func Agents() AdminRoute {
 func Audit() AdminRoute {
 	return AdminRoute{"GET", "/v1/audit", "the audit log cannot be read"}
 }
+
+// Model configuration lives on the hub. Studio is a client of it: chat, edit
+// and agents for this tenant must not run against a provider Studio configured
+// for itself. See REFACTOR_PLAN — "the consequence that is a security boundary".
+func Model() AdminRoute {
+	return AdminRoute{"GET", "/v1/admin/model", "Studio cannot show or inherit what this tenant uses"}
+}
+func SetModel() AdminRoute {
+	return AdminRoute{"PUT", "/v1/admin/model", "this tenant cannot change its own backend"}
+}
+func ModelProviders() AdminRoute {
+	return AdminRoute{"GET", "/v1/admin/model/providers", "discovery on this hub's host cannot be read"}
+}
+func Complete() AdminRoute {
+	return AdminRoute{"POST", "/v1/admin/complete", "tenant chat and edit cannot run under this tenant's policy"}
+}

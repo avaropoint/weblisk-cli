@@ -698,7 +698,7 @@ func printHelp() {
     tenant create <name>    Turn a name into a running tenant, in one command
       --dir <path>          Where to create it (default: ./<name>)
       --platform <p>        go (default), cloudflare, node, rust
-      --provider <p>        Model backend; omit to be asked when there is a choice
+      --provider <p>        Model backend; omit to take the highest-weighted available
       --operator <name>     First operator (default: $USER)
       --json                One progress object per line, for a console
     providers               What this machine can generate with, and which it picks
@@ -846,9 +846,12 @@ func printHelp() {
     WL_ORCH               Orchestrator URL (default: http://localhost:9800)
     WL_BLUEPRINT_SOURCES  Additional blueprint repo URLs (comma-separated)
     WL_TEMPLATE_SOURCES   Additional template repo URLs (comma-separated)
-    WL_AI_PROVIDER        AI backend. Local, no key: claude-code, ollama, local-cli
-                          Hosted, needs WL_AI_KEY: openai, anthropic, cloudflare
-    WL_AI_COMMAND         Path to a local CLI (claude-code, local-cli)
+    WL_AI_PROVIDER        AI backend. Run weblisk providers to see what this
+                          machine has. Local, no key: claude-code, grok, codex,
+                          ollama, lmstudio, local-cli. Hosted: xai, openai,
+                          anthropic, gemini, groq, mistral, deepseek, openrouter.
+                          Anything else: WL_AI_BASE_URL (OpenAI-compatible).
+    WL_AI_COMMAND         Path to a local CLI (claude-code, grok, local-cli)
     WL_AI_TIMEOUT         Per-call limit for local CLIs (default 10m)
     WL_AI_MODEL           Model name (provider-specific default)
     WL_AI_BASE_URL        Endpoint override

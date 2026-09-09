@@ -647,14 +647,17 @@ func RequireProvider() (Provider, error) {
 	provider, err := NewProvider()
 	if err != nil {
 		return nil, fmt.Errorf("AI provider required for code generation\n\n"+
-			"  Configure an AI provider:\n"+
+			"  Configure an AI provider — run `weblisk providers` to see what this machine has.\n"+
 			"  No account needed — runs on this machine:\n"+
 			"    WL_AI_PROVIDER=claude-code  (Claude Code CLI, uses its own login)\n"+
+			"    WL_AI_PROVIDER=grok         (Grok CLI, uses its own login)\n"+
 			"    WL_AI_PROVIDER=ollama       (local Ollama, default http://localhost:11434)\n"+
 			"    WL_AI_PROVIDER=local-cli    (any local tool; set WL_AI_COMMAND)\n\n"+
-			"  Hosted, requires a key:\n"+
-			"    WL_AI_PROVIDER=openai       (requires WL_AI_KEY)\n"+
-			"    WL_AI_PROVIDER=anthropic    (requires WL_AI_KEY)\n\n"+
+			"  Hosted, requires a vendor key or WL_AI_KEY:\n"+
+			"    WL_AI_PROVIDER=xai          (XAI_API_KEY)\n"+
+			"    WL_AI_PROVIDER=openai       (OPENAI_API_KEY)\n"+
+			"    WL_AI_PROVIDER=anthropic    (ANTHROPIC_API_KEY)\n\n"+
+			"  Anything else: WL_AI_BASE_URL (OpenAI-compatible HTTP).\n"+
 			"  Set in .env or environment: %w", err)
 	}
 

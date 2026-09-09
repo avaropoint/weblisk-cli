@@ -54,7 +54,11 @@ func handleCreate(args []string, root string) error {
 	fmt.Printf("  AI Model:  %s\n", dispatch.DiscoverProvider())
 	fmt.Println()
 
-	return dispatch.GatewayCreate(root, platform)
+	if err := dispatch.GatewayCreate(root, platform); err != nil {
+		return err
+	}
+	dispatch.InstallAndNoteSkills(root, platform, "gateway")
+	return nil
 }
 
 func handleStart(args []string, root string) error {

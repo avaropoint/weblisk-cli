@@ -72,7 +72,11 @@ func handleCreate(name string, args []string, root string) error {
 	fmt.Printf("  AI Model:  %s\n", dispatch.DiscoverProvider())
 	fmt.Println()
 
-	return dispatch.DomainCreate(root, name, platform)
+	if err := dispatch.DomainCreate(root, name, platform); err != nil {
+		return err
+	}
+	dispatch.InstallAndNoteSkills(root, platform, "domain")
+	return nil
 }
 
 func handleStart(name string, args []string, root string) error {

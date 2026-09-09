@@ -44,6 +44,7 @@ package tenant
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,11 +192,9 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 		return
 	}
 	if choice.Ambiguous {
-		// Returned rather than resolved. A library must not pick between a
-		// local model and a metered API on somebody's behalf; the front end
-		// asks, in its own idiom, and calls again with an answer.
-		fail(StepProvider, dispatch.AmbiguousError(choice.Options))
-		return
+		k, m := dispatch.Default(choice.Options)
+		choice.Kind, choice.Model = k, m
+		choice.Why = "highest-weighted available on this machine"
 	}
 	model := choice.Model
 	if spec.Model != "" {
@@ -259,9 +258,17 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 	dispatch.MarkBuildTerminal(spec.Root, "completed", "")
 	restore()
 
+	// The hub must serve its own model routes. Written in after generation so
+	// it does not depend on the model emitting them from a blueprint.
+	if err := dispatch.InstallModelGateway(spec.Root); err != nil {
+		if !say(StepGenerate, "model gateway not installed: "+err.Error()) {
+			return
+		}
+	}
+
 	// 4. Skills — after generation, so a failed build leaves no files
 	// describing a tenant that does not exist.
-	skills, serr := dispatch.InstallSkills(spec.Root, string(choice.Kind), platform)
+	skills, serr := dispatch.InstallSkills(spec.Root, string(choice.Kind), platform, "tenant")
 	if serr != nil {
 		// Said, not fatal. The hub exists and works; what is missing is that
 		// the next editor of this tenant will be less well informed.
@@ -322,6 +329,15 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 	if perr != nil {
 		fail(StepProvision, perr)
 		return
+	}
+
+	// The model that wrote this hub is this hub's model. Written into the
+	// tenant, not into Studio: Studio will read it when it connects, and must
+	// not keep a parallel default that tenant chat can fall back to.
+	if err := writeModelConfig(spec.Root, string(choice.Kind), model); err != nil {
+		if !say(StepProvider, "model config not stamped: "+err.Error()) {
+			return
+		}
 	}
 
 	// 6. Accept. The tenant is up; ask it whether it actually works before
@@ -386,6 +402,21 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 // under test. It passed locally and failed the first time CI ran the tests at
 // all. Provider-first is the right production order; a test of a later step
 // must not depend on an earlier one succeeding.
+// writeModelConfig records which backend generated this tenant, in the tenant.
+func writeModelConfig(root, provider, model string) error {
+	dir := filepath.Join(root, ".weblisk")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	body := "{\n  \"provider\": " + strconvQuote(provider) + ",\n  \"model\": " + strconvQuote(model) + "\n}\n"
+	return os.WriteFile(filepath.Join(dir, "model.json"), []byte(body), 0o600)
+}
+
+func strconvQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func checkDirectoryFree(root string, resume bool) error {
 	existing := generatedMarkers(root)
 	if len(existing) == 0 || resume {

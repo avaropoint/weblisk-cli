@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/avaropoint/weblisk-cli/internal/platform"
 )
 
 // localCLIInstallDirs are the places a coding-agent CLI actually installs
@@ -36,6 +38,7 @@ import (
 var localCLIInstallDirs = []string{
 	"~/.local/bin",      // the official Claude Code installer
 	"~/.claude/local",   // older local installs
+	"~/.grok/bin",       // Grok managed install
 	"/opt/homebrew/bin", // Homebrew, Apple silicon
 	"/usr/local/bin",    // Homebrew, Intel; manual installs
 	"~/.npm-global/bin", // npm -g with a user prefix
@@ -65,16 +68,20 @@ func ResolveLocalCLI(name, configured string) (string, []string) {
 		return p, nil
 	}
 	home, _ := os.UserHomeDir()
-	searched := make([]string, 0, len(localCLIInstallDirs))
-	for _, dir := range localCLIInstallDirs {
+	dirs := append([]string(nil), localCLIInstallDirs...)
+	dirs = append(dirs, platform.ExtraInstallDirs()...)
+	searched := make([]string, 0, len(dirs)*4)
+	for _, dir := range dirs {
 		full := dir
 		if strings.HasPrefix(dir, "~/") && home != "" {
 			full = filepath.Join(home, dir[2:])
 		}
-		candidate := filepath.Join(full, name)
-		searched = append(searched, candidate)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return candidate, nil
+		for _, candName := range platform.LookPathCandidates(name) {
+			candidate := filepath.Join(full, candName)
+			searched = append(searched, candidate)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				return candidate, nil
+			}
 		}
 	}
 	return "", searched
@@ -98,6 +105,17 @@ type LocalCLIProvider struct {
 	JSON       bool          // parse stdout as a result envelope
 	Timeout    time.Duration // 0 means defaultLocalCLITimeout (non-streaming only)
 	Dir        string        // working directory, "" means inherit
+	// PromptFlag, when set, passes the prompt as that flag's value rather than
+	// as a trailing positional argument. Grok's `--single` is the reason: a
+	// positional prompt opens the TUI, which is not a generation backend.
+	PromptFlag string
+	// PromptFileFlag, when set, writes the prompt to a temp file and passes
+	// that path as the flag's value. Hub generation prompts exceed ARG_MAX
+	// (`argument list too long`) if they go on argv — measured against grok.
+	PromptFileFlag string
+	// NativeStream means Args already select a streaming output format, so
+	// chatStreaming must not rewrite them to Claude Code's stream-json.
+	NativeStream bool
 	// Stream drives the CLI with --output-format stream-json and watches its
 	// events, so liveness is observed rather than assumed. See
 	// localcli_stream.go for why that replaces a total deadline.
@@ -165,7 +183,11 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 	if p.Model != "" {
 		args = append(args, "--model", p.Model)
 	}
-	args = append(args, flattenMessages(messages))
+	args, cleanup, err := p.appendPrompt(args, flattenMessages(messages))
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
 
 	cmd := exec.CommandContext(ctx, p.Bin, args...)
 	if p.Dir != "" {
@@ -189,7 +211,7 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 		// JSON into an error string: the string form was matched against for
 		// retry decisions, and its "permission_denials" field made every
 		// transient failure look permanent.
-		if f := faultFromClaudeCode(p.Name, strings.TrimSpace(stdout.String())); f != nil {
+		if f := faultFromCLI(p.Name, strings.TrimSpace(stdout.String())); f != nil {
 			return "", f
 		}
 		detail := strings.TrimSpace(stderr.String())
@@ -210,25 +232,96 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 		return raw, nil
 	}
 
-	var res claudeCodeResult
-	if err := json.Unmarshal([]byte(raw), &res); err != nil {
-		// Not the envelope we expected. The output is still a completion, and
-		// refusing it because the wrapper changed shape would be worse than
-		// using it.
-		return raw, nil
-	}
-	if res.Model != "" {
+	text, model, isErr := parseCLICompletion(raw)
+	if model != "" {
 		p.observedMu.Lock()
-		p.observed = res.Model
+		p.observed = model
 		p.observedMu.Unlock()
 	}
-	if res.IsError {
-		if f := faultFromClaudeCode(p.Name, raw); f != nil {
+	if isErr {
+		if f := faultFromCLI(p.Name, raw); f != nil {
 			return "", f
 		}
-		return "", &ProviderFault{Provider: p.Name, Message: res.Result, Raw: raw}
+		return "", &ProviderFault{Provider: p.Name, Message: text, Raw: raw}
 	}
-	return res.Result, nil
+	return text, nil
+}
+
+func (p *LocalCLIProvider) appendPrompt(args []string, prompt string) ([]string, func(), error) {
+	nop := func() {}
+	if p.PromptFileFlag != "" {
+		f, err := os.CreateTemp("", "weblisk-prompt-*.txt")
+		if err != nil {
+			return nil, nop, fmt.Errorf("writing prompt file: %w", err)
+		}
+		path := f.Name()
+		cleanup := func() { _ = os.Remove(path) }
+		if err := f.Chmod(0o600); err != nil {
+			_ = f.Close()
+			cleanup()
+			return nil, nop, err
+		}
+		if _, err := f.WriteString(prompt); err != nil {
+			_ = f.Close()
+			cleanup()
+			return nil, nop, fmt.Errorf("writing prompt file: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			cleanup()
+			return nil, nop, err
+		}
+		return append(args, p.PromptFileFlag, path), cleanup, nil
+	}
+	if p.PromptFlag != "" {
+		return append(args, p.PromptFlag, prompt), nop, nil
+	}
+	return append(args, prompt), nop, nil
+}
+
+// parseCLICompletion reads a one-shot JSON envelope from a coding-agent CLI.
+//
+// Claude Code uses `result` / `is_error` / `model`. Grok's `--output-format json`
+// uses `text` / `type:error` / `modelUsage`. Both are valid completions; refusing
+// one because it is not the other would drop a working answer.
+func parseCLICompletion(raw string) (text, model string, isErr bool) {
+	var obj map[string]any
+	if json.Unmarshal([]byte(raw), &obj) != nil {
+		return raw, "", false
+	}
+	if t, _ := obj["type"].(string); t == "error" {
+		msg, _ := obj["message"].(string)
+		if msg == "" {
+			msg = raw
+		}
+		return msg, "", true
+	}
+	if errFlag, _ := obj["is_error"].(bool); errFlag {
+		msg := stringFrom(obj, "result", "text", "message")
+		if msg == "" {
+			msg = raw
+		}
+		return msg, stringFrom(obj, "model"), true
+	}
+	text = stringFrom(obj, "result", "text", "content")
+	model = stringFrom(obj, "model")
+	if model == "" {
+		if mu, ok := obj["modelUsage"].(map[string]any); ok {
+			for k := range mu {
+				model = k
+				break
+			}
+		}
+	}
+	return text, model, false
+}
+
+func stringFrom(obj map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := obj[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // claudeCodeArgs are the flags that make a one-shot, non-interactive call.
@@ -266,27 +359,65 @@ func claudeCodeArgs() []string {
 	}
 }
 
+// grokArgs are the flags that make a one-shot, non-interactive Grok call.
+//
+// Verified against `grok --help` and the Grok Build TUI headless-mode docs on
+// the machine this was written on. A positional prompt opens the TUI; the
+// prompt itself is passed with `--prompt-file` because a hub-generation
+// prompt does not fit on argv (`argument list too long`, measured).
+// `--output-format streaming-messages-json` is the Claude-shaped event stream
+// this provider already knows how to watch, so a long generation is observed
+// rather than bounded by a wall clock.
+//
+// Tools, subagents, plan mode and web search are off: this is a single
+// generation from a prompt, the same contract as claude-code. WL_AI_ARGS
+// overrides the list entirely.
+func grokArgs() []string {
+	if custom := splitArgs(os.Getenv("WL_AI_ARGS")); len(custom) > 0 {
+		return custom
+	}
+	return []string{
+		"--output-format", "streaming-messages-json",
+		"--no-subagents",
+		"--disable-web-search",
+		"--no-plan",
+		"--verbatim",
+		"--tools", "",
+	}
+}
+
+func configuredCLIPath(binary string) string {
+	if c := strings.TrimSpace(os.Getenv("WL_AI_COMMAND")); c != "" {
+		return c
+	}
+	return os.Getenv(strings.ToUpper(binary) + "_BIN")
+}
+
+func missingLocalCLI(name, configured string, searched []string) error {
+	if strings.TrimSpace(configured) != "" {
+		return fmt.Errorf("WL_AI_COMMAND is set to %q, which is not an executable file", configured)
+	}
+	return fmt.Errorf("%s is not installed, or is not where this process can see it.\n"+
+		"Looked on PATH and in:\n  %s\n\n"+
+		"Install it, or set WL_AI_COMMAND to its full path.",
+		name, strings.Join(searched, "\n  "))
+}
+
 // newLocalCLIProvider builds a subprocess provider for a named tool.
 //
-// `claude-code` is a verified preset. Anything else is driven entirely from
-// configuration, because inventing another tool's flags would produce a provider
-// that looks supported and fails on first use.
+// `claude-code` and `grok` are verified presets. Anything else is driven
+// entirely from configuration, because inventing another tool's flags would
+// produce a provider that looks supported and fails on first use.
 func newLocalCLIProvider(kind, model string) (Provider, error) {
 	timeout := parseTimeoutEnv(os.Getenv("WL_AI_TIMEOUT"))
 	idle := parseTimeoutEnv(os.Getenv("WL_AI_IDLE_TIMEOUT"))
 
 	switch kind {
 	case "claude-code", "claude-local":
-		configured := os.Getenv("WL_AI_COMMAND")
+		configured := configuredCLIPath("claude")
 		bin, searched := ResolveLocalCLI("claude", configured)
 		if bin == "" {
-			if strings.TrimSpace(configured) != "" {
-				return nil, fmt.Errorf("WL_AI_COMMAND is set to %q, which is not an executable file", configured)
-			}
-			return nil, fmt.Errorf("claude code is not installed, or is not where this process can see it.\n"+
-				"Looked on PATH and in:\n  %s\n\n"+
-				"Install it, or set WL_AI_COMMAND to its full path.",
-				strings.Join(searched, "\n  "))
+			return nil, missingLocalCLI("claude code", configured, searched)
 		}
 		return &LocalCLIProvider{
 			Bin: bin, Name: "claude code", Args: claudeCodeArgs(),
@@ -301,17 +432,27 @@ func newLocalCLIProvider(kind, model string) (Provider, error) {
 			OnActivity: observeActivity,
 		}, nil
 
+	case "grok":
+		configured := configuredCLIPath("grok")
+		bin, searched := ResolveLocalCLI("grok", configured)
+		if bin == "" {
+			return nil, missingLocalCLI("grok", configured, searched)
+		}
+		return &LocalCLIProvider{
+			Bin: bin, Name: "grok", Args: grokArgs(),
+			Model: model, JSON: true, Timeout: timeout,
+			// --prompt-file, not --single: the planning prompt is the whole
+			// blueprint corpus, which does not fit on argv.
+			PromptFileFlag: "--prompt-file", NativeStream: true,
+			Stream: true, IdleTimeout: idle,
+			OnActivity: observeActivity,
+		}, nil
+
 	case "codex":
-		configured := os.Getenv("WL_AI_COMMAND")
+		configured := configuredCLIPath("codex")
 		bin, searched := ResolveLocalCLI("codex", configured)
 		if bin == "" {
-			if strings.TrimSpace(configured) != "" {
-				return nil, fmt.Errorf("WL_AI_COMMAND is set to %q, which is not an executable file", configured)
-			}
-			return nil, fmt.Errorf("codex is not installed, or is not where this process can see it.\n"+
-				"Looked on PATH and in:\n  %s\n\n"+
-				"Install it, or set WL_AI_COMMAND to its full path.",
-				strings.Join(searched, "\n  "))
+			return nil, missingLocalCLI("codex", configured, searched)
 		}
 		return &LocalCLIProvider{
 			Bin: bin, Name: "codex", Args: codexArgs(),
@@ -384,14 +525,19 @@ func parseTimeoutEnv(v string) time.Duration {
 // it will work.
 func LocalCLIAvailable(kind string) bool {
 	name := "claude"
-	if kind == "local-cli" {
+	switch normaliseKind(ProviderKind(kind)) {
+	case ProviderGrok:
+		name = "grok"
+	case ProviderCodex:
+		name = "codex"
+	case ProviderLocalCLI:
 		name = strings.TrimSpace(os.Getenv("WL_AI_COMMAND"))
 		if name == "" {
 			return false
 		}
 		name = filepath.Base(name)
 	}
-	bin, _ := ResolveLocalCLI(name, os.Getenv("WL_AI_COMMAND"))
+	bin, _ := ResolveLocalCLI(name, configuredCLIPath(name))
 	if bin == "" {
 		return false
 	}

@@ -38,7 +38,7 @@ it is the verb that puts them in order.
 | **Bootstrap** | **Done** — `pkg/tenant`'s step 5 builds and starts the hub, waits for it to listen, then `server provision` writes the secret and claims it. `Provision` itself does NOT start anything; this table said it did, its own doc comment said it did not, and `pkg/tenant` satisfied neither — so `tenant create` failed at its last step on every fresh directory |
 | **`connect`** | **Done** — `weblisk operator connect --orch <url>`, address-based, needs no local project |
 | **Liveness with authority** | **Done** — reachable and admitted are asked and reported apart, in the CLI and in Studio's hub panel |
-| **Which model** | **Done** — `weblisk providers` discovers what the machine has; the choice is per tenant over an installation default, and is never guessed when several exist |
+| **Which model** | **Done** — `weblisk providers` discovers what the machine has; the operator default is the highest-weighted backend that is actually available; `--provider` still pins and never silently falls back |
 | **Grants** | **Still missing.** No invite, list, or revoke. `patterns/principal-identity` specifies them; nothing implements them |
 
 ## What a tenant is on disk

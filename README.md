@@ -72,7 +72,7 @@ weblisk vendor
 weblisk vendor --dest js/vendor
 
 # Code generation (requires an AI provider — local is fine)
-export WL_AI_PROVIDER=claude-code          # or: ollama, local-cli, openai, anthropic
+export WL_AI_PROVIDER=claude-code          # or: grok, ollama, local-cli, openai, anthropic, xai
 weblisk server init             # Generate orchestrator
 weblisk agent create seo        # Generate SEO agent
 weblisk domain create billing   # Generate domain controller
@@ -143,11 +143,11 @@ WL_BLUEPRINT_SOURCES=https://github.com/your-org/your-blueprints.git
 | `WL_ORCH` | Orchestrator URL | `http://localhost:9800` |
 | `WL_TEMPLATE_SOURCES` | Additional template repo URLs (comma-separated) | — |
 | `WL_BLUEPRINT_SOURCES` | Additional blueprint repo URLs (comma-separated) | — |
-| `WL_AI_PROVIDER` | AI backend — see below | `openai` |
+| `WL_AI_PROVIDER` | AI backend — see below | discovered, never guessed |
 | `WL_AI_MODEL` | Model name | provider default |
-| `WL_AI_BASE_URL` | Endpoint override (HTTP providers) | — |
-| `WL_AI_KEY` | API key (hosted providers only) | — |
-| `WL_AI_COMMAND` | Path to a local CLI (`claude-code`, `local-cli`) | auto-detected |
+| `WL_AI_BASE_URL` | Endpoint override (HTTP providers) or any OpenAI-compatible URL | — |
+| `WL_AI_KEY` | API key (hosted providers only; vendor keys like `XAI_API_KEY` also work) | — |
+| `WL_AI_COMMAND` | Path to a local CLI (`claude-code`, `grok`, `local-cli`) | auto-detected |
 | `WL_AI_ARGS` | Extra flags for `local-cli`, quotes honoured | — |
 | `WL_AI_JSON` | `1` if the `local-cli` tool prints a JSON result envelope | — |
 | `WL_AI_TIMEOUT` | Per-call limit for local CLIs, e.g. `20m` | `10m` |
@@ -155,22 +155,38 @@ WL_BLUEPRINT_SOURCES=https://github.com/your-org/your-blueprints.git
 ### AI providers
 
 Generating a hub from blueprints needs a model. It does **not** need a paid
-account — three of the five backends run entirely on the machine.
+account — local coding-agent CLIs and local HTTP servers run entirely on the
+machine. Run `weblisk providers` to see what this workstation actually has.
+When nobody pins a backend, a build takes the highest-weighted one that is
+actually available, walking `claude-code · grok · codex · ollama · lmstudio`
+then hosted APIs. Pin one with `--provider` or `WL_AI_PROVIDER`.
 
 **Local — no key, nothing to configure:**
 
 | `WL_AI_PROVIDER` | Requires | Notes |
 |---|---|---|
 | `claude-code` | Claude Code installed | Uses the CLI's own login. Auto-detected on PATH and in `~/.local/bin`, `~/.claude/local`, Homebrew and npm prefixes |
+| `grok` | Grok CLI installed | Uses the CLI's own login (`grok login` or `XAI_API_KEY`). Auto-detected on PATH and in `~/.grok/bin` |
+| `codex` | Codex CLI installed | Headless `codex exec` |
 | `ollama` | Ollama running | Defaults to `http://localhost:11434/v1`; set `WL_AI_MODEL` |
+| `lmstudio` | LM Studio (or any server on `:1234`) | OpenAI-compatible `http://localhost:1234/v1` |
 | `local-cli` | any local tool | Set `WL_AI_COMMAND`; pass flags with `WL_AI_ARGS` |
 
-**Hosted — requires `WL_AI_KEY`:** `openai`, `anthropic`, `cloudflare`, or any
-OpenAI-compatible endpoint via `WL_AI_BASE_URL`.
+**Hosted — vendor key or `WL_AI_KEY`:** `xai` (`XAI_API_KEY`), `openai`,
+`anthropic`, `gemini`, `groq`, `mistral`, `deepseek`, `openrouter`,
+`cloudflare`, or any OpenAI-compatible endpoint via `WL_AI_BASE_URL`.
 
 ```bash
-# Generate a hub with a locally installed Claude Code — no API key
+# Generate a hub with a locally installed Grok CLI — no API key in this process
+export WL_AI_PROVIDER=grok
+weblisk server init --platform go
+
+# Or Claude Code
 export WL_AI_PROVIDER=claude-code
+weblisk server init --platform go
+
+# Or the xAI HTTP API
+export WL_AI_PROVIDER=xai XAI_API_KEY=xai-...
 weblisk server init --platform go
 
 # Or entirely offline with Ollama
@@ -181,6 +197,10 @@ weblisk server init --platform go
 export WL_AI_PROVIDER=local-cli
 export WL_AI_COMMAND=/usr/local/bin/mytool
 export WL_AI_ARGS='--print --format json'
+
+# Or any OpenAI-compatible server (vLLM, llama.cpp, a private gateway)
+export WL_AI_PROVIDER=vllm WL_AI_BASE_URL=http://127.0.0.1:8000/v1 WL_AI_MODEL=my-model
+weblisk server init --platform go
 ```
 
 **If a local CLI is installed and still reports as missing**, it is almost
