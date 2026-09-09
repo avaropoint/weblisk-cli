@@ -1197,30 +1197,49 @@ var structuralChecks = []structuralCheck{
 		},
 		test: func(a assertion, c *CheckContext) (bool, string, []string) {
 			var found []string
+			// What was actually LOOKED at, so an empty `found` can be told apart
+			// from a search that never ran. Without these two counters this check
+			// returned its strongest positive verdict — verified — when every Go
+			// file failed to parse, or when the tenant had no handler-shaped
+			// function at all. "I could not read this" reported as "this is
+			// correct" is the same fault the route-resolution check was already
+			// fixed for, pointing the other way.
+			goFiles, parsed, handlers := 0, 0, 0
 			for _, f := range c.Files {
 				if !strings.HasSuffix(f.Path, ".go") {
 					continue
 				}
+				goFiles++
 				fset := token.NewFileSet()
 				file, err := parser.ParseFile(fset, f.Path, f.Content, parser.SkipObjectResolution)
 				if err != nil {
 					continue
 				}
+				parsed++
 				for _, d := range file.Decls {
 					fn, ok := d.(*ast.FuncDecl)
 					if !ok || !isHTTPHandler(fn) {
 						continue
 					}
+					handlers++
 					if panicsIn(fn) {
 						found = append(found, f.Path+":"+fn.Name.Name)
 					}
 				}
 			}
-			if len(found) == 0 {
-				return true, "", nil
+			if len(found) > 0 {
+				return false, "panic() called in HTTP handler(s): " + strings.Join(found, ", "),
+					handlerFiles(found)
 			}
-			return false, "panic() called in HTTP handler(s): " + strings.Join(found, ", "),
-				handlerFiles(found)
+			if goFiles > 0 && parsed == 0 {
+				return false, markInconclusive(fmt.Sprintf(
+					"none of the %d Go file(s) could be parsed, so no handler was examined", goFiles)), nil
+			}
+			if handlers == 0 {
+				return false, markInconclusive(
+					"no function with an HTTP handler signature was found, so there was nothing to check"), nil
+			}
+			return true, "", nil
 		},
 	},
 	{

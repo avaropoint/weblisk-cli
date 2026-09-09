@@ -491,3 +491,73 @@ func routes(mux *http.ServeMux, patterns []string) {
 		t.Fatal("an unreadable registration was silently dropped — the report would say 'no handler' about code it could not parse")
 	}
 }
+
+// A check that examined nothing must not return the strongest positive verdict.
+//
+// "HTTP handlers do not panic" searched parsed ASTs for handler-shaped
+// functions and reported verified whenever it found no panic — including when
+// it found no handler, and when not one file had parsed. That is the fault
+// `d51d9ab` fixed for route resolution ("I cannot read this" is not "this is
+// wrong"), in its mirror image: I cannot read this is not this is right.
+func TestThePanicCheckDoesNotVerifyWhatItCouldNotRead(t *testing.T) {
+	check := findCheck(t, "HTTP handlers do not panic")
+	a := assertion{Text: "HTTP handlers do not panic", Lower: "http handlers do not panic"}
+
+	t.Run("nothing parsed", func(t *testing.T) {
+		ok, detail, _ := check.test(a, &CheckContext{Files: []GeneratedFile{
+			{Path: "broken.go", Content: "package ??? this is not go"},
+		}})
+		if ok {
+			t.Fatal("reported verified although no file could be parsed")
+		}
+		if _, marked := splitInconclusive(detail); !marked {
+			t.Errorf("detail %q is not marked inconclusive, so an unreadable tenant reads as a REFUTED assertion", detail)
+		}
+	})
+
+	t.Run("no handlers", func(t *testing.T) {
+		ok, detail, _ := check.test(a, &CheckContext{Files: []GeneratedFile{
+			{Path: "x.go", Content: "package p\n\nfunc helper() int { return 1 }\n"},
+		}})
+		if ok {
+			t.Fatal("reported verified although there was no handler to examine")
+		}
+		if _, marked := splitInconclusive(detail); !marked {
+			t.Errorf("detail %q is not marked inconclusive", detail)
+		}
+	})
+
+	t.Run("a real handler with no panic still verifies", func(t *testing.T) {
+		ok, detail, _ := check.test(a, &CheckContext{Files: []GeneratedFile{
+			{Path: "h.go", Content: "package p\n\nimport \"net/http\"\n\n" +
+				"func Handle(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }\n"},
+		}})
+		if !ok {
+			t.Errorf("a clean handler was not verified: %q", detail)
+		}
+	})
+
+	t.Run("a handler that panics still fails", func(t *testing.T) {
+		ok, detail, _ := check.test(a, &CheckContext{Files: []GeneratedFile{
+			{Path: "h.go", Content: "package p\n\nimport \"net/http\"\n\n" +
+				"func Handle(w http.ResponseWriter, r *http.Request) { panic(\"nope\") }\n"},
+		}})
+		if ok {
+			t.Error("a panicking handler was verified")
+		}
+		if _, marked := splitInconclusive(detail); marked {
+			t.Error("a real refutation was reported as inconclusive")
+		}
+	})
+}
+
+func findCheck(t *testing.T, name string) structuralCheck {
+	t.Helper()
+	for _, c := range structuralChecks {
+		if c.name == name {
+			return c
+		}
+	}
+	t.Fatalf("no structural check named %q", name)
+	return structuralCheck{}
+}
