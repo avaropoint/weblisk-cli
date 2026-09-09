@@ -25,7 +25,7 @@ func TestAComponentIsNotShownItsOwnPreviousOutput(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("go.mod", "module hubgen\n\ngo 1.22\n")
+	write("go.mod", "module hubgen\n\ngo 1.27\n")
 	write("internal/protocol/types.go", "package protocol\n\ntype ErrorResponse struct{}\n")
 	write("internal/content/custody.go", "package content\n\ntype ContentRepository struct{}\n")
 	write("cmd/content/main.go", "package main\n\nfunc main() {}\n")
@@ -167,7 +167,7 @@ func TestAComponentSeesItsOwnNamesButNotItsOwnPackages(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("go.mod", "module example.com/tenant\n\ngo 1.22\n")
+	write("go.mod", "module example.com/tenant\n\ngo 1.27\n")
 	write("internal/orchestrator/registry.go", `package orchestrator
 
 type Registry struct{}

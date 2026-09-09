@@ -20,7 +20,7 @@ import (
 // below, written in shapes a checker might not expect.
 func conformantHub() []GeneratedFile {
 	return []GeneratedFile{
-		{Path: "go.mod", Content: "module hub\n\ngo 1.22.0\n\nrequire (\n\tgithub.com/cloudflare/circl v1.6.1\n\tgolang.org/x/crypto v0.11.1\n)\n\nrequire golang.org/x/sys v0.10.0 // indirect\n"},
+		{Path: "go.mod", Content: "module hub\n\ngo 1.27.1\n\nrequire (\n\tgithub.com/cloudflare/circl v1.6.5\n\tgolang.org/x/crypto v0.57.0\n)\n\nrequire golang.org/x/sys v0.48.0 // indirect\n"},
 		{Path: "protocol.go", Content: `// Package main carries the wire protocol.
 //
 // Deliberately opens with a doc comment: a file that legitimately does so must

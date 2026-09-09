@@ -69,7 +69,7 @@ func TestASucceedingBuildIsNotRepaired(t *testing.T) {
 // never saw a compiler error before, and wrote eleven files blind.
 func TestABuildErrorIsFedBackAndFixed(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n\ngo 1.22\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n\ngo 1.27\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	broken := "package main\n\nfunc main() { undefinedCall() }\n"
@@ -109,7 +109,7 @@ func TestABuildErrorIsFedBackAndFixed(t *testing.T) {
 func TestRepairIsBoundedAndReportsHonestly(t *testing.T) {
 	// A target the model cannot fix must fail visibly rather than loop.
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n\ngo 1.22\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n\ngo 1.27\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	broken := "package main\n\nfunc main() { stillUndefined() }\n"
@@ -144,7 +144,7 @@ func TestTheBuildRunsFromTheProjectRoot(t *testing.T) {
 	if err := os.MkdirAll(srv, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(srv, "go.mod"), []byte("module x\n\ngo 1.22\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(srv, "go.mod"), []byte("module x\n\ngo 1.27\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	plan := &Plan{Root: "server", Build: "cd server && go build ./...",
@@ -234,7 +234,7 @@ func TestAFailingPrepareStopsImmediately(t *testing.T) {
 // way in one run.
 func TestRepairRetriesAContractViolation(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n\ngo 1.22\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n\ngo 1.27\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	broken := "package main\n\nfunc main() { undefinedCall() }\n"
@@ -331,7 +331,7 @@ func TestRepairKeepsGoingWhileErrorsFall(t *testing.T) {
 // unchanged; the authority moved back to the blueprint.
 func TestCompilingIsNotConforming(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.22\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.27\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -377,7 +377,7 @@ func TestConformanceRepairStopsWhenItIsNotConverging(t *testing.T) {
 	// A model that keeps reporting the same assertion unmet, and keeps returning a
 	// file that does not fix it, must not spend twelve rounds proving it.
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.22\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.27\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	stuck := "package main\n\nfunc main() {}\n"
@@ -407,7 +407,7 @@ func TestAnAssertionNamingNoPlannedFileIsNotRepairedBlindly(t *testing.T) {
 	// something it does not control. The model's file name is used as given and
 	// never corrected to a plausible one.
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.22\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hub\n\ngo 1.27\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	src := "package main\n\nfunc main() {}\n"
@@ -582,7 +582,7 @@ type AgentManifest struct{ Name string }
 func TestAFileThatDeclaresNothingAddsNothing(t *testing.T) {
 	// go.mod and the like: no declarations, no section, no noise.
 	f := PlannedFile{Path: "go.mod", Purpose: "module"}
-	p := repairPrompt(f, &Plan{Root: "."}, "module tenant\n\ngo 1.22\n",
+	p := repairPrompt(f, &Plan{Root: "."}, "module tenant\n\ngo 1.27\n",
 		[]string{"go.mod:1:1: bad"}, nil, nil, nil, "")
 	if strings.Contains(p, "currently declares") {
 		t.Error("a file with no declarations grew an empty preserve-these section")

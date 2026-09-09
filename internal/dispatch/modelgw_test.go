@@ -79,7 +79,7 @@ func TestInstallModelGatewayWiresCompletions(t *testing.T) {
 
 func TestInstalledGatewayCompletesAndListsProviders(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hubgwtest\n\ngo 1.25\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module hubgwtest\n\ngo 1.27\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	src := strings.Replace(modelGatewaySrc, "package orchestrator", "package hubgwtest", 1)

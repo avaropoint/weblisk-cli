@@ -128,7 +128,7 @@ func TestDependencyPolicyIsSettledByGoMod(t *testing.T) {
 		Text: "No dependency beyond `github.com/cloudflare/circl`, plus a storage driver only if a backend other than the JSONL default was chosen; every dependency declared in go.mod"}
 
 	clean := []GeneratedFile{
-		{Path: "go.mod", Content: "module hub\n\ngo 1.22\n\nrequire github.com/cloudflare/circl v1.3.7\n"},
+		{Path: "go.mod", Content: "module hub\n\ngo 1.27\n\nrequire github.com/cloudflare/circl v1.6.5\n"},
 		{Path: "identity.go", Content: "package main\n\nimport \"github.com/cloudflare/circl/sign/mldsa/mldsa65\"\n"},
 	}
 	if r := EvaluateChecklist([]ChecklistItem{assertion}, clean)[0]; r.Outcome != OutcomeVerified {
@@ -137,7 +137,7 @@ func TestDependencyPolicyIsSettledByGoMod(t *testing.T) {
 
 	// The exact fault the storage blueprint's SQLite assertion used to cause.
 	sqlite := []GeneratedFile{
-		{Path: "go.mod", Content: "module hub\n\ngo 1.22\n\nrequire (\n\tgithub.com/cloudflare/circl v1.3.7\n\tmodernc.org/sqlite v1.29.0\n)\n"},
+		{Path: "go.mod", Content: "module hub\n\ngo 1.27\n\nrequire (\n\tgithub.com/cloudflare/circl v1.6.5\n\tmodernc.org/sqlite v1.29.0\n)\n"},
 		{Path: "storage.go", Content: "package main\n\nimport _ \"modernc.org/sqlite\"\n"},
 	}
 	r := EvaluateChecklist([]ChecklistItem{assertion}, sqlite)[0]
@@ -154,7 +154,7 @@ func TestDependencyPolicyIsSettledByGoMod(t *testing.T) {
 
 	// An import nobody declared is the other half of the same assertion.
 	undeclared := []GeneratedFile{
-		{Path: "go.mod", Content: "module hub\n\ngo 1.22\n"},
+		{Path: "go.mod", Content: "module hub\n\ngo 1.27\n"},
 		{Path: "identity.go", Content: "package main\n\nimport \"github.com/cloudflare/circl/sign/mldsa/mldsa65\"\n"},
 	}
 	if r := EvaluateChecklist([]ChecklistItem{assertion}, undeclared)[0]; r.Outcome != OutcomeFailed {
@@ -169,7 +169,7 @@ func TestStdlibImportsAreNotDependencies(t *testing.T) {
 	assertion := ChecklistItem{Source: "platforms/go.md",
 		Text: "No dependency beyond `github.com/cloudflare/circl`; every dependency declared in go.mod"}
 	files := []GeneratedFile{
-		{Path: "go.mod", Content: "module hub\n\ngo 1.22\n"},
+		{Path: "go.mod", Content: "module hub\n\ngo 1.27\n"},
 		{Path: "server.go", Content: "package main\n\nimport (\n\t\"net/http\"\n\t\"encoding/json\"\n\t\"crypto/sha256\"\n)\n"},
 	}
 	if r := EvaluateChecklist([]ChecklistItem{assertion}, files)[0]; r.Outcome != OutcomeVerified {
@@ -267,7 +267,7 @@ func TestIndirectDependenciesAreNotDeclarations(t *testing.T) {
 	assertion := ChecklistItem{Source: "platforms/go.md",
 		Text: "No dependency beyond `github.com/cloudflare/circl` and `golang.org/x/crypto`; every dependency declared in go.mod"}
 	files := []GeneratedFile{
-		{Path: "go.mod", Content: "module hub\n\ngo 1.22.0\n\nrequire (\n\tgithub.com/cloudflare/circl v1.6.1\n\tgolang.org/x/crypto v0.11.1\n)\n\nrequire golang.org/x/sys v0.10.0 // indirect\n"},
+		{Path: "go.mod", Content: "module hub\n\ngo 1.27.1\n\nrequire (\n\tgithub.com/cloudflare/circl v1.6.5\n\tgolang.org/x/crypto v0.57.0\n)\n\nrequire golang.org/x/sys v0.48.0 // indirect\n"},
 		{Path: "identity.go", Content: "package main\n\nimport \"golang.org/x/crypto/argon2\"\n"},
 	}
 	if r := EvaluateChecklist([]ChecklistItem{assertion}, files)[0]; r.Outcome != OutcomeVerified {
@@ -287,7 +287,7 @@ func TestAConditionalAssertionBindsOnlyWhenItsPremiseHolds(t *testing.T) {
 		Text: "IF SQLite was chosen: WAL journal mode, `user_version` pragma for migrations, tables created with `CREATE TABLE IF NOT EXISTS`"}
 
 	jsonl := []GeneratedFile{
-		{Path: "go.mod", Content: "module hub\n\ngo 1.22\n"},
+		{Path: "go.mod", Content: "module hub\n\ngo 1.27\n"},
 		{Path: "storage.go", Content: "package main\n\n// append-only JSONL\n"},
 	}
 	r := EvaluateChecklist([]ChecklistItem{assertion}, jsonl)[0]
@@ -302,7 +302,7 @@ func TestAConditionalAssertionBindsOnlyWhenItsPremiseHolds(t *testing.T) {
 
 	// Choose SQLite and the obligation binds.
 	chosen := []GeneratedFile{
-		{Path: "go.mod", Content: "module hub\n\ngo 1.22\n\nrequire modernc.org/sqlite v1.29.0\n"},
+		{Path: "go.mod", Content: "module hub\n\ngo 1.27\n\nrequire modernc.org/sqlite v1.29.0\n"},
 		{Path: "storage.go", Content: "package main\n\n// no pragmas here\n"},
 	}
 	if r := EvaluateChecklist([]ChecklistItem{assertion}, chosen)[0]; r.Outcome != OutcomeFailed {
