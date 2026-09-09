@@ -640,6 +640,19 @@ func newLocalCLIProvider(kind, model string) (Provider, error) {
 		return &LocalCLIProvider{
 			Bin: bin, Name: "claude code", Args: claudeCodeArgs(),
 			Model: model, JSON: true, Timeout: timeout,
+			// The prompt on STDIN, not on argv.
+			//
+			// Linux caps a single argv entry at MAX_ARG_STRLEN — 128 KiB —
+			// however large ARG_MAX is, and a planning prompt carries the whole
+			// blueprint corpus for the target. `weblisk agent create` died with
+			//
+			//	planning: fork/exec .../claude: argument list too long
+			//
+			// before the model was reached at all. grok was given --prompt-file
+			// for exactly this, measured, and claude was left on argv — it has
+			// no --prompt-file, and reads the prompt from stdin when none is
+			// passed. Measured: it answers.
+			PromptStdin: true,
 			// Streamed, so liveness is observed. WL_AI_TIMEOUT is still read
 			// and still bounds the non-streaming path, but it no longer decides
 			// whether a working call is allowed to finish — see

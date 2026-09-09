@@ -225,7 +225,7 @@ func allowanceFor(idle time.Duration, started bool) time.Duration {
 }
 
 // runStreaming runs the CLI and reads its event stream.
-func (p *LocalCLIProvider) runStreaming(ctx context.Context, args []string, onActivity func(ProviderActivity)) (*streamResult, error) {
+func (p *LocalCLIProvider) runStreaming(ctx context.Context, args []string, stdin string, onActivity func(ProviderActivity)) (*streamResult, error) {
 	idle := p.IdleTimeout
 	if idle <= 0 {
 		idle = defaultIdleTimeout
@@ -239,6 +239,10 @@ func (p *LocalCLIProvider) runStreaming(ctx context.Context, args []string, onAc
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.Bin, args...)
+	if stdin != "" {
+		// The prompt, when it is too big to be an argument. See PromptStdin.
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	if p.Dir != "" {
 		cmd.Dir = p.Dir
 	}
@@ -448,13 +452,18 @@ func (p *LocalCLIProvider) chatStreaming(messages []Message) (string, error) {
 	if p.Model != "" {
 		args = append(args, "--model", p.Model)
 	}
-	args, cleanup, err := p.appendPrompt(args, flattenMessages(messages))
+	prompt := flattenMessages(messages)
+	args, cleanup, err := p.appendPrompt(args, prompt)
 	if err != nil {
 		return "", err
 	}
 	defer cleanup()
 
-	res, err := p.runStreaming(context.Background(), args, p.OnActivity)
+	stdin := ""
+	if p.PromptStdin {
+		stdin = prompt
+	}
+	res, err := p.runStreaming(context.Background(), args, stdin, p.OnActivity)
 	if res != nil && res.RateLimit != nil {
 		p.noteRateLimit(res.RateLimit)
 	}
