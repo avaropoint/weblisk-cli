@@ -135,27 +135,36 @@ Add the name to `ComponentInit`'s signature (or an options struct), thread it
 into `planKey`/`ReadTenantState`/`PriorRecords`, and the three commands become
 calls to `SupervisedComponentInit`. An afternoon, not a rewrite.
 
-### 4. `test conformance` passes tests it does not run
+### 4. `test conformance` — honest now, still mostly unimplemented
 
-The sharpest thing found while checking this file, and it is worse than a
-stale row: `weblisk test conformance` declares 24 test IDs and only four of
-them (`L1-04`, `L1-05`, `L1-09`, `L1-12`) issue a request. Every other ID
-reaches `internal/test/test.go`'s `default:` arm —
+Fixed 2026-09-09. It declared 24 assertions and issued a request for four; the
+other 20 reached a `default: return true` marked "pass by default until full
+test harness is implemented". So a run printed 24 ticks against a hub that had
+answered one request, and called it conformant.
 
-```go
-default:
-    // Tests that require complex setup — pass by default
-    // until full test harness is implemented
-    return true
-```
+There are three outcomes now — passed, failed, **not checked** — and the
+summary says outright that a run with unchecked assertions does not establish
+conformance. Each unchecked line names what it would need.
 
-— so 20 of 24 print a tick without contacting the hub. A conformance suite
-that reports 24/24 against an orchestrator that answers nothing is not an
-incomplete feature, it is a misleading one. It also runs unauthenticated:
-`operator.LoadToken`'s result is discarded at `test.go:121`.
+Implemented for real, against the spec rather than against HTTP 200:
 
-Either implement the tests or mark the unimplemented IDs as skipped, so the
-output distinguishes "passed" from "not checked".
+| ID | Check |
+|----|-------|
+| L1-02 | an unsigned manifest must be rejected (`spec.md` POST /v1/register) |
+| L1-04 | POST /v1/health — it was doing a GET, and the spec defines both paths as different endpoints |
+| L1-05 | GET /v1/services answers |
+| L1-09 | GET /v1/admin/overview refuses an unauthenticated caller |
+| L1-12 | the five HealthStatus fields `types.md` marks required, and the three legal states |
+
+The mock orchestrator was made conformant at the same time — it accepted every
+registration unsigned and answered health without `name`, `uptime` or
+`timestamp`, so it could not have failed the assertions it is offered as a
+target for.
+
+**Still open:** 19 assertions have no check. L1-01/03 need a signed ML-DSA-65
+manifest the harness cannot yet mint; L1-06/07/08 need WLT token minting
+including expired and mis-signed ones; the L2 and L3 rows need a registered
+agent, a live event exchange, a workflow, or a peer hub.
 
 ### 5. Structural checks that verify what they never read
 
@@ -212,7 +221,7 @@ command works at all, so it is tracked here.
 |---------|-------|
 | `claude-code` | verified end to end |
 | `grok` | flags measured against grok 1.0.24, including the zero-tool set that a `--tools ""` no-op used to defeat. A generation has NOT been observed end to end — the measuring account returns HTTP 402 |
-| `codex` | flags measured against codex-cli 0.153.4 and applied by the binary. A generation has NOT been observed end to end — the measuring account returns HTTP 401 |
+| `codex` | **exercised end to end** against codex-cli 0.153.4 with a mocked model endpoint (a custom `model_providers` entry pointing at a local Responses API). The account is not authenticated, so nothing was asked of OpenAI — but codex accepted every flag, read a 200 KB prompt from stdin, wrote `--output-last-message`, and weblisk returned the answer and recorded the model. The remaining unknown is the model's own output quality, not the integration |
 | `ollama`, `lmstudio` | probed by asking for a model list; not exercised for generation |
 | hosted APIs | keyed; `anthropic`, `xai`, `openai`, `gemini`, `groq`, `mistral`, `deepseek`, `openrouter`, `cloudflare` |
 

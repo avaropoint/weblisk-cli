@@ -379,9 +379,13 @@ func hubExecCLI(ctx context.Context, kind string, msgs []hubChatMsg, model strin
 // a hub serving an HTTP request cannot answer.
 //
 // codex has no flag that removes its tools, so `--sandbox read-only` is the
-// nearest guarantee: a tool call cannot write into the tenant. Its stdout is a
-// framed transcript (banner, workdir, model, an echo of the prompt) rather
-// than a bare answer, so the answer is taken from `--output-last-message`.
+// nearest guarantee: a tool call cannot write into the tenant. Its answer is
+// taken from `--output-last-message` because that is a documented contract;
+// stdout carries the same string — the banner goes to STDERR, measured with
+// the streams separated rather than merged with 2>&1, which is what made an
+// earlier version of this comment claim the opposite — and stdout is used as
+// a fallback, so a codex that spells the flag differently degrades instead of
+// failing.
 func hubCLISpec(kind string) (bin string, args []string, jsonOut bool, promptFile, answerFile string) {
 	switch kind {
 	case "grok":

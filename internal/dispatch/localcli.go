@@ -259,20 +259,26 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 	// The answer file wins when one was asked for: stdout is a transcript for
 	// a person to read, and only this file is the completion.
 	if outPath != "" {
-		answer, readErr := os.ReadFile(outPath)
-		if readErr == nil {
+		// The transcript is not the answer, but it does name the model, and
+		// that is the one thing the answer file cannot carry. Without this a
+		// codex-generated hub records no model at all — the provenance chain
+		// exists to answer "what wrote this", and codex states it in plain text
+		// three lines into its own preamble.
+		if m := modelFromTranscript(stderr.String()); m != "" {
+			p.observedMu.Lock()
+			p.observed = m
+			p.observedMu.Unlock()
+		}
+		if answer, readErr := os.ReadFile(outPath); readErr == nil {
 			if a := strings.TrimSpace(string(answer)); a != "" {
 				return a, nil
 			}
 		}
-		// Exit 0 and no answer file is a contract this build does not
-		// understand. Say that, rather than returning the banner as if it
-		// were generated code.
-		return "", &ProviderFault{Provider: p.Name, Raw: strings.TrimSpace(stdout.String()),
-			Message: fmt.Sprintf("%s exited 0 but wrote no answer to %s (%s). "+
-				"Its stdout is a transcript, not a completion, so there is nothing safe to return. "+
-				"Override the flags with WL_AI_ARGS if this build of %s reports differently.",
-				p.Name, p.OutputFileFlag, outPath, p.Name)}
+		// No file, or an empty one: fall through to stdout, which for codex is
+		// the same string. This used to be a hard error on the belief that
+		// stdout held a banner. It does not — see codexArgs — so refusing here
+		// would invent a failure that the simpler code never had, on a build of
+		// the tool that simply spells the flag differently.
 	}
 
 	raw := strings.TrimSpace(stdout.String())
@@ -297,6 +303,39 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 	}
 	return text, nil
 }
+
+// modelFromTranscript reads the model out of a CLI's own preamble.
+//
+// On STDERR, which is where codex puts it — stdout carries the answer and
+// nothing else. Measured against codex-cli 0.153.4, which prints
+//
+//	workdir: /some/path
+//	model: gpt-6-astra
+//	provider: openai
+//
+// before the answer. Only a line whose first field is exactly "model:" counts,
+// and only in the preamble — the transcript later contains the prompt echoed
+// back, and a prompt about model gateways would otherwise nominate itself.
+func modelFromTranscript(transcript string) string {
+	for i, line := range strings.Split(transcript, "\n") {
+		// The preamble is short; past it, any match is the echoed prompt.
+		if i > preambleLines {
+			return ""
+		}
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "model:")
+		if !ok {
+			continue
+		}
+		if m := strings.TrimSpace(rest); m != "" && !strings.Contains(m, " ") {
+			return m
+		}
+	}
+	return ""
+}
+
+// preambleLines bounds how far into the output a `model:` line is believed.
+// Codex's preamble is nine lines; this leaves room without reaching the echo.
+const preambleLines = 15
 
 // appendOutputFile reserves a temp path for OutputFileFlag and passes it.
 //
@@ -425,22 +464,29 @@ func stringFrom(obj map[string]any, keys ...string) string {
 // at least classified correctly: "unauthorized" is in permanentMessage, so it
 // fails fast instead of retrying.
 //
-// What the measurement CHANGED: `codex exec` does not write a bare answer to
-// stdout. It writes a framed transcript —
+// A correction, kept because the wrong version was believed for a while and
+// the reasoning matters more than the conclusion: this comment previously said
+// codex writes a framed transcript to STDOUT and that returning stdout would
+// paste a banner into generated source. That is FALSE, and it was false
+// because the measurement merged the streams with `2>&1`.
 //
-//	OpenAI Codex v0.153.4
-//	--------
-//	workdir: … / model: … / provider: … / approval: … / sandbox: …
-//	--------
-//	user
-//	<the prompt, echoed back>
+// Measured again with them separated, stdout piped:
 //
-// — and only then the answer. With JSON:false this provider returned stdout
-// verbatim, so that banner would have been written into generated source as if
-// the model had produced it. `--output-last-message` is the documented flag
-// that yields the answer alone; it is read via OutputFileFlag. Not observed
-// producing a file (that needs a successful call), so a missing file is an
-// explicit error rather than a silent fall back to the transcript.
+//	stdout   MOCK_ANSWER_OK          — the answer, alone, 15 bytes
+//	stderr   banner, workdir, model:, provider:, approval:, sandbox:,
+//	         session id, and the prompt echoed back
+//	-o FILE  MOCK_ANSWER_OK          — identical to stdout
+//
+// So stdout was already clean and the original JSON:false reading of it would
+// have worked. `--output-last-message` is kept anyway, because "the answer is
+// on stdout" is an observation about a non-TTY run and "write the final
+// message to this file" is a documented contract — but it is now a PREFERENCE.
+// Falling back to stdout when the file is absent means this cannot invent a
+// failure that the simpler code did not have.
+//
+// Confirmed against a real codex-cli 0.153.4 completing a real turn: the model
+// endpoint was a local mock, so the account is not needed to establish that
+// codex accepts these flags, reads the prompt from stdin, and writes the file.
 //
 // `--sandbox read-only` is the codex analogue of grok's zero-tool set: codex
 // has no flag that removes its tools, so the next best guarantee is that a

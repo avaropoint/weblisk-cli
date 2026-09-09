@@ -178,7 +178,7 @@ must not be sent to an API instead.
 |---|---|---|
 | `claude-code` | Claude Code installed | Uses the CLI's own login. Auto-detected on PATH and in `~/.local/bin`, `~/.claude/local`, Homebrew and npm prefixes |
 | `grok` | Grok CLI installed | Uses the CLI's own login (`grok login` or `XAI_API_KEY`). Auto-detected on PATH and in `~/.grok/bin` |
-| `codex` | Codex CLI installed | Headless `codex exec`, sandboxed read-only. Prompt on stdin, answer via `--output-last-message` (its stdout is a framed transcript) |
+| `codex` | Codex CLI installed | Headless `codex exec`, sandboxed read-only. Prompt on stdin, because a hub-generation prompt exceeds the 128 KiB limit on a single argument. Answer read from `--output-last-message`, falling back to stdout |
 | `ollama` | Ollama running | Defaults to `http://localhost:11434/v1`; set `WL_AI_MODEL` |
 | `lmstudio` | LM Studio (or any server on `:1234`) | OpenAI-compatible `http://localhost:1234/v1` |
 | `local-cli` | any local tool | Set `WL_AI_COMMAND`; pass flags with `WL_AI_ARGS` |
