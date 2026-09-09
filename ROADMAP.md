@@ -65,31 +65,45 @@ is deliberately NOT in this table for that reason (see Open item 4).
 
 ## Open — the actual list
 
-### 1. Operator invite
+### 1. Operator admission — complete, and this entry was wrong twice
 
-Narrower than it looked. `TENANT_LIFECYCLE.md` claimed invite, list and revoke
-were all missing and that a second operator had no way in. Two of the three are
-implemented, and the way in exists:
+Worth keeping the history, because the row was wrong in both directions
+within a day.
 
-| Step | Command | State |
-|------|---------|-------|
-| newcomer makes an identity | `weblisk operator init` | implemented |
-| newcomer asks to join | `weblisk operator register --orch <url> [--role]` | implemented — posts name + ML-DSA-65 public key |
-| admin sees the request | `weblisk operators list` / `describe` | implemented |
-| admin admits them | `weblisk operators approve <name>` | implemented |
-| newcomer gets a token | `weblisk operator token` | implemented |
-| admin changes their role | `weblisk operators role <name> <role>` | implemented |
-| admin removes them | `weblisk operators revoke <name> --confirm` | implemented |
-| **admin initiates** | **`weblisk operator invite`** | **absent** |
+`TENANT_LIFECYCLE.md` said invite, list and revoke were all missing and a
+second operator had no way in. That was stale: register → pending → approve
+works end to end. The correction then claimed the one remaining gap was
+`weblisk operator invite`. Checked against the specs rather than inferred, that
+is wrong too.
 
-So the only missing verb is the one that lets an admin start the exchange: a
-pre-authorised invite token or URL, which `patterns/principal-identity`
-specifies. Without it, admission is newcomer-initiated and the admin has to
-notice an unsolicited pending registration and approve it out of band — which
-is workable for two operators who are talking to each other and not much
-beyond that.
+- `architecture/cli.md` — authoritative for this repo — names no invite
+  command. Its operator verbs are init, register, connect, token, rotate, and
+  operators list/describe/role/revoke. All implemented.
+- `architecture/admin.md`'s endpoint table defines seven operator routes.
+  `pkg/tenant/routes.go` declares seven. They correspond one to one.
+- `architecture/admin.md` designs admission deliberately: a second operator
+  registers, lands at `status: "pending"`, and an admin calls
+  `POST /v1/admin/operators/:name/approve`. It also argues against redundant
+  verbs — "There is no separate reject verb, because a rejected registration
+  and a removed operator leave the deployment in the same state, and two routes
+  to one state drift."
 
-`grep -rn "invite" --include=*.go` finds nothing outside unrelated comments.
+The invitation contract lives in `patterns/principal-identity`, which is a
+different and larger thing: a three-layer model — identity, credential, grant —
+for a subject working across SEVERAL hubs. It says so itself: "`architecture/
+admin` specifies operator registration against a single orchestrator... Neither
+answers what happens when one subject works across several hubs." It defines no
+HTTP endpoints at all.
+
+So an invite verb here would be a client for a server nobody has built, in a
+model no hub implements. That is precisely the failure `pkg/tenant/routes.go`
+was written to stop: three commands "written from memory of the specification
+rather than from it", one of them posting to a route no tenant has ever served.
+
+**Nothing to do in this repo.** The work, if it is wanted, starts upstream:
+`patterns/principal-identity` needs an endpoint surface in
+`architecture/admin.md` and commands in `architecture/cli.md` before a CLI can
+implement anything.
 
 ### 2. Federation setup verbs
 
@@ -101,39 +115,52 @@ federation, and missing the two that create one:
 | `weblisk federation init` | absent |
 | `weblisk federation peer add <url>` | absent |
 
-### 3. One generation pipeline, not two
+### 3. One generation pipeline — done
 
-`server init` and `tenant create` generate through plan → per-file → repair,
-with a per-file cache so a run that dies at file 32 has banked 31.
-`AgentCreate`, `DomainCreate` and `GatewayCreate` each make exactly ONE
-`provider.Chat` call and split the reply on `// filename:` markers
-(`internal/dispatch/dispatch.go:429`, `:487`, `:546`). That is the shape that
-used to time out with nothing to show: a failed `agent create` banks nothing.
+`agent create`, `domain create` and `gateway create` each made ONE
+`provider.Chat` call and split the reply on `// filename:` markers. That is the
+path that timed out with nothing to show: one call either returns every file or
+returns nothing, so a build that died at minute nine banked zero, while
+`server init` had a per-file cache that let it resume from the file it reached.
 
-**Smaller than it looks.** The good path is already target-generic —
-`ServerInit` is a one-line call to `SupervisedComponentInit(root,
-"orchestrator", platform)`, and `ComponentInit(root, target, platform)` takes
-the target as a parameter throughout: `ResolveGraph(root, target, platform)`,
-`GatherRequirements(graph, target)`, `ReadTenantState(root, target)`. And
-`GenerationRoots` (`internal/dispatch/requires.go:208`) already has arms for
-`agent`, `domain`, `gateway` and `content`, not just `orchestrator`. The plan
-even carries its own output directory in `plan.Root`, and `AcquireTargetLock`
-is already threaded with it.
+They now call `SupervisedComponentInit`, the same entry point as `server init`.
+The single-shot prompts and their three system prompts are deleted — 4,590
+bytes of a path nothing takes.
 
-So this is not "port three commands onto a new pipeline". What is actually
-missing is a **name** dimension:
+It was smaller than it looked, because `ComponentInit` was already generic over
+the target and `GenerationRoots` already had `agent`, `domain` and `gateway`
+arms. Two things were genuinely missing.
 
-- `agent` and `domain` are named instances — there can be many. `orchestrator`
-  and `gateway` are singletons. `ComponentInit` keys everything off `target`
-  alone, so two agents would share a plan cache key, a tenant-state record and
-  a set of prior records.
-- `plan.Root` must resolve to `agents/<name>/` rather than the target's default.
-- `AgentCreate` additionally loads a per-domain blueprint (`DomainBlueprint(name)`)
-  that `ComponentInit` does not.
+**A name.** A tenant has one orchestrator and one gateway, and any number of
+agents and domains. Everything — the plan cache, the tenant-state read, the
+prior-records lookup, and the written manifest — was keyed by KIND. Two agents
+therefore shared all four, and the manifest is what `DecideRebuild` reads to
+decide which files the current plan no longer lists and may delete. So building
+`agents/billing` after `agents/shipping` could delete shipping's files.
+`Component{Kind, Name}` in `component.go` carries both, and the two are not
+interchangeable: kind chooses the blueprint and the assertions, key identifies
+this instance's state.
 
-Add the name to `ComponentInit`'s signature (or an options struct), thread it
-into `planKey`/`ReadTenantState`/`PriorRecords`, and the three commands become
-calls to `SupervisedComponentInit`. An afternoon, not a rewrite.
+**A directory that is decided, not guessed.** `plan.Root` came from the model's
+JSON, and the plan prompt tells it root is `"."`. It is now set from
+`Component.Dir()` — `agents/billing`, `domains/x`, `gateway`, `.` — the same
+paths the old commands wrote to, for the same reason `Module` and `Target`
+already were: a fact two files must agree on should not be guessed twice.
+
+`Plan.Owner` was split from `Plan.Target` in the process. They were briefly one
+field read for opposite purposes — validation wants the kind, so two agents
+both get `cmd/agent/main.go` rather than a path containing a colon; the
+manifest wants the instance. Setting one, validating, then overwriting it
+worked only until somebody reordered the two steps.
+
+**Found by running it:** `weblisk agent create` died with
+`planning: fork/exec .../claude: argument list too long`, before the model was
+reached. Claude Code was passed its prompt on argv while grok had been given
+`--prompt-file` for exactly this, measured, and claude has no such flag — it
+reads stdin instead. A planning prompt carries the target's whole blueprint
+corpus and a single argv entry is capped at 128 KiB whatever `ARG_MAX` says.
+This was not agent-specific; it is the size of the prompt, so it was reachable
+from `server init` too.
 
 ### 4. `test conformance` — honest now, still mostly unimplemented
 
