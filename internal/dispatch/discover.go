@@ -406,6 +406,7 @@ type Choice struct {
 // default, walking the catalog until one can actually run. None is an error
 // naming every place that was looked.
 func Resolve(ctx context.Context, requested string) Choice {
+	requested = requestedOrEnv(requested)
 	found := Available(ctx)
 	byKind := map[ProviderKind]ProviderInfo{}
 	for _, s := range found {
@@ -744,7 +745,7 @@ func notReady(err error) bool {
 // its reason recorded against it. That is what makes "walk the catalog" mean
 // what it says.
 func ResolveReady(ctx context.Context, requested string) Choice {
-	if strings.TrimSpace(requested) != "" {
+	if strings.TrimSpace(requestedOrEnv(requested)) != "" {
 		return Resolve(ctx, requested)
 	}
 
@@ -802,6 +803,30 @@ func walkReady(usable []ProviderInfo) Choice {
 // WL_AI_PROVIDER=grok", which is what they already had. The remedy is a login,
 // not a variable.
 var ErrNothingReady = errors.New("every model provider this machine can reach was asked, and none can generate")
+
+// requestedOrEnv falls back to WL_AI_PROVIDER when nobody passed a name.
+//
+// This file's own header states the resolution order as "an explicit
+// --provider (or WL_AI_PROVIDER)" first, and README repeats it. Neither was
+// true here: Resolve read only its argument, and ChooseProvider — which is
+// what `server init` calls — passes the --provider FLAG, empty when absent.
+// So the walk ran, pinned its own answer with UseProvider, and newRawProvider's
+// WL_AI_PROVIDER branch was then unreachable because something had been
+// pinned.
+//
+// The result was that WL_AI_PROVIDER worked for `agent create`, which reaches
+// newRawProvider directly, and was silently ignored by `server init` and
+// `tenant create`. Measured: WL_AI_PROVIDER=codex on this machine produced a
+// build on claude-code.
+//
+// Honoured HERE rather than in each caller, because "somebody said" is a
+// question about resolution and this is the function that resolves.
+func requestedOrEnv(requested string) string {
+	if r := strings.TrimSpace(requested); r != "" {
+		return r
+	}
+	return strings.TrimSpace(os.Getenv("WL_AI_PROVIDER"))
+}
 
 // orderCandidates puts the catalog's ranking over the discovery order, then
 // appends anything configured that the catalog does not know about.

@@ -1412,7 +1412,16 @@ func lastLines(s string, n int) string {
 func provenanceOf(graph *BlueprintGraph, provider Provider) *Provenance {
 	p := &Provenance{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Provider:    os.Getenv("WL_AI_PROVIDER"),
+	}
+	// The provider this run SETTLED on, not the environment variable — which is
+	// empty on the default path, because walking the catalog is how a provider
+	// is chosen when nobody named one. So every hub generated without an
+	// explicit WL_AI_PROVIDER recorded no provider at all, in the file whose
+	// entire job is to say what generated it.
+	if kind, _, pinned := SelectedProvider(); pinned {
+		p.Provider = string(kind)
+	} else {
+		p.Provider = os.Getenv("WL_AI_PROVIDER")
 	}
 	if m, ok := Underlying(provider).(interface{ ModelUsed() string }); ok {
 		p.Model = m.ModelUsed()
