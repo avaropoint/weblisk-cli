@@ -66,7 +66,17 @@ func HandleComponent(args []string, root string) error {
 		// No generatedRootMarkers guard here. A component is generated INTO a
 		// tenant that already has code by definition, and the manifest — keyed
 		// per component — is what decides which files this build may replace.
-		return dispatch.SupervisedComponentInit(root, name, platform)
+		// `name` here is a component KIND, from the installation's blueprints.
+		// A kind that comes in multiples cannot be built from this verb —
+		// there is nothing to say WHICH agent — and Component.Valid says so
+		// rather than silently generating into `agents/`, which is what
+		// keying by kind alone used to do.
+		c := dispatch.Component{Kind: name}
+		if dispatch.Named(name) {
+			return fmt.Errorf("a tenant can have more than one %s, so this verb cannot tell which one.\n"+
+				"  Use: weblisk %s create <name>", name, name)
+		}
+		return dispatch.SupervisedComponentInit(root, c, platform)
 	default:
 		return fmt.Errorf("unknown verb for component %s: %s", name, rest[0])
 	}

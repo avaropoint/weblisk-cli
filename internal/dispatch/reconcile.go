@@ -101,6 +101,18 @@ type ProvenanceSource struct {
 	Used     int    `json:"used"`
 }
 
+// planOwner is the instance a plan belongs to, for keying its manifest.
+//
+// Falls back to Target so a plan cached before Owner existed — and every
+// manifest already written by one — is still found. For the singletons the two
+// are equal anyway.
+func planOwner(p *Plan) string {
+	if p.Owner != "" {
+		return p.Owner
+	}
+	return p.Target
+}
+
 // PriorRecords returns the previous run's per-file records for a component.
 //
 // Absent or unreadable yields an empty map, which DecideRebuild reads as "no
@@ -160,7 +172,7 @@ func RecordWrittenWith(root string, plan *Plan, files []GeneratedFile, blueprint
 	// Only paths that still EXIST are carried forward, so the manifest cannot
 	// grow without bound as a tenant is restructured.
 	dir := filepath.Join(root, plan.Root)
-	if b, err := os.ReadFile(manifestName(root, plan.Target)); err == nil {
+	if b, err := os.ReadFile(manifestName(root, planOwner(plan))); err == nil {
 		var prior writtenManifest
 		if json.Unmarshal(b, &prior) == nil {
 			for _, p := range prior.Files {
@@ -187,13 +199,13 @@ func RecordWrittenWith(root string, plan *Plan, files []GeneratedFile, blueprint
 		}
 	}
 	b, err := json.Marshal(writtenManifest{
-		Target: plan.Target, Root: plan.Root, Files: paths, Records: recs,
+		Target: planOwner(plan), Root: plan.Root, Files: paths, Records: recs,
 		Provenance: currentProvenance,
 	})
 	if err != nil {
 		return
 	}
-	name := manifestName(root, plan.Target)
+	name := manifestName(root, planOwner(plan))
 	_ = os.MkdirAll(filepath.Dir(name), 0o755)
 	_ = os.WriteFile(name, b, 0o644)
 }
@@ -225,7 +237,7 @@ func ReconcileTarget(root string, plan *Plan, st *TenantState) (Reconciliation, 
 	}
 
 	previous := map[string]bool{}
-	if b, err := os.ReadFile(manifestName(root, plan.Target)); err == nil {
+	if b, err := os.ReadFile(manifestName(root, planOwner(plan))); err == nil {
 		var m writtenManifest
 		if json.Unmarshal(b, &m) == nil {
 			for _, p := range m.Files {

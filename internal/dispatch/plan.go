@@ -29,8 +29,22 @@ type PlannedFile struct {
 
 // Plan is the model's proposed structure for one target.
 type Plan struct {
+	// Target is the KIND — orchestrator, agent, domain, gateway. It decides
+	// the entry point rule below (`cmd/<target>/main.go`) and is the same for
+	// every instance of that kind.
 	Target string `json:"target"`
-	Root   string `json:"root"`
+	// Owner is WHICH INSTANCE this plan belongs to, and it is what the written
+	// manifest is keyed by. For a singleton it equals Target.
+	//
+	// Separate from Target because the two are read for opposite purposes and
+	// briefly shared one field: validation wants the kind, so that two agents
+	// both get `cmd/agent/main.go` rather than a path containing a colon;
+	// the manifest wants the instance, so that rebuilding one agent cannot
+	// decide another agent's files are its own to delete. Setting one field to
+	// the kind, validating, and then overwriting it with the instance worked
+	// only for as long as nobody reordered those two steps.
+	Owner string `json:"owner,omitempty"`
+	Root  string `json:"root"`
 	// Module is the import path prefix for this project's own packages.
 	//
 	// Not asked of the model: it is the tenant's name, which the platform

@@ -23,7 +23,7 @@ type GeneratedFile struct {
 
 // ServerInit generates orchestrator code using the AI model.
 func ServerInit(root, platform string) error {
-	return SupervisedComponentInit(root, "orchestrator", platform)
+	return SupervisedComponentInit(root, Orchestrator(), platform)
 }
 
 // SupervisedComponentInit runs a component build and resumes it across provider
@@ -33,13 +33,13 @@ func ServerInit(root, platform string) error {
 // 31 and resuming costs only what remains. Five separate tenant builds died to
 // provider instability and each one needed a person to notice and retype the
 // command; this is that person.
-func SupervisedComponentInit(root, target, platform string) error {
+func SupervisedComponentInit(root string, c Component, platform string) error {
 	err := Supervise(
 		func(attempt int) error {
 			if attempt > 1 {
 				fmt.Printf("  Resuming (attempt %d) — completed files are reused from cache\n\n", attempt)
 			}
-			return ComponentInit(root, target, platform)
+			return ComponentInit(root, c, platform)
 		},
 		func(attempt int, wait time.Duration, err error) {
 			fmt.Printf("\n  [wait] the AI provider is failing; resuming in %s (attempt %d)\n        %s\n\n",
@@ -66,7 +66,14 @@ func SupervisedComponentInit(root, target, platform string) error {
 // component's; nothing else in the loop varies. A second component built by a
 // second pipeline would drift from the first, and the divergence would show up
 // as a component that passes its own checks and fails the system's.
-func ComponentInit(root, target, platform string) error {
+func ComponentInit(root string, c Component, platform string) error {
+	if bad := c.Valid(); bad != "" {
+		return fmt.Errorf("cannot generate: %s", bad)
+	}
+	// kind chooses the blueprint and the assertions; key identifies THIS
+	// instance's plan, manifest and records. See component.go on why keying
+	// both by kind alone let one agent's rebuild delete another's files.
+	target, key := c.Kind, c.Key()
 	provider, err := RequireProvider()
 	if err != nil {
 		return err
@@ -163,10 +170,10 @@ func ComponentInit(root, target, platform string) error {
 		// model re-plans every run — ten files where it planned twelve — and every
 		// per-file cache entry is invalidated by a plan entry nobody changed.
 		// What this tenant already contains, before anything is planned into it.
-		st := ReadTenantState(root, target)
+		st := ReadTenantState(root, key)
 
 		cache := NewGenerationCache(root)
-		pk := planKey(req, target, platform, platBP, planSystemPrompt+st.Shape())
+		pk := planKey(req, key, platform, platBP, planSystemPrompt+st.Shape())
 		plan := cache.GetPlan(pk)
 		if plan != nil {
 			fmt.Println("  Plan reused — requirements unchanged since the last run")
@@ -183,8 +190,16 @@ func ComponentInit(root, target, platform string) error {
 		// fact two files must agree on should not be guessed twice.
 		plan.Module = moduleNameFor(root)
 		// Set here, not trusted from the model's JSON: the manifest that decides
-		// which files a rebuild may delete is keyed by it.
+		// which files a rebuild may delete is keyed by it. Target stays the KIND,
+		// which is what the entry-point rule reads.
 		plan.Target = target
+		plan.Owner = key
+		// And so is the directory. `agents/billing` is a fact about which
+		// component this is, not a judgement the model should make — and a model
+		// that answered "agents/Billing", or reused the previous agent's path
+		// from a cached plan, would have the rebuild treat another component's
+		// files as this one's. Same reasoning as Module and Target above.
+		plan.Root = c.Dir()
 
 		fmt.Printf("\n  Plan accepted: %d files in %s/\n", len(plan.Files), plan.Root)
 		for _, f := range plan.Order() {
@@ -228,7 +243,7 @@ func ComponentInit(root, target, platform string) error {
 		// architecture/generation: a rebuild is a decision per file and the
 		// default answer is keep. Run BEFORE generation, so a refusal stops the
 		// run rather than being discovered after files are written.
-		decisions := DecideRebuild(root, plan, PriorRecords(root, target), graph.Map)
+		decisions := DecideRebuild(root, plan, PriorRecords(root, key), graph.Map)
 		if rep := ReportDecisions(decisions); rep != "" {
 			fmt.Print(rep)
 			fmt.Println()
@@ -426,174 +441,35 @@ func ComponentInit(root, target, platform string) error {
 	return nil
 }
 
-// AgentCreate generates agent code using the AI model.
+// AgentCreate generates one agent through the same pipeline as the hub.
+//
+// This was a single provider.Chat and a split of the reply on `// filename:`
+// markers. That is the path that timed out with nothing to show: one call
+// either returns every file or it returns nothing, so a build that died at
+// minute nine banked zero. `server init` had already moved to plan →
+// per-file → repair, with a cache that lets a run resume from the file it
+// reached; agents did not, and a failed `agent create` left less to work with
+// than a failed `server init` for no reason anybody chose.
+//
+// ComponentInit was already generic over the target — ResolveGraph,
+// GatherRequirements and GenerationRoots all take it, and GenerationRoots has
+// had an `agent` arm all along. What was missing was the NAME, because a
+// tenant has many agents and the plan cache, the manifest and the records were
+// keyed by kind. See component.go.
 func AgentCreate(root, name, platform string) error {
-	provider, err := RequireProvider()
-	if err != nil {
-		return err
-	}
-
-	graph, err := ResolveGraph(root, "agent", platform)
-	if err != nil {
-		return fmt.Errorf("resolving blueprints: %w", err)
-	}
-	specs := graph.Joined()
-
-	platBP, err := LoadBlueprint(root, PlatformBlueprint(platform))
-	if err != nil {
-		return fmt.Errorf("loading platform blueprint: %w", err)
-	}
-
-	domainBP := ""
-	if content, err := LoadBlueprint(root, DomainBlueprint(name)); err == nil {
-		domainBP = content
-	}
-
-	prompt := buildAgentPrompt(specs, platBP, domainBP, name, platform)
-
-	fmt.Printf("  Generating %s agent code...\n", name)
-	fmt.Printf("  Platform: %s\n", platform)
-	fmt.Printf("  Target:   %s/agents/%s/\n", root, name)
-	fmt.Println()
-
-	response, err := provider.Chat([]Message{
-		{Role: "system", Content: agentSystemPrompt},
-		{Role: "user", Content: prompt},
-	})
-	if err != nil {
-		return fmt.Errorf("AI generation failed: %w", err)
-	}
-
-	files := parseGeneratedFiles(response)
-	if len(files) == 0 {
-		return fmt.Errorf("AI returned no code files — try a different model or check the response")
-	}
-
-	targetDir := filepath.Join(root, "agents", name)
-	written, err := writeGeneratedFiles(targetDir, files)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("  [ok] Generated %d files in agents/%s/\n", written, name)
-	for _, f := range files {
-		fmt.Printf("    %s\n", f.Path)
-	}
-	fmt.Println()
-
-	return nil
+	return SupervisedComponentInit(root, Agent(name), platform)
 }
 
-// DomainCreate generates a domain controller using the AI model.
+// DomainCreate generates one domain controller through the plan pipeline.
+// See AgentCreate on why this is no longer a single call.
 func DomainCreate(root, name, platform string) error {
-	provider, err := RequireProvider()
-	if err != nil {
-		return err
-	}
-
-	graph, err := ResolveGraph(root, "domain", platform)
-	if err != nil {
-		return fmt.Errorf("resolving blueprints: %w", err)
-	}
-	specs := graph.Joined()
-
-	platBP, err := LoadBlueprint(root, PlatformBlueprint(platform))
-	if err != nil {
-		return fmt.Errorf("loading platform blueprint: %w", err)
-	}
-
-	// Try to load domain-specific blueprint (e.g., domains/seo.md)
-	domainBP := ""
-	if content, err := LoadBlueprint(root, "agents/"+name+".md"); err == nil {
-		domainBP = content
-	}
-
-	prompt := buildDomainPrompt(specs, platBP, domainBP, name, platform)
-
-	fmt.Printf("  Generating %s domain controller...\n", name)
-	fmt.Printf("  Platform: %s\n", platform)
-	fmt.Printf("  Target:   %s/domains/%s/\n", root, name)
-	fmt.Println()
-
-	response, err := provider.Chat([]Message{
-		{Role: "system", Content: domainSystemPrompt},
-		{Role: "user", Content: prompt},
-	})
-	if err != nil {
-		return fmt.Errorf("AI generation failed: %w", err)
-	}
-
-	files := parseGeneratedFiles(response)
-	if len(files) == 0 {
-		return fmt.Errorf("AI returned no code files — try a different model or check the response")
-	}
-
-	targetDir := filepath.Join(root, "domains", name)
-	written, err := writeGeneratedFiles(targetDir, files)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("  [ok] Generated %d files in domains/%s/\n", written, name)
-	for _, f := range files {
-		fmt.Printf("    %s\n", f.Path)
-	}
-	fmt.Println()
-
-	return nil
+	return SupervisedComponentInit(root, Domain(name), platform)
 }
 
-// GatewayCreate generates the application gateway using the AI model.
+// GatewayCreate generates the gateway through the plan pipeline.
+// See AgentCreate on why this is no longer a single call.
 func GatewayCreate(root, platform string) error {
-	provider, err := RequireProvider()
-	if err != nil {
-		return err
-	}
-
-	graph, err := ResolveGraph(root, "gateway", platform)
-	if err != nil {
-		return fmt.Errorf("resolving blueprints: %w", err)
-	}
-	specs := graph.Joined()
-
-	platBP, err := LoadBlueprint(root, PlatformBlueprint(platform))
-	if err != nil {
-		return fmt.Errorf("loading platform blueprint: %w", err)
-	}
-
-	prompt := buildGatewayPrompt(specs, platBP, platform)
-
-	fmt.Println("  Generating application gateway...")
-	fmt.Printf("  Platform: %s\n", platform)
-	fmt.Printf("  Target:   %s/gateway/\n", root)
-	fmt.Println()
-
-	response, err := provider.Chat([]Message{
-		{Role: "system", Content: gatewaySystemPrompt},
-		{Role: "user", Content: prompt},
-	})
-	if err != nil {
-		return fmt.Errorf("AI generation failed: %w", err)
-	}
-
-	files := parseGeneratedFiles(response)
-	if len(files) == 0 {
-		return fmt.Errorf("AI returned no code files — try a different model or check the response")
-	}
-
-	targetDir := filepath.Join(root, "gateway")
-	written, err := writeGeneratedFiles(targetDir, files)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("  [ok] Generated %d files in gateway/\n", written)
-	for _, f := range files {
-		fmt.Printf("    %s\n", f.Path)
-	}
-	fmt.Println()
-
-	return nil
+	return SupervisedComponentInit(root, Gateway(), platform)
 }
 
 // PatternApply generates a pattern implementation using the AI model.
@@ -841,26 +717,6 @@ Output format — for each file:
 
 Separate files with a blank line.`
 
-const agentSystemPrompt = `You are a code generation agent for the Weblisk framework.
-You generate complete, working agent implementations that follow
-the universal Weblisk Agent Protocol.
-
-Rules:
-- Generate ALL required files for a fully working agent
-- Each file must start with a comment: // filename: <path>
-- Use ONLY standard library (no external dependencies)
-- Follow the protocol specification EXACTLY
-- The agent must implement all 5 protocol endpoints
-- Include registration, messaging, and service discovery
-- The code must compile and run immediately
-- Do NOT explain the code — just output the files
-
-Output format — for each file:
-// filename: <relative-path>
-<complete file content>
-
-Separate files with a blank line.`
-
 func buildOrchestratorPrompt(specs, platformBP, platform string) string {
 	return fmt.Sprintf(`Generate a complete Weblisk orchestrator implementation.
 
@@ -885,74 +741,6 @@ The implementation must pass protocol verification — every endpoint
 must respond exactly as specified.`, platform, specs, platformBP)
 }
 
-func buildAgentPrompt(specs, platformBP, domainBP, name, platform string) string {
-	domainSection := ""
-	if domainBP != "" {
-		domainSection = fmt.Sprintf("\n\n## Domain Knowledge\n%s", domainBP)
-	}
-
-	return fmt.Sprintf(`Generate a complete Weblisk agent implementation.
-
-## Agent Name
-%s
-
-## Platform
-%s
-
-## Specification
-%s
-
-## Platform-Specific Guidance
-%s%s
-
-Generate all files needed for a working agent. Include:
-- Entry point
-- Protocol types (same contract as orchestrator)
-- Identity/crypto
-- Agent base framework (all 5 protocol endpoints)
-- Domain-specific logic (Execute + HandleMessage)
-- Build configuration
-
-The agent must register with an orchestrator and handle all protocol
-endpoints exactly as specified.`, name, platform, specs, platformBP, domainSection)
-}
-
-const domainSystemPrompt = `You are a code generation agent for the Weblisk framework.
-You generate complete, working domain controller implementations.
-
-Rules:
-- Generate ALL required files for a fully working domain controller
-- Each file must start with a comment: // filename: <path>
-- Use ONLY standard library (no external dependencies)
-- Follow the protocol specification EXACTLY
-- Include workflow execution, agent dispatch, aggregation, and scoring
-- The code must compile and run immediately
-- Do NOT explain the code — just output the files
-
-Output format — for each file:
-// filename: <relative-path>
-<complete file content>
-
-Separate files with a blank line.`
-
-const gatewaySystemPrompt = `You are a code generation agent for the Weblisk framework.
-You generate complete, working application gateway implementations.
-
-Rules:
-- Generate ALL required files for a fully working gateway
-- Each file must start with a comment: // filename: <path>
-- Use ONLY standard library (no external dependencies)
-- Include TLS termination, session management, ABAC, rate limiting
-- Route requests to domain controllers via the orchestrator
-- The code must compile and run immediately
-- Do NOT explain the code — just output the files
-
-Output format — for each file:
-// filename: <relative-path>
-<complete file content>
-
-Separate files with a blank line.`
-
 const patternSystemPrompt = `You are a code generation agent for the Weblisk framework.
 You generate implementations of cross-cutting patterns (auth, webhooks,
 real-time, etc.) that integrate into existing project code.
@@ -970,68 +758,6 @@ Output format — for each file:
 <complete file content>
 
 Separate files with a blank line.`
-
-func buildDomainPrompt(specs, platformBP, domainBP, name, platform string) string {
-	domainSection := ""
-	if domainBP != "" {
-		domainSection = fmt.Sprintf("\n\n## Domain-Specific Agents\n%s", domainBP)
-	}
-
-	return fmt.Sprintf(`Generate a complete Weblisk domain controller implementation.
-
-## Domain Name
-%s
-
-## Platform
-%s
-
-## Specification
-%s
-
-## Platform-Specific Guidance
-%s%s
-
-Generate all files needed for a working domain controller. Include:
-- Entry point
-- Protocol types
-- Identity/crypto (ML-DSA-65 keys, tokens, signing)
-- Domain controller (workflow execution, agent dispatch, aggregation)
-- Scoring and feedback logic
-- Registration with orchestrator
-- Build configuration (go.mod or package.json)
-
-The domain controller must register with the orchestrator, define
-workflows, dispatch to work agents, aggregate results, and drive
-the continuous optimization loop.`, name, platform, specs, platformBP, domainSection)
-}
-
-func buildGatewayPrompt(specs, platformBP, platform string) string {
-	return fmt.Sprintf(`Generate a complete Weblisk application gateway implementation.
-
-## Platform
-%s
-
-## Specification
-%s
-
-## Platform-Specific Guidance
-%s
-
-Generate all files needed for a working application gateway. Include:
-- Entry point
-- HTTP router with middleware pipeline
-- TLS termination configuration
-- Session management (secure cookies)
-- ABAC authorization (attribute-based access control)
-- Rate limiting (per-IP, configurable)
-- Route proxying to domain controllers
-- Health check endpoint
-- Build configuration
-
-The gateway is the public entry point. It authenticates users,
-enforces policies, and routes requests to the appropriate domain
-controllers via the orchestrator.`, platform, specs, platformBP)
-}
 
 func buildPatternPrompt(patternBP, pattern, resource string) string {
 	return fmt.Sprintf(`Apply the following pattern to the specified resource.
