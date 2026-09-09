@@ -154,9 +154,17 @@ func hubModelComplete(w http.ResponseWriter, r *http.Request) {
 		hubModelWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "provide a message"})
 		return
 	}
+	system := strings.TrimSpace(req.System)
+	if skills := hubSkillContext(); skills != "" {
+		if system != "" {
+			system = skills + "\n\n" + system
+		} else {
+			system = skills
+		}
+	}
 	msgs := make([]hubChatMsg, 0, len(req.Messages)+1)
-	if strings.TrimSpace(req.System) != "" {
-		msgs = append(msgs, hubChatMsg{Role: "system", Content: req.System})
+	if system != "" {
+		msgs = append(msgs, hubChatMsg{Role: "system", Content: system})
 	}
 	for _, m := range req.Messages {
 		msgs = append(msgs, hubChatMsg{Role: m.Role, Content: m.Content})
@@ -264,7 +272,7 @@ func hubDefaultModel(kind string) string {
 }
 
 func hubExecCLI(ctx context.Context, kind string, msgs []hubChatMsg, model string) (string, error) {
-	name, args, jsonOut, promptFile := hubCLISpec(kind)
+	name, args, jsonOut, promptFile, answerFile := hubCLISpec(kind)
 	bin := hubLookCLI(name)
 	if bin == "" {
 		return "", fmt.Errorf("%s is not installed, or is not where this hub can see it", name)
@@ -296,7 +304,24 @@ func hubExecCLI(ctx context.Context, kind string, msgs []hubChatMsg, model strin
 	}
 	defer cleanup()
 
+	// Some CLIs write a transcript to stdout and the ANSWER to a file. Codex
+	// is one: its stdout opens with a banner, the workdir, the model and an
+	// echo of the prompt, so returning stdout would put all of that into the
+	// completion this hub serves.
+	answerPath := ""
+	if answerFile != "" {
+		af, err := os.CreateTemp("", "weblisk-answer-*.txt")
+		if err != nil {
+			return "", fmt.Errorf("reserving answer file: %w", err)
+		}
+		answerPath = af.Name()
+		_ = af.Close()
+		defer func() { _ = os.Remove(answerPath) }()
+		args = append(args, answerFile, answerPath)
+	}
+
 	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = hubTenantRoot()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -309,6 +334,15 @@ func hubExecCLI(ctx context.Context, kind string, msgs []hubChatMsg, model strin
 			detail = err.Error()
 		}
 		return "", fmt.Errorf("%s: %s", name, detail)
+	}
+	if answerPath != "" {
+		answer, rerr := os.ReadFile(answerPath)
+		if rerr == nil {
+			if a := strings.TrimSpace(string(answer)); a != "" {
+				return a, nil
+			}
+		}
+		return "", fmt.Errorf("%s exited 0 but wrote no answer to %s; its stdout is a transcript, not a completion", name, answerFile)
 	}
 	raw := strings.TrimSpace(stdout.String())
 	if raw == "" {
@@ -324,16 +358,46 @@ func hubExecCLI(ctx context.Context, kind string, msgs []hubChatMsg, model strin
 	return text, nil
 }
 
-func hubCLISpec(kind string) (bin string, args []string, jsonOut bool, promptFile string) {
+// hubCLISpec is how this hub drives a coding-agent CLI for a completion.
+//
+// These flags are kept deliberately in step with the CLI's own presets in
+// internal/dispatch/localcli.go, because this file is a SECOND copy of that
+// decision that ships inside every generated hub — a fix applied only to the
+// CLI leaves the fault in every tenant already built.
+//
+// The tool flags are not symmetric, and that is measured, not an oversight:
+//
+//	claude 2.1.266   --tools ""  is honoured; the model reports no tools
+//	grok 1.0.24      --tools ""  is IGNORED; all 27 built-in tools stay on,
+//	                             including write and run_terminal_command
+//
+// Grok therefore needs an allowlist AND a subtraction to reach zero, because
+// search_tool and use_tool survive an allowlist on their own. Verified by
+// reading grok's system/init event, which states the resolved tool set.
+// `--permission-mode dontAsk` is there so that if a tool ever does come back,
+// the call is refused rather than blocking forever on an approval prompt that
+// a hub serving an HTTP request cannot answer.
+//
+// codex has no flag that removes its tools, so `--sandbox read-only` is the
+// nearest guarantee: a tool call cannot write into the tenant. Its stdout is a
+// framed transcript (banner, workdir, model, an echo of the prompt) rather
+// than a bare answer, so the answer is taken from `--output-last-message`.
+func hubCLISpec(kind string) (bin string, args []string, jsonOut bool, promptFile, answerFile string) {
 	switch kind {
 	case "grok":
 		return "grok", []string{
 			"--output-format", "json",
 			"--no-subagents", "--disable-web-search", "--no-plan", "--verbatim",
-			"--tools", "",
-		}, true, "--prompt-file"
+			// Together these resolve to zero tools. Neither does it alone.
+			"--tools", "search_tool",
+			"--disallowed-tools", "search_tool,use_tool",
+			"--permission-mode", "dontAsk",
+		}, true, "--prompt-file", ""
 	case "codex":
-		return "codex", []string{"exec", "--skip-git-repo-check"}, false, ""
+		return "codex", []string{
+			"exec", "--skip-git-repo-check",
+			"--ephemeral", "--sandbox", "read-only", "--color", "never",
+		}, false, "", "--output-last-message"
 	default:
 		return "claude", []string{
 			"--print", "--output-format", "json",
@@ -341,7 +405,7 @@ func hubCLISpec(kind string) (bin string, args []string, jsonOut bool, promptFil
 			"--strict-mcp-config",
 			"--disable-slash-commands",
 			"--no-session-persistence",
-		}, true, ""
+		}, true, "", ""
 	}
 }
 
@@ -604,6 +668,62 @@ func hubHTTPAlive(ctx context.Context, url string) bool {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	return resp.StatusCode < 500
+}
+
+func hubTenantRoot() string {
+	return filepath.Dir(filepath.Dir(hubModelPath()))
+}
+
+const hubSkillLimit = 48 << 10
+
+// hubSkillContext is this tenant teaching the model how to operate it.
+//
+// Skills are installed next to the hub (.agents/skills). Completions run
+// here, so the verbs travel with the tenant rather than being restated by
+// Studio. Tools stay off on the CLI — see hubCLISpec for what that actually
+// takes per tool, which is not the same flag for each; this is context, not
+// a second agent.
+func hubSkillContext() string {
+	dir := filepath.Join(hubTenantRoot(), ".agents", "skills")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("This tenant's skills. They name the CLI verbs that operate it. Do not invent a synonym or write an orchestrator by hand.\n")
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name(), "SKILL.md"))
+		if err != nil {
+			continue
+		}
+		text := hubSkillBody(raw)
+		if text == "" {
+			continue
+		}
+		if b.Len()+len(text) > hubSkillLimit {
+			break
+		}
+		fmt.Fprintf(&b, "\n## %s\n%s\n", e.Name(), text)
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	return b.String()
+}
+
+func hubSkillBody(raw []byte) string {
+	s := string(raw)
+	if strings.HasPrefix(s, "---") {
+		if i := strings.Index(s[3:], "\n---"); i >= 0 {
+			return strings.TrimSpace(s[3+i+4:])
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 func hubLookCLI(name string) string {

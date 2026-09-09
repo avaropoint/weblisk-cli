@@ -75,6 +75,9 @@ func TestInstallModelGatewayWiresCompletions(t *testing.T) {
 	if !strings.Contains(modelGatewaySrc, "hubLookCLI") {
 		t.Fatal("the gateway does not drive a local CLI")
 	}
+	if !strings.Contains(modelGatewaySrc, "hubSkillContext") {
+		t.Fatal("the gateway does not attach this tenant's skills to completions")
+	}
 }
 
 func TestInstalledGatewayCompletesAndListsProviders(t *testing.T) {
@@ -111,11 +114,15 @@ import (
 )
 
 func TestCompleteHitsConfiguredHTTP(t *testing.T) {
+	var posted string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
 		}
+		buf := make([]byte, 1<<16)
+		n, _ := r.Body.Read(buf)
+		posted = string(buf[:n])
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(` + "`" + `{"choices":[{"message":{"content":"from-the-hub"}}]}` + "`" + `))
 	}))
@@ -123,6 +130,13 @@ func TestCompleteHitsConfiguredHTTP(t *testing.T) {
 
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".weblisk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".agents", "skills", "tenants"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".agents", "skills", "tenants", "SKILL.md"),
+		[]byte("---\nname: tenants\n---\nweblisk tenant create is the operation\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := ` + "`" + `{"provider":"ollama","model":"llama3.1","base_url":"` + "`" + ` + upstream.URL + ` + "`" + `"}` + "`" + `
@@ -142,6 +156,9 @@ func TestCompleteHitsConfiguredHTTP(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "from-the-hub") {
 		t.Fatalf("body %s", rr.Body.String())
+	}
+	if !strings.Contains(posted, "weblisk tenant create is the operation") {
+		t.Fatalf("skills were not attached to the completion:\n%s", posted)
 	}
 }
 
@@ -177,3 +194,43 @@ func TestCompleteRefusesAnUnconfiguredTenant(t *testing.T) {
 	}
 }
 `
+
+// The gateway is a SECOND copy of the CLI's provider dispatch, shipped inside
+// every generated hub. A fix applied only to internal/dispatch/localcli.go
+// leaves the fault running in every tenant already built — which is exactly
+// what happened with grok's `--tools ""`, a flag grok ignores, leaving the
+// model all 27 of its built-in tools including write and run_terminal_command.
+//
+// This asserts the gateway template still carries the restriction. It does not
+// assert the two files are identical: they are different programs with
+// different lifetimes, and pinning them character-for-character would break on
+// the first legitimate divergence.
+func TestGatewayTemplateRestrictsToolsLikeTheCLI(t *testing.T) {
+	for _, want := range []string{
+		// grok: an allowlist alone cannot reach zero — search_tool and
+		// use_tool survive it — so the subtraction must be there too.
+		`"--tools", "search_tool"`,
+		`"--disallowed-tools", "search_tool,use_tool"`,
+		`"--permission-mode", "dontAsk"`,
+		// codex has no flag that removes its tools; read-only is the guarantee.
+		`"--sandbox", "read-only"`,
+		// and its stdout is a transcript, so the answer comes from a file.
+		`"--output-last-message"`,
+	} {
+		if !strings.Contains(modelGatewaySrc, want) {
+			t.Errorf("the generated model gateway no longer carries %s.\n"+
+				"Every hub built from this CLI would ship the unrestricted dispatch. "+
+				"Keep it in step with grokArgs/codexArgs in localcli.go.", want)
+		}
+	}
+	// The empty value specifically: it looks like a restriction and is not one
+	// for grok. Guard the shape rather than the spelling.
+	if strings.Contains(modelGatewaySrc, `"grok", []string{`) {
+		grokBlock := modelGatewaySrc[strings.Index(modelGatewaySrc, `"grok", []string{`):]
+		if end := strings.Index(grokBlock, "}"); end > 0 {
+			if strings.Contains(grokBlock[:end], `"--tools", ""`) {
+				t.Error(`the gateway dispatches grok with --tools "" again — grok ignores the empty value`)
+			}
+		}
+	}
+}
