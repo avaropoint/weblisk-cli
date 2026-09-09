@@ -39,7 +39,7 @@ it is the verb that puts them in order.
 | **`connect`** | **Done** — `weblisk operator connect --orch <url>`, address-based, needs no local project |
 | **Liveness with authority** | **Done** — reachable and admitted are asked and reported apart, in the CLI and in Studio's hub panel |
 | **Which model** | **Done** — `weblisk providers` discovers what the machine has; the operator default is the highest-weighted backend that is actually available; `--provider` still pins and never silently falls back |
-| **Grants** | **Still missing.** No invite, list, or revoke. `patterns/principal-identity` specifies them; nothing implements them |
+| **Grants** | **Mostly done, and this row was wrong.** Checked against the code on 2026-09-09: a second operator's admission works end to end — `weblisk operator init`, then `weblisk operator register --orch <url> [--role]` posts their name and ML-DSA-65 public key, an admin sees them in `weblisk operators list` and admits them with `weblisk operators approve <name>`, and they collect a token with `weblisk operator token`. `weblisk operators revoke <name> --confirm` and `weblisk operators role <name> <role>` are implemented too. So "no list or revoke" was stale, and "a second operator has no CLI to be admitted" was not true. What IS missing is the one verb that lets an admin START the exchange: an **invite** — a pre-authorised token or URL, per `patterns/principal-identity`, so a newcomer can join without an admin having to notice an unsolicited pending registration and approve it out of band. `grep -rn invite --include=*.go` finds nothing |
 
 ## What a tenant is on disk
 

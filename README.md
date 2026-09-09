@@ -157,9 +157,20 @@ WL_BLUEPRINT_SOURCES=https://github.com/your-org/your-blueprints.git
 Generating a hub from blueprints needs a model. It does **not** need a paid
 account — local coding-agent CLIs and local HTTP servers run entirely on the
 machine. Run `weblisk providers` to see what this workstation actually has.
-When nobody pins a backend, a build takes the highest-weighted one that is
-actually available, walking `claude-code · grok · codex · ollama · lmstudio`
-then hosted APIs. Pin one with `--provider` or `WL_AI_PROVIDER`.
+
+When nobody pins a backend, a build walks `claude-code · grok · codex · ollama
+· lmstudio` then the hosted APIs, and **asks each candidate to answer before
+accepting it**. That last part is the difference between a listing and a
+choice: a coding-agent CLI that is installed but not logged in runs perfectly,
+answers `--version`, and generates nothing — so presence is not evidence. A
+candidate that refuses permanently (not logged in, no balance, no key) is
+skipped with its own reason printed, and the walk moves to the next row. A
+candidate that is merely busy is kept, because busy is not broken.
+
+`weblisk providers` itself asks nothing — it is a listing, and it says so.
+Pin a backend with `--provider` or `WL_AI_PROVIDER`; a pin is never silently
+replaced, because a tenant pinned to a local model for data-residency reasons
+must not be sent to an API instead.
 
 **Local — no key, nothing to configure:**
 
@@ -167,7 +178,7 @@ then hosted APIs. Pin one with `--provider` or `WL_AI_PROVIDER`.
 |---|---|---|
 | `claude-code` | Claude Code installed | Uses the CLI's own login. Auto-detected on PATH and in `~/.local/bin`, `~/.claude/local`, Homebrew and npm prefixes |
 | `grok` | Grok CLI installed | Uses the CLI's own login (`grok login` or `XAI_API_KEY`). Auto-detected on PATH and in `~/.grok/bin` |
-| `codex` | Codex CLI installed | Headless `codex exec` |
+| `codex` | Codex CLI installed | Headless `codex exec`, sandboxed read-only. Prompt on stdin, answer via `--output-last-message` (its stdout is a framed transcript) |
 | `ollama` | Ollama running | Defaults to `http://localhost:11434/v1`; set `WL_AI_MODEL` |
 | `lmstudio` | LM Studio (or any server on `:1234`) | OpenAI-compatible `http://localhost:1234/v1` |
 | `local-cli` | any local tool | Set `WL_AI_COMMAND`; pass flags with `WL_AI_ARGS` |
