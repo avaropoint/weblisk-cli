@@ -43,6 +43,14 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: weblisk-cli/go.mod
+          # This repository is checked out into a SUBDIRECTORY, because the
+          # tests resolve the blueprint corpus as a sibling. setup-go's module
+          # cache looks for go.sum at the workspace root regardless, so it
+          # found nothing and every run re-downloaded every dependency:
+          # "Restore cache failed: Dependencies file is not found".
+          # A warning rather than a failure, which is why it survived the
+          # rewrite that read go-version from go.mod.
+          cache-dependency-path: weblisk-cli/go.sum
 
       - name: Format
         working-directory: weblisk-cli
