@@ -38,6 +38,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -158,7 +159,7 @@ func probeLocalCLI(ctx context.Context, kind ProviderKind, binary, label string)
 	// pre-flight in RequireProvider is what actually verifies it — one real call
 	// before any generation — and that division is right. What was wrong was
 	// claiming more here than this probe can see.
-	st.Detail = fmt.Sprintf("%s (%s) — installed; login is checked when a build starts",
+	st.Detail = fmt.Sprintf("%s (%s) — installed; whether it is logged in is settled by ResolveReady before a build",
 		bin, strings.TrimSpace(firstOutputLine(string(outBytes))))
 	st.Model = defaultModels[kind]
 	return st
@@ -453,14 +454,14 @@ func chooseFromUsable(usable, found []ProviderInfo) Choice {
 			indentDetails(found), strings.Join(kindNames(), "  ")), Options: found}
 	case 1:
 		return Choice{Kind: usable[0].Kind, Model: usable[0].Model,
-			Why: "the only provider available on this machine", Options: usable}
+			Why: "the only provider present on this machine", Options: usable}
 	default:
 		k, m := Default(usable)
 		if k == "" {
 			return Choice{Err: fmt.Errorf("no usable model provider was found"), Options: found}
 		}
 		return Choice{Kind: k, Model: m,
-			Why: "highest-weighted available on this machine", Options: usable}
+			Why: "highest-weighted present on this machine", Options: usable}
 	}
 }
 
@@ -574,14 +575,366 @@ func discoveredOllamaModel() string {
 	return defaultModels[ProviderOllama]
 }
 
+// Readiness — the difference between "installed" and "will generate"
+//
+// probeLocalCLI proves a binary exists and runs. That is all `--version` can
+// prove, and it was being read as "this will work": discovery offered
+// claude-code, a build started, and it stopped with "Not logged in". The same
+// machine now demonstrates the failure three ways at once —
+//
+//	claude   installed, logged in            works
+//	grok     installed, logged in, no balance HTTP 402
+//	codex    installed, never authenticated   HTTP 401
+//
+// — and `--version` succeeds for all three. So the walk cannot be decided by
+// discovery alone. It is decided here, by asking.
+//
+// This is NOT moved into Available(): that function backs `weblisk providers`,
+// which must stay a listing and not a bill. Readiness is spent only where a
+// wrong answer costs a whole build.
+
+// readinessPrompt is the smallest thing that proves a model will answer. It is
+// the same sentence RequireProvider uses, so a provider verified here does not
+// have to be asked twice — see MarkVerified.
+const readinessPrompt = "Respond with exactly: ok"
+
+// readinessTimeout bounds ONE candidate. A provider that cannot say "ok" in
+// this long is not the one to hand a hub-generation prompt to, and the walk
+// still has other rows to try.
+const readinessTimeout = 90 * time.Second
+
+// verifiedKinds records what has already been proved ready in this process, so
+// the walk's call and RequireProvider's pre-flight are the same call rather
+// than two.
+var verifiedKinds = struct {
+	sync.Mutex
+	m map[string]bool
+}{m: map[string]bool{}}
+
+// verifiedKey is kind AND model, and the model half is not decoration.
+//
+// Keyed by kind alone, this said "verified" about a model nothing had asked.
+// ChooseProvider and pkg/tenant both apply a --model / spec.Model override
+// AFTER the walk has probed — the walk asks claude-code's default, then the
+// override replaces the model — and RequireProvider then skipped its pre-flight
+// because the KIND had answered. So `--model something-that-does-not-exist`
+// sailed past every check and the status line printed "[ready]" for it. Now the
+// override simply does not match a verified key, and the pre-flight runs.
+func verifiedKey(k ProviderKind, model string) string {
+	return string(normaliseKind(k)) + "\x00" + strings.TrimSpace(model)
+}
+
+// MarkVerified records that this backend answered for real, on this model.
+func MarkVerified(k ProviderKind, model string) {
+	verifiedKinds.Lock()
+	defer verifiedKinds.Unlock()
+	verifiedKinds.m[verifiedKey(k, model)] = true
+}
+
+// AlreadyVerified reports whether this exact backend AND model has answered in
+// this process.
+func AlreadyVerified(k ProviderKind, model string) bool {
+	verifiedKinds.Lock()
+	defer verifiedKinds.Unlock()
+	return verifiedKinds.m[verifiedKey(k, model)]
+}
+
+// probeReady is the readiness call, in a variable so tests can walk the
+// decision table without a model.
+var probeReady = func(kind ProviderKind, model string) error {
+	p, err := BuildProvider(kind, model)
+	if err != nil {
+		return err
+	}
+	// Deliberately NOT WithTransientRetry: this is a question about whether to
+	// use this backend at all, and spending the retry budget on it would turn a
+	// three-row walk into several minutes of silence. The build's own retry
+	// still applies once a provider is chosen.
+	//
+	// Bounding it takes three settings, not one, because three different
+	// transports get here and each reads a different field:
+	//
+	//	streaming CLI (claude, grok)  TotalCap / IdleTimeout
+	//	plain CLI (codex, local-cli)  Timeout — the other two are read ONLY by
+	//	                              runStreaming, so setting them alone left
+	//	                              codex bounded by the 10-minute default
+	//	HTTP (ollama, the keyed APIs) neither; they use http.DefaultClient,
+	//	                              which has no timeout at all
+	//
+	// So the fields are set where they are read, and the whole probe is then
+	// wrapped in a wall-clock guard that covers the transport that has no field
+	// to set. A walk that can block forever on its first candidate is worse
+	// than the guess it replaced.
+	if lp, ok := Underlying(p).(*LocalCLIProvider); ok {
+		lp.TotalCap = readinessTimeout
+		if lp.IdleTimeout == 0 {
+			lp.IdleTimeout = readinessTimeout
+		}
+		if lp.Timeout == 0 || lp.Timeout > readinessTimeout {
+			lp.Timeout = readinessTimeout
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, cerr := p.Chat([]Message{{Role: "user", Content: readinessPrompt}})
+		done <- cerr
+	}()
+	timer := time.NewTimer(readinessTimeout + probeGrace)
+	defer timer.Stop()
+	select {
+	case cerr := <-done:
+		return cerr
+	case <-timer.C:
+		// Unblocks the WALK. The goroutine is left to finish on its own — the
+		// CLI transports carry their own deadline and will exit; an HTTP one
+		// may not, and leaking one request is much cheaper than a build that
+		// never starts. Reported as a timeout so notReady keeps the provider:
+		// slow is not the same as broken, and this deadline is OURS.
+		return &ProviderFault{Provider: string(kind), Status: 408,
+			Message: fmt.Sprintf("did not answer a one-word readiness check within %s", readinessTimeout)}
+	}
+}
+
+// probeGrace lets a transport's own deadline fire first, so the error an
+// operator sees is the provider's ("did not run", "404 unknown model") rather
+// than this outer guard's, which says only that time passed.
+const probeGrace = 5 * time.Second
+
+// notReady decides whether a failed readiness call disqualifies a backend.
+//
+// Only a PERMANENT fault does. A provider that is merely busy — a 529, a rate
+// limit, a stream that dropped — is still the right provider, and the build's
+// retry is what handles it. Skipping it here would demote a working default
+// because it was overloaded for two seconds.
+func notReady(err error) bool {
+	if err == nil {
+		return false
+	}
+	if f := FaultOf(err); f != nil {
+		return f.Class() == FaultPermanent
+	}
+	// OUR decision to stop waiting is never a provider condition — transient.go
+	// says so in as many words, and the walk has to agree. A readiness probe
+	// that hits its own cap, or a stream this process aborted for going quiet,
+	// says nothing about whether the backend can generate; disqualifying a
+	// healthy provider for being slower than a number we picked is the opposite
+	// of what this walk is for. isTransient returns FALSE for both of these
+	// (retrying them does not help EITHER), so they have to be named here
+	// rather than inferred from it.
+	var exhausted *advisoryExhausted
+	var idle *idleAbort
+	if errors.As(err, &exhausted) || errors.As(err, &idle) {
+		return false
+	}
+	// No structured fault: a subprocess that would not start, a binary that is
+	// not really there. Retrying does not fix those either.
+	return !isTransient(err)
+}
+
+// ResolveReady is Resolve, plus proof.
+//
+// An explicit request is passed straight through: an operator who pinned a
+// backend must get that backend's own error, not a silent walk to a different
+// one — which for a data-residency pin would mean sending the tenant's
+// blueprints somewhere they were told not to go.
+//
+// With nobody choosing, each candidate is asked before it is accepted, in
+// catalog order, and one that answers with a PERMANENT failure is dropped with
+// its reason recorded against it. That is what makes "walk the catalog" mean
+// what it says.
+func ResolveReady(ctx context.Context, requested string) Choice {
+	if strings.TrimSpace(requested) != "" {
+		return Resolve(ctx, requested)
+	}
+
+	found := Available(ctx)
+	var usable []ProviderInfo
+	for _, s := range found {
+		if s.Available {
+			usable = append(usable, s)
+		}
+	}
+	if len(usable) == 0 {
+		return chooseFromUsable(usable, found)
+	}
+	return walkReady(usable)
+}
+
+// walkReady is ResolveReady's decision, separated from discovering the machine
+// so the table it implements can be tested without one.
+func walkReady(usable []ProviderInfo) Choice {
+	var rejected []string
+	for _, cand := range orderCandidates(usable) {
+		err := probeReady(cand.Kind, cand.Model)
+		if err == nil {
+			MarkVerified(cand.Kind, cand.Model)
+			return Choice{Kind: cand.Kind, Model: cand.Model,
+				Why:     whyChosen(cand, usable, rejected),
+				Options: markUnavailable(usable, rejected)}
+		}
+		if !notReady(err) {
+			// Busy, not broken. Take it and let the build's retry ride it out.
+			return Choice{Kind: cand.Kind, Model: cand.Model,
+				Why:     whyChosen(cand, usable, rejected) + "; it is busy right now and the build will retry",
+				Options: markUnavailable(usable, rejected)}
+		}
+		reason := skipReason(err)
+		fmt.Printf("  Skipping %s — installed, but it will not generate: %s\n", cand.Kind, reason)
+		rejected = append(rejected, string(cand.Kind)+": "+reason)
+	}
+
+	return Choice{Options: markUnavailable(usable, rejected),
+		Err: fmt.Errorf("%w:\n  %s\n\n"+
+			"Each line above is that provider's own reason, and they do not all have the\n"+
+			"same remedy — a login, a balance, or a key. Fix one, or name a different\n"+
+			"provider with --provider.",
+			ErrNothingReady, strings.Join(rejected, "\n  "))}
+}
+
+// ErrNothingReady marks the walk's own verdict: providers were FOUND, asked,
+// and every one of them refused.
+//
+// It exists so RequireProvider can tell that case apart from "nothing is
+// installed". The two need opposite advice, and giving the wrong one is worse
+// than giving none: an operator whose grok has no balance and whose codex was
+// never signed in was being told to "configure an AI provider — set
+// WL_AI_PROVIDER=grok", which is what they already had. The remedy is a login,
+// not a variable.
+var ErrNothingReady = errors.New("every model provider this machine can reach was asked, and none can generate")
+
+// orderCandidates puts the catalog's ranking over the discovery order, then
+// appends anything configured that the catalog does not know about.
+func orderCandidates(usable []ProviderInfo) []ProviderInfo {
+	var out []ProviderInfo
+	seen := map[ProviderKind]bool{}
+	for _, want := range preferenceOrder() {
+		for _, s := range usable {
+			if s.Kind == want && !seen[s.Kind] {
+				out = append(out, s)
+				seen[s.Kind] = true
+			}
+		}
+	}
+	for _, s := range usable {
+		if !seen[s.Kind] {
+			out = append(out, s)
+			seen[s.Kind] = true
+		}
+	}
+	return out
+}
+
+func whyChosen(cand ProviderInfo, usable []ProviderInfo, rejected []string) string {
+	switch {
+	case len(rejected) > 0:
+		return fmt.Sprintf("highest-weighted that will actually generate (%d ahead of it could not)", len(rejected))
+	case len(usable) == 1:
+		return "the only provider available on this machine, and it answered"
+	default:
+		return "highest-weighted available on this machine, and it answered"
+	}
+}
+
+// markUnavailable rewrites the options list so a caller printing it says the
+// same thing the walk decided, rather than still listing a skipped backend as
+// available.
+func markUnavailable(usable []ProviderInfo, rejected []string) []ProviderInfo {
+	if len(rejected) == 0 {
+		return usable
+	}
+	out := make([]ProviderInfo, len(usable))
+	copy(out, usable)
+	for i := range out {
+		for _, r := range rejected {
+			if strings.HasPrefix(r, string(out[i].Kind)+": ") {
+				out[i].Available = false
+				out[i].Detail = strings.TrimPrefix(r, string(out[i].Kind)+": ")
+			}
+		}
+	}
+	return out
+}
+
+// skipReason is the one line an operator reads to know what to fix.
+//
+// Three things went wrong when this was err.Error() cut at the first newline.
+// A ProviderFault already prefixes its own name, so the line read "grok: grok:".
+// Grok's 402 arrives with embedded newlines, so cutting at the first one
+// printed "Internal error: {" and nothing else. And codex writes its banner to
+// STDOUT and its failure there too, so the first line was "Reading additional
+// input from stdin..." — a progress note presented as the reason a provider
+// was rejected. All three measured on 2026-09-09.
+func skipReason(err error) string {
+	msg := err.Error()
+	if f := FaultOf(err); f != nil {
+		// The fault's own message, not its Error(): the walk prints the
+		// provider's name itself.
+		if m := strings.TrimSpace(f.Message); m != "" {
+			msg = m
+			if f.Status != 0 {
+				msg = fmt.Sprintf("HTTP %d — %s", f.Status, m)
+			}
+		}
+	}
+	return firstReasonLine(msg)
+}
+
+// firstReasonLine reduces a provider's failure to one readable line.
+//
+// Whitespace is collapsed rather than cut at, because the sentence that
+// matters is often not on the first line of what a CLI prints. When the text
+// carries an explicit error line, that line wins over whatever came before it.
+func firstReasonLine(s string) string {
+	if line := salientErrorLine(s); line != "" {
+		s = line
+	}
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	// By RUNES. These messages are full of non-ASCII — "Not logged in · Please
+	// run /login" carries a middle dot, and every provider uses em-dashes — so
+	// a byte slice at 200 lands inside a multi-byte rune and the operator's
+	// primary diagnostic line ends in U+FFFD.
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200]) + "…"
+	}
+	return s
+}
+
+// salientErrorLine finds the line that says what failed, in output that is
+// mostly progress. Returns "" when no line stands out, leaving the caller to
+// use the whole text.
+func salientErrorLine(s string) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= 1 {
+		return ""
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l == "" {
+			continue
+		}
+		lower := strings.ToLower(l)
+		if strings.HasPrefix(lower, "error") || strings.Contains(lower, "error:") ||
+			strings.Contains(lower, "unauthorized") || strings.Contains(lower, "not logged in") {
+			return l
+		}
+	}
+	return ""
+}
+
 // ChooseProvider settles which backend this run uses, before any work starts.
 //
 // `requested` is a --provider flag or a tenant's stored preference; empty means
 // nobody has said, and the highest-weighted backend this workstation can
-// actually run is the operator default. An explicit name still wins, and still
-// fails rather than falling back if that backend cannot be used.
+// actually GENERATE with is the operator default. An explicit name still wins,
+// and still fails rather than falling back if that backend cannot be used.
+//
+// ResolveReady, not Resolve: "available" from discovery means the binary runs,
+// and a CLI that is installed but not logged in runs perfectly and generates
+// nothing. This is the path a build takes, so this is where it is worth one
+// call to find that out first.
 func ChooseProvider(requested, model string) error {
-	c := Resolve(context.Background(), requested)
+	c := ResolveReady(context.Background(), requested)
 	if c.Err != nil {
 		return c.Err
 	}
@@ -592,7 +945,13 @@ func ChooseProvider(requested, model string) error {
 		k, m := Default(c.Options)
 		c = Choice{Kind: k, Model: m, Why: "highest-weighted available on this machine", Options: c.Options}
 	}
-	if model != "" {
+	if model != "" && model != c.Model {
+		// The walk answered on the backend's default. An override replaces the
+		// model AFTER that, so "and it answered" would be describing a call
+		// that used something else — and RequireProvider's pre-flight, which is
+		// keyed on kind AND model, correctly runs again for this one.
+		c.Why = strings.TrimSuffix(c.Why, ", and it answered") +
+			"; --model overrides what the walk asked, so this one is checked next"
 		c.Model = model
 	}
 	UseProvider(c.Kind, c.Model)
@@ -605,7 +964,11 @@ func ChooseProvider(requested, model string) error {
 	}
 	fmt.Println()
 	if others := otherAvailable(c.Kind, c.Options); others != "" {
-		fmt.Printf("  Also available: %s. Pin one with --provider.\n", others)
+		// "installed", not "available": the walk stopped at the first backend
+		// that answered, so these were never asked. Claiming more than was
+		// measured is the whole fault this walk exists to fix, and it would be
+		// a poor showing to reintroduce it one line below the fix.
+		fmt.Printf("  Also installed: %s (not asked — the walk stopped here). Pin one with --provider.\n", others)
 	}
 	return nil
 }
@@ -658,13 +1021,22 @@ func PrintProviders(asJSON bool) error {
 	case c.Err != nil:
 		fmt.Printf("  Nothing usable: %v\n", c.Err)
 	default:
-		fmt.Printf("  A build here uses %s", c.Kind)
+		// "would START with", not "uses". This listing is deliberately free of
+		// model calls — it must stay a listing and not a bill — so it reports
+		// the RANKING and says plainly that nothing here has been asked.
+		// A build runs ResolveReady, which asks, and will skip this row if it
+		// turns out to be installed-but-logged-out. Printing "a build here uses
+		// X" from evidence that cannot support it is the same overclaim the
+		// walk exists to correct, on the one screen operators are sent to.
+		fmt.Printf("  A build here would start with %s", c.Kind)
 		if c.Model != "" {
 			fmt.Printf(" (%s)", c.Model)
 		}
 		fmt.Printf(" — %s.\n", c.Why)
+		fmt.Println("  Nothing above has been asked to generate: a ✓ means the binary runs or a key")
+		fmt.Println("  is present. A build settles it by asking, and moves on if one cannot answer.")
 		if others := otherAvailable(c.Kind, c.Options); others != "" {
-			fmt.Printf("  Also available: %s. Pin one with --provider, WL_AI_PROVIDER, or per tenant in Studio.\n", others)
+			fmt.Printf("  Also present: %s. Pin one with --provider, WL_AI_PROVIDER, or per tenant in Studio.\n", others)
 		}
 	}
 	fmt.Println()

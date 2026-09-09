@@ -139,9 +139,13 @@ func TestAnUnspecifiedMachineTakesTheHighestWeightedAvailable(t *testing.T) {
 		t.Errorf("got %q, want grok after skipping unavailable claude-code", c.Kind)
 	}
 
+	// "present", not "available". chooseFromUsable ranks what discovery FOUND
+	// and asks nothing, so it cannot say a provider is available in the sense
+	// that matters — see ResolveReady, which is the function that asks. The
+	// wording is asserted because it is the sentence an operator reads.
 	only := []ProviderInfo{{Kind: ProviderOllama, Available: true, Model: "codellama:70b"}}
 	c = chooseFromUsable(only, only)
-	if c.Kind != ProviderOllama || c.Why != "the only provider available on this machine" {
+	if c.Kind != ProviderOllama || c.Why != "the only provider present on this machine" {
 		t.Errorf("sole provider = %q (%s)", c.Kind, c.Why)
 	}
 }

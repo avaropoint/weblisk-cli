@@ -186,7 +186,12 @@ func run(ctx context.Context, spec Spec, out chan<- Progress) {
 	}
 
 	// 1. Provider — first, because everything after it costs time.
-	choice := dispatch.Resolve(ctx, spec.Provider)
+	//
+	// ResolveReady asks the chosen backend to answer once before the tenant
+	// build commits to it. Resolve alone reports a CLI that is installed but
+	// not logged in as available, and a tenant that gets thirty steps in before
+	// discovering that has wasted all of them.
+	choice := dispatch.ResolveReady(ctx, spec.Provider)
 	if choice.Err != nil {
 		fail(StepProvider, choice.Err)
 		return

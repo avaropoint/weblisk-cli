@@ -85,6 +85,19 @@ func (p *LocalCLIProvider) WithBounds(idle, total time.Duration) Provider {
 		Stream:      p.Stream,
 		IdleTimeout: idle,
 		TotalCap:    total,
+		// How the prompt gets IN and how the answer comes OUT are not bounds,
+		// and dropping them silently produced a copy that talked to the tool
+		// wrongly rather than one that talked to it briefly: a codex clone
+		// without OutputFileFlag reads its own banner back as the answer, and
+		// one without PromptStdin puts a whole prompt on argv. They were
+		// missing, and the guard test below could not see it because its
+		// fixture left them at their zero values.
+		PromptFlag:     p.PromptFlag,
+		PromptFileFlag: p.PromptFileFlag,
+		PromptStdin:    p.PromptStdin,
+		PromptArg:      p.PromptArg,
+		OutputFileFlag: p.OutputFileFlag,
+		NativeStream:   p.NativeStream,
 		// No activity callback: a console showing per-event progress for a step
 		// nobody waits on is noise, and this step's own state would overwrite
 		// the generation state a person is actually watching.

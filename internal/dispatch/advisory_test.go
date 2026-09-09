@@ -130,11 +130,20 @@ func TestBoundingCopiesEveryFieldItShould(t *testing.T) {
 
 	// Every settable, comparable field given a distinctive non-zero value, so a
 	// dropped field shows up as a zero.
+	// EVERY field non-zero, including the transport ones. This fixture used to
+	// stop at the bounds and leave PromptFlag/PromptFileFlag/PromptStdin/
+	// PromptArg/OutputFileFlag/NativeStream at their zero values — so when
+	// WithBounds dropped them, the loop below compared zero against zero and
+	// this test passed while the bug it exists to catch was live. A guard whose
+	// fixture omits a field cannot guard that field.
 	src := &LocalCLIProvider{
 		Bin: "/some/bin", Name: "named", Args: []string{"--a", "--b"},
 		Model: "some-model", JSON: true, Timeout: 7 * time.Minute,
 		Dir: "/some/dir", Stream: true,
 		IdleTimeout: 11 * time.Minute, TotalCap: 13 * time.Minute,
+		PromptFlag: "--prompt", PromptFileFlag: "--prompt-file",
+		PromptStdin: true, PromptArg: "-",
+		OutputFileFlag: "--output-last-message", NativeStream: true,
 		OnActivity: func(ProviderActivity) {},
 	}
 

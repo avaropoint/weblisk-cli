@@ -5,6 +5,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -646,6 +647,13 @@ func RequireProvider() (Provider, error) {
 	// talks to a model gets it without asking. See provider.go.
 	provider, err := NewProvider()
 	if err != nil {
+		// The walk already asked every provider this machine has and reported
+		// exactly why each refused. Wrapping that in "configure an AI provider,
+		// e.g. WL_AI_PROVIDER=grok" would answer a question the operator did not
+		// ask with advice they have already taken.
+		if errors.Is(err, ErrNothingReady) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("AI provider required for code generation\n\n"+
 			"  Configure an AI provider — run `weblisk providers` to see what this machine has.\n"+
 			"  No account needed — runs on this machine:\n"+
@@ -661,9 +669,24 @@ func RequireProvider() (Provider, error) {
 			"  Set in .env or environment: %w", err)
 	}
 
+	// This pre-flight is NOT skipped when the readiness walk has already asked
+	// the same backend the same question, and the reason is worth stating
+	// because skipping it looks like an obvious saving.
+	//
+	// It was skipped, briefly. The walk probes a THROWAWAY provider — probeReady
+	// builds its own instance and discards it — while the instance returned here
+	// is a second, fresh one. `observed`, the model the tool says it actually
+	// used, is per-instance and is set only by a real call. So skipping meant the
+	// provider handed to ComponentInit had never been asked anything, and
+	// SetProvenance(provenanceOf(graph, provider)) recorded an EMPTY model.
+	//
+	// A build that does not record which model wrote a file cannot answer the
+	// question the whole chain exists to answer. That is worth one small call —
+	// four tokens of "ok" — on every build. The line below it, naming the model,
+	// disappeared too.
 	fmt.Println("  Verifying AI provider...")
 	_, testErr := provider.Chat([]Message{
-		{Role: "user", Content: "Respond with exactly: ok"},
+		{Role: "user", Content: readinessPrompt},
 	})
 	if testErr != nil {
 		return nil, fmt.Errorf("AI provider not reachable: %w\n\n"+
@@ -692,13 +715,38 @@ func DiscoverProvider() string {
 	api := os.Getenv("WL_AI_PROVIDER")
 	model := os.Getenv("WL_AI_MODEL")
 
+	// The run's own choice outranks the environment, and is usually the ONLY
+	// place a choice exists: ChooseProvider pins the backend it walked to
+	// without setting WL_AI_PROVIDER. Reading only the environment printed
+	// "AI Model: not configured" at the top of a build that had just announced
+	// which provider it settled on, two lines above.
+	if kind, m, pinned := SelectedProvider(); pinned {
+		api = string(kind)
+		if model == "" {
+			model = m
+		}
+	}
+
 	if api == "" {
-		return "not configured"
+		// Not "not configured": this line is printed BEFORE the command reaches
+		// RequireProvider, so at this moment nothing has been chosen yet — which
+		// is not the same as nothing being available. A machine with three
+		// working CLIs on it read "not configured" and then generated a hub.
+		return "settled when generation starts (`weblisk providers` lists this machine's)"
 	}
 
 	info := api
 	if model != "" {
 		info += " (" + model + ")"
+	}
+
+	// Already proved, in this process, for this exact backend AND model, by the
+	// readiness walk. Reporting it here costs nothing; asking again would be a
+	// third call in one build, after ResolveReady's and RequireProvider's.
+	// Keyed on the model too, so a --model or WL_AI_MODEL the walk never asked
+	// about is not reported ready on the strength of one that it did.
+	if AlreadyVerified(ProviderKind(api), model) {
+		return info + " [ready]"
 	}
 
 	// Not the retrying provider: this answers "what is configured", and a
@@ -736,6 +784,23 @@ func ProviderStatus() map[string]any {
 		"model":    os.Getenv("WL_AI_MODEL"),
 		"base_url": os.Getenv("WL_AI_BASE_URL"),
 		"has_key":  os.Getenv("WL_AI_KEY") != "",
+	}
+
+	// Reporting configuration must not CHANGE it. newRawProvider walks — and
+	// now asks each candidate to answer — when nothing has been chosen, so
+	// calling it from a status printer would spend real calls and pin a backend
+	// as a side effect of describing one.
+	kind, model, pinned := SelectedProvider()
+	if !pinned && strings.TrimSpace(os.Getenv("WL_AI_PROVIDER")) == "" {
+		status["status"] = "not chosen yet"
+		status["detail"] = "no --provider and no WL_AI_PROVIDER; a build settles this with ResolveReady"
+		return status
+	}
+	if pinned {
+		status["provider"] = string(kind)
+		if status["model"] == "" {
+			status["model"] = model
+		}
 	}
 
 	_, err := newRawProvider()

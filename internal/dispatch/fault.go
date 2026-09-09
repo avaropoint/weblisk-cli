@@ -29,6 +29,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -160,6 +162,14 @@ func permanentMessage(msg string) bool {
 		"credit balance", "invalid api key", "invalid_api_key",
 		"authentication", "unauthorized", "permission denied",
 		"not authorized", "model not found",
+		// A coding-agent CLI that is installed but not signed in. It reports
+		// this in its own words and not as a status, so the words are the only
+		// thing there is to match — and matching them is what stops a build
+		// retrying, with backoff, a tool that will keep saying it until a
+		// person runs /login. Measured: codex answers 401 on this machine,
+		// grok answers 402 with no balance left.
+		"not logged in", "please run /login", "not authenticated",
+		"payment required", "balance exhausted", "please log in",
 	} {
 		if strings.Contains(s, permanent) {
 			return true
@@ -197,6 +207,13 @@ type claudeCodeEnvelope struct {
 	StopReason     string `json:"stop_reason"`
 	TerminalReason string `json:"terminal_reason"`
 	APIErrorStatus int    `json:"api_error_status"`
+	// Errors is where GROK puts the reason, and it is the only place it puts
+	// it. Its terminal event carries no `result` and no `api_error_status`, so
+	// an envelope reader that knows only Claude Code's fields came away with
+	// Status 0 and the Message "error_during_execution" — which is in
+	// transientTerminal, so an account with no balance left was RETRIED, with
+	// backoff, until the build gave up. Measured against a real 402.
+	Errors []string `json:"errors"`
 }
 
 // faultFromClaudeCode reads a Claude Code result envelope into a fault.
@@ -237,17 +254,118 @@ func faultFromClaudeCode(provider, raw string) *ProviderFault {
 		return nil
 	}
 	msg := strings.TrimSpace(env.Result)
+	status := env.APIErrorStatus
+	// Grok's reason, when there is one, outranks the subtype: "error_during
+	// _execution" describes WHERE it stopped, and the errors array says WHY.
+	if reason := strings.TrimSpace(strings.Join(env.Errors, "; ")); reason != "" {
+		if status == 0 {
+			status = statusInText(reason)
+		}
+		// ONLY when there is no `result`, and that guard is the whole point.
+		//
+		// This was an unconditional overwrite, and it defeated its own purpose.
+		// Claude Code emits BOTH: a human `result` and an `errors` array holding
+		// a diagnostic — there is a captured example in transient_test.go,
+		// `["[ede_diagnostic] result_type=user last_content_type=n/a
+		// stop_reason=null"]`. Overwriting meant a real
+		//
+		//	"result": "Not logged in · Please run /login"
+		//
+		// envelope was reported as the diagnostic instead, which matches nothing
+		// in permanentMessage, so the headline failure this whole change exists
+		// to catch came out classified TRANSIENT and got retried.
+		//
+		// Grok has no `result` at all, so the case that needed this still gets
+		// it. Read the status either way: that is additive and cannot displace a
+		// sentence.
+		if msg == "" {
+			// Read before unwrapping — http_status lives in the envelope grok
+			// nests, and unwrapping keeps only the sentence.
+			msg = unwrapNestedMessage(reason)
+		}
+	}
 	if msg == "" {
 		msg = strings.TrimSpace(env.Subtype)
 	}
 	return &ProviderFault{
 		Provider:       provider,
-		Status:         env.APIErrorStatus,
+		Status:         status,
 		TerminalReason: env.TerminalReason,
 		Subtype:        env.Subtype,
 		Message:        msg,
 		Raw:            raw,
 	}
+}
+
+// unwrapNestedMessage pulls the sentence out of a provider that reported an
+// error by pasting a JSON object into a string.
+//
+// Grok's errors entry is the whole of
+//
+//	Internal error: {"message": "API error (status 402 Payment Required):
+//	Grok Build usage balance exhausted", "http_status": 402}
+//
+// Printed as-is it wraps over three lines and a console that shows the first
+// one says `Internal error: {` — which names no provider, no cause and no
+// remedy. Returns the input unchanged when there is nothing nested to find, so
+// a provider that reports a plain sentence is untouched.
+func unwrapNestedMessage(s string) string {
+	if m := nestedMessagePattern.FindStringSubmatch(s); len(m) == 2 {
+		unquoted := strings.NewReplacer(`\"`, `"`, `\n`, " ", `\t`, " ").Replace(m[1])
+		if inner := strings.TrimSpace(unquoted); inner != "" {
+			return inner
+		}
+	}
+	return s
+}
+
+var nestedMessagePattern = regexp.MustCompile(`"message"\s*:\s*"((?:[^"\\]|\\.)*)"`)
+
+// statusInText digs an HTTP status out of a provider's error envelope.
+//
+// Reaching for a regex over a message is exactly what this file argues against
+// everywhere else, and it is confined to this one job for a reason: grok
+// reports the status ONLY inside a human sentence, as a JSON blob embedded in
+// a string —
+//
+//	{"message": "API error (status 402 Payment Required): Grok Build usage
+//	 balance exhausted", "http_status": 402}
+//
+// A structural field would be better and there isn't one. Recovering 402 here
+// is what lets Class() reach its ordinary "any status the provider named that
+// is not in retryableStatus is permanent" rule, instead of falling through to
+// the terminal-reason guess. Returns 0 when there is no status to find, which
+// leaves the existing classification untouched.
+func statusInText(s string) int {
+	for _, re := range statusPatterns {
+		if m := re.FindStringSubmatch(s); len(m) == 2 {
+			if n, err := strconv.Atoi(m[1]); err == nil && n >= 100 && n <= 599 {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// statusPatterns are ordered most-explicit first: a field named http_status is
+// a stronger claim than a number that happens to follow the word "status".
+// statusPatterns is deliberately ONE pattern: a field that is explicitly named
+// http_status.
+//
+// It had two more — `\bstatus[ :]+(\d{3})\b` and `\bHTTP (\d{3})\b` — which
+// scraped any three-digit number near the word "status". That reaches into
+// prose, and Class() then applies its "any status the provider named that is
+// not retryable is permanent" rule to whatever came back. A Cloudflare
+// "API error (status 524 A Timeout Occurred)" is a TIMEOUT — the most
+// retryable thing there is — and scraping it made it permanent, because 524 is
+// not in the nine-entry retryable allowlist. The same went for any message
+// that happened to say "status 200".
+//
+// A number the provider labelled `http_status` is a claim it made on purpose.
+// A number sitting in a sentence is not, and guessing from it is exactly the
+// match-words-against-the-envelope approach this file was written to end.
+var statusPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`"http_status"\s*:\s*(\d{3})`),
 }
 
 // httpFault builds a fault from an HTTP provider's response.

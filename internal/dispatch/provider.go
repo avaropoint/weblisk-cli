@@ -234,16 +234,23 @@ func newRawProvider() (Provider, error) {
 		}
 	}
 	// No choice and no environment: take the highest-weighted backend this
-	// machine can actually run, rather than defaulting to "openai" and
-	// demanding a key.
+	// machine can actually GENERATE with, rather than defaulting to "openai"
+	// and demanding a key.
 	//
 	// That default is why `weblisk server init` failed out of the box on a
 	// machine with Claude Code installed and logged in — a working provider on
 	// the PATH, and nothing looked. Walking the catalog from the top is the
 	// operator default; --provider still pins, and a pinned backend that cannot
 	// run is still an error rather than a silent fall-back.
+	//
+	// ResolveReady, not Resolve, and this is the line that matters most:
+	// ChooseProvider is called from exactly ONE place, `server init`. Every
+	// other generating command — `agent create`, `domain create`,
+	// `gateway create`, `pattern apply` — arrives here instead, through
+	// RequireProvider. Verifying only in ChooseProvider would have fixed
+	// "installed but not logged in" for one command out of five.
 	if api == "" {
-		c := Resolve(context.Background(), "")
+		c := ResolveReady(context.Background(), "")
 		if c.Err != nil {
 			return nil, c.Err
 		}
@@ -255,8 +262,23 @@ func newRawProvider() (Provider, error) {
 		if model == "" {
 			model = c.Model
 		}
+		// Pinned for the rest of the process, so the walk happens once per run
+		// rather than once per call to this function — and so RequireProvider
+		// can see that this backend has already answered and skip asking again.
+		UseProvider(ProviderKind(api), model)
 	}
-	kind := normaliseKind(ProviderKind(api))
+	return BuildProvider(normaliseKind(ProviderKind(api)), model)
+}
+
+// BuildProvider constructs one named backend, with no retry wrapper and
+// without consulting the pinned selection.
+//
+// Split out of newRawProvider so the readiness walk in discover.go can build a
+// candidate it has NOT pinned. Choosing a provider used to mean pinning it
+// first and finding out whether it works afterwards, which is precisely how an
+// installed-but-unauthenticated CLI became the default for a whole build.
+func BuildProvider(kind ProviderKind, model string) (Provider, error) {
+	kind = normaliseKind(kind)
 
 	// Local coding-agent CLIs are a subprocess, not an HTTP endpoint: no base URL,
 	// no key, and the credential is whatever the tool is already logged in with.
@@ -271,7 +293,7 @@ func newRawProvider() (Provider, error) {
 		if baseURL == "" {
 			return nil, fmt.Errorf("WL_AI_BASE_URL required for custom provider %q — "+
 				"this pipeline drives %s; anything else is an OpenAI-compatible HTTP endpoint "+
-				"or local-cli", api, strings.Join(kindNames(), ", "))
+				"or local-cli", kind, strings.Join(kindNames(), ", "))
 		}
 		if model == "" {
 			model = "default"
