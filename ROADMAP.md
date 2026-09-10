@@ -104,15 +104,26 @@ rather than from it", one of them posting to a route no tenant has ever served.
 `architecture/admin.md` and commands in `architecture/cli.md` before a CLI can
 implement anything.
 
-### 2. Federation setup verbs
+### 2. Federation: the CLI is complete; the gap is one step up
 
-`federation` is implemented for everything that operates on an existing
-federation, and missing the two that create one:
+**This entry was wrong.** It listed `weblisk federation init` and
+`weblisk federation peer add <url>` as absent verbs. They are absent, and
+nothing asked for them: `architecture/cli.md`'s Federation Commands section
+names seven — `peers`, `pending`, `accept`, `reject`, `revoke`, `describe`,
+`contracts` — and this CLI implements all seven. Naming two verbs the
+specification does not contain and then recording them as missing is the
+tooling writing the specification, which is the fault this repo has now caught
+three times (see item 1, corrected twice).
 
-| Command | Status |
-|---------|--------|
-| `weblisk federation init` | absent |
-| `weblisk federation peer add <url>` | absent |
+**The real gap is in the specification, not the implementation.**
+`protocol/federation.md` describes peering as a mutual exchange whose step 1 is
+*"Admin initiates peering with B's federation_url"*, followed by
+`POST /v1/federation/peer`. Every CLI verb that exists handles the RECEIVING
+side — see a request, accept it, reject it, revoke it. Nothing initiates one.
+
+So an operator using this CLI can join a federation somebody else starts and
+cannot start one. Whether they should be able to, and what the verb is called,
+belongs in `architecture/cli.md`. It is not this repo's to invent.
 
 ### 3. One generation pipeline — attempted, reverted, and now specified
 
