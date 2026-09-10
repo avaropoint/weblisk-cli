@@ -36,14 +36,102 @@ var locatePlatforms = []string{"cloudflare", "rust", "node", "go"}
 
 // Locate reports where a generated component lives, and which platform it was
 // generated for. Found is false when nothing on disk answers to it.
-func Locate(root string, c Component) (l Layout, found bool) {
+//
+// Three questions in order, weakest evidence last:
+//
+//  1. What did generation RECORD? The manifest names the platform, so no
+//     probing is needed and no marker can be misread.
+//  2. Failing that, which platform's layout has its marker on disk?
+//  3. Failing that, where do the RECORDED FILES actually sit? A component is
+//     told where to go and may not comply, and no platform blueprint states a
+//     directory for a gateway at all — so the layout is the CLI's convention
+//     there, and a gateway placed anywhere else would otherwise generate
+//     cleanly and then be invisible to `gateway start`, `agent list` and
+//     `weblisk validate`. The record is what actually happened.
+func Locate(root string, c Component) (Layout, bool) {
+	m, recorded := readManifest(manifestName(root, c.Key()))
+
+	// 1. The platform generation recorded.
+	if recorded && m.Platform != "" {
+		l := LayoutOf(c, m.Platform)
+		if platformMarker(root, l, m.Platform) != "" {
+			return l, true
+		}
+	}
+	// 2. Whichever layout answers on disk.
 	for _, p := range locatePlatforms {
 		cand := LayoutOf(c, p)
-		if marker := platformMarker(root, cand, p); marker != "" {
+		if platformMarker(root, cand, p) != "" {
 			return cand, true
 		}
 	}
+	// 3. Where its files actually are.
+	if recorded {
+		if l, ok := locateByRecord(root, c, m); ok {
+			return l, true
+		}
+	}
 	return Layout{}, false
+}
+
+// locateByRecord finds a component from the files generation recorded writing.
+//
+// Used only when the layout does not answer. The entry point is identified by
+// name — main.go, wrangler.toml, Cargo.toml, index.ts — because that is the one
+// thing about a component's shape that every platform blueprint does state,
+// even where it states no directory.
+func locateByRecord(root string, c Component, m writtenManifest) (Layout, bool) {
+	type mark struct{ base, platform string }
+	marks := []mark{
+		{"wrangler.toml", "cloudflare"}, {"Cargo.toml", "rust"},
+		{"main.go", "go"}, {"main.rs", "rust"},
+		{"index.ts", "node"}, {"index.js", "node"},
+		{"server.ts", "node"}, {"server.js", "node"},
+	}
+	for _, want := range marks {
+		if m.Platform != "" && m.Platform != want.platform {
+			continue // the record already said which platform; believe it
+		}
+		for _, rel := range m.Files {
+			clean := path.Clean(filepath.ToSlash(rel))
+			if path.Base(clean) != want.base {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(clean))); err != nil {
+				continue // recorded, and since removed
+			}
+			l := LayoutOf(c, want.platform)
+			// Keep everything the platform decides — families, siblings,
+			// whether it carries its own build manifest — and correct only
+			// WHERE this one turned out to be.
+			home := path.Dir(clean)
+			if want.platform == "cloudflare" || want.platform == "rust" {
+				l.Entry = path.Join(home, "src", map[string]string{
+					"cloudflare": "index.js", "rust": "main.rs"}[want.platform])
+			} else {
+				l.Entry = clean
+			}
+			l.Dirs = append([]string{home}, keepExisting(root, l.Dirs, home)...)
+			return l, true
+		}
+	}
+	return Layout{}, false
+}
+
+// keepExisting returns the layout's own directories that are on disk and are
+// not the one already found, so a Go component keeps internal/agents/<name>
+// alongside the cmd/ directory its entry point named.
+func keepExisting(root string, dirs []string, skip string) []string {
+	var out []string
+	for _, d := range dirs {
+		if d == skip {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(d))); err == nil && fi.IsDir() {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // platformMarker is the file that says a component here was built for this

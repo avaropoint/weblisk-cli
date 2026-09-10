@@ -129,3 +129,71 @@ func TestANodeComponentEmittedAsJavaScriptIsStillFound(t *testing.T) {
 		t.Error("a node agent emitted as .js was not found")
 	}
 }
+
+// A component that is not where its platform says is still found.
+//
+// No platform blueprint gives a gateway a directory, so the layout used for one
+// is this CLI's convention and ValidatePlan does not enforce it — see
+// Layout.Specified. A gateway the model placed somewhere else would generate
+// cleanly and then be invisible to `gateway start`, `agent list` and
+// `weblisk validate`. The manifest records what actually happened.
+func TestAComponentIsFoundWhereItsFilesActuallyAre(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "go.mod", "module acme\n\ngo 1.27\n")
+	write(t, root, "cmd/gw/main.go", "package main\n\nfunc main() {}\n")
+	writeManifestOn(t, root, Gateway().Key(), "go", "cmd/gw/main.go")
+
+	// The layout says cmd/gateway; nothing is there.
+	if platformMarker(root, LayoutOf(Gateway(), "go"), "go") != "" {
+		t.Fatal("the layout found something at cmd/gateway; this test is not measuring what it says")
+	}
+	l, found := Locate(root, Gateway())
+	if !found {
+		t.Fatal("a generated gateway was invisible because it is not where the convention says")
+	}
+	if l.Home() != "cmd/gw" {
+		t.Errorf("home = %q, want cmd/gw — the record is what actually happened", l.Home())
+	}
+	if l.Entry != "cmd/gw/main.go" {
+		t.Errorf("entry = %q, want cmd/gw/main.go", l.Entry)
+	}
+	// The platform's own decisions are kept; only the placement is corrected.
+	if l.Contained {
+		t.Error("a go component was reported as carrying its own build manifest")
+	}
+	if len(l.Families) == 0 {
+		t.Error("the platform's families were lost")
+	}
+}
+
+// The recorded platform is believed before any marker is probed.
+func TestTheRecordedPlatformIsPreferredToProbing(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "cmd/billing/main.go", "package main\n\nfunc main() {}\n")
+	writeManifestOn(t, root, Agent("billing").Key(), "go", "cmd/billing/main.go")
+	l, found := Locate(root, Agent("billing"))
+	if !found || l.Platform != "go" {
+		t.Fatalf("found=%v platform=%q, want go", found, l.Platform)
+	}
+	// A manifest with no platform — written before it was recorded — still
+	// resolves by probing, as it always did.
+	root2 := t.TempDir()
+	write(t, root2, "cmd/billing/main.go", "package main\n\nfunc main() {}\n")
+	writeManifest(t, root2, Agent("billing").Key(), "cmd/billing/main.go")
+	if _, found := Locate(root2, Agent("billing")); !found {
+		t.Error("a manifest written before the platform was recorded stopped resolving")
+	}
+}
+
+// A Go component keeps its library directory alongside the cmd/ directory its
+// entry point named.
+func TestARelocatedGoComponentKeepsItsLibraryDirectory(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "cmd/gw/main.go", "package main\n\nfunc main() {}\n")
+	write(t, root, "internal/gateway/routes.go", "package gateway\n")
+	writeManifestOn(t, root, Gateway().Key(), "go", "cmd/gw/main.go", "internal/gateway/routes.go")
+	l, _ := Locate(root, Gateway())
+	if !containsStr(l.Dirs, "internal/gateway") {
+		t.Errorf("dirs = %v, want internal/gateway kept", l.Dirs)
+	}
+}

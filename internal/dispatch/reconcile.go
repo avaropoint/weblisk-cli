@@ -57,9 +57,15 @@ type writtenManifest struct {
 	// Target is the component that wrote these files. Recorded, not derived from
 	// the filename, so another component reading this manifest can say WHOSE
 	// files these are rather than merely that they are somebody's.
-	Target string   `json:"target"`
-	Root   string   `json:"root"`
-	Files  []string `json:"files"`
+	Target string `json:"target"`
+	Root   string `json:"root"`
+	// Platform is the platform blueprint these files were generated against.
+	//
+	// Recorded so a component can be found again without guessing. A manifest
+	// written before this existed simply has none, and Locate falls back to
+	// probing each platform's layout as it always did.
+	Platform string   `json:"platform,omitempty"`
+	Files    []string `json:"files"`
 	// Records is what each file was built FROM, at the granularity a change can
 	// be assessed against — see rebuild.go. Files above stays as the flat list
 	// reconcile needs; records answer a different question and a manifest
@@ -199,8 +205,8 @@ func RecordWrittenWith(root string, plan *Plan, files []GeneratedFile, blueprint
 		}
 	}
 	b, err := json.Marshal(writtenManifest{
-		Target: planOwner(plan), Root: plan.Root, Files: paths, Records: recs,
-		Provenance: currentProvenance,
+		Target: planOwner(plan), Root: plan.Root, Platform: plan.Platform,
+		Files: paths, Records: recs, Provenance: currentProvenance,
 	})
 	if err != nil {
 		return

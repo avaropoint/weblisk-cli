@@ -199,6 +199,7 @@ func ComponentInit(root string, c Component, platform string) error {
 		// which is what the entry-point rule reads.
 		plan.Target = target
 		plan.Owner = key
+		plan.Platform = platform
 		// plan.Root is NOT overridden here, on any platform. Setting it to the
 		// component's directory looks obviously right and breaks the build, the
 		// import prefix, the manifest coordinate space and reconcile's

@@ -230,6 +230,19 @@ func readManifestOwner(path string) (string, []string) {
 	return m.Target, m.Files
 }
 
+// readManifest returns a component's whole record, or false if there is none.
+func readManifest(path string) (writtenManifest, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return writtenManifest{}, false
+	}
+	var m writtenManifest
+	if json.Unmarshal(b, &m) != nil {
+		return writtenManifest{}, false
+	}
+	return m, true
+}
+
 func dedupeStrings(in []string) []string {
 	out := in[:0]
 	var prev string

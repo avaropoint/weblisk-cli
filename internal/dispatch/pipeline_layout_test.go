@@ -272,10 +272,16 @@ func TestReconcileDoesNotReachASiblingsFiles(t *testing.T) {
 
 func writeManifest(t *testing.T, root, owner string, files ...string) {
 	t.Helper()
+	writeManifestOn(t, root, owner, "", files...)
+}
+
+func writeManifestOn(t *testing.T, root, owner, platform string, files ...string) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, cacheDirName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	m, err := json.Marshal(writtenManifest{Target: owner, Root: ".", Files: files})
+	m, err := json.Marshal(writtenManifest{
+		Target: owner, Root: ".", Platform: platform, Files: files})
 	if err != nil {
 		t.Fatal(err)
 	}

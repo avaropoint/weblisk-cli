@@ -52,6 +52,14 @@ type Plan struct {
 	// blueprint already states ("module <tenant>"), and a fact two files must
 	// agree on is not something to have guessed twice.
 	Module string `json:"-"`
+	// Platform is the platform blueprint this plan was made against.
+	//
+	// Not asked of the model, and recorded into the written manifest: WHERE a
+	// component's files go is a property of the platform, so finding one again
+	// afterwards means knowing which platform it was generated for. Reading it
+	// back off the disk by probing each layout in turn works only while the
+	// component is where its platform says — see Locate.
+	Platform string `json:"-"`
 	// Prepare resolves dependencies before the build — "go mod tidy" and its
 	// equivalents. Writing source cannot produce a lockfile, and a build without
 	// one fails naming a source file that has nothing wrong with it.
