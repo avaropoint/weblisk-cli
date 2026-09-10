@@ -169,34 +169,25 @@ func ValidatePlan(p *Plan, req *Requirements, st *TenantState, self Layout) []st
 	// the name a SIBLING would have, not this one — so `agent create billing`
 	// planning cmd/agent/main.go passed a check written to catch it.
 	//
-	// Only inside a family, and only where the blueprint says where a kind
-	// goes: internal/protocol is shared code the first component legitimately
-	// plans, and a gateway's directory is this CLI's convention rather than
-	// anything a blueprint states. See Layout.Specified.
-	//
-	// A singleton whose kind the platform table does not name — gateway,
-	// content — is therefore not checked here. It is not unprotected: every
-	// component now goes through this pipeline, so every generated sibling has
-	// a manifest, and the ownership rule below rejects its files by name. That
-	// is the stronger source. A sibling with no manifest was never generated,
-	// so there is nothing there to replace.
-	if self.Specified() {
-		for _, f := range p.Files {
-			if self.Foreign(filepath.ToSlash(filepath.Clean(f.Path))) {
-				gaps = append(gaps, fmt.Sprintf(
-					"%q is inside another component's directory — yours are %s",
-					f.Path, self.Directories()))
-			}
+	// What is out of bounds, and what is merely a convention, is Layout.Foreign's
+	// to distinguish — it gates a family on whether a blueprint says where this
+	// kind goes, and gates a named component's home on nothing at all. This is
+	// the whole rule, applied to every component.
+	for _, f := range p.Files {
+		if self.Foreign(filepath.ToSlash(filepath.Clean(f.Path))) {
+			gaps = append(gaps, fmt.Sprintf(
+				"%q is inside another component's directory — yours are %s",
+				f.Path, self.Directories()))
 		}
-		// The build command has to build THIS component. A plan whose files are
-		// all correct and whose build command names a sibling produces a green
-		// build of code this run never wrote.
-		for _, tok := range buildPaths(p.Build) {
-			if self.Foreign(tok) {
-				gaps = append(gaps, fmt.Sprintf(
-					"the build command builds %s, which is another component — build %s",
-					tok, path.Dir(self.Entry)))
-			}
+	}
+	// The build command has to build THIS component. A plan whose files are all
+	// correct and whose build command names a sibling produces a green build of
+	// code this run never wrote.
+	for _, tok := range buildPaths(p.Build) {
+		if self.Foreign(tok) {
+			gaps = append(gaps, fmt.Sprintf(
+				"the build command builds %s, which is another component — build %s",
+				tok, path.Dir(self.Entry)))
 		}
 	}
 

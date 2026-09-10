@@ -296,22 +296,38 @@ func (l Layout) Owns(rel string) bool {
 
 // Foreign reports whether a path belongs to a component that is not this one.
 //
-// True only inside a family: `cmd/shipping/main.go` asked of billing's layout is
-// foreign, `internal/protocol/types.go` is not — the second is shared code, and
-// a component in a fresh tenant may have to plan it.
+// Two separate questions, because they answer to different evidence.
+//
+// A NAMED component's home — internal/orchestrator, server/, src/gateway — is
+// out of bounds for everyone else no matter what this component's own placement
+// is specified as. Writing into one is wrong under any reading of any
+// blueprint, so nothing gates it.
+//
+// A FAMILY — cmd/, internal/agents/ — is gated on Specified. This component's
+// own directory is inside its family, so enforcing the family is also enforcing
+// where THIS component goes, and for a gateway no platform blueprint says
+// where that is. Rejecting a plan for placing a gateway outside a directory
+// this CLI chose would be the pipeline becoming the specification. Locate
+// reads the written manifest instead, so a gateway placed elsewhere is still
+// found by `gateway start` and `weblisk validate`.
+//
+// Shared code is neither: `internal/protocol/types.go` is in no family and is
+// nobody's home, and the first component into a fresh tenant plans it.
 func (l Layout) Foreign(rel string) bool {
 	if l.Owns(rel) {
 		return false
 	}
 	clean := path.Clean(rel)
-	for _, fam := range l.Families {
-		if under(clean, fam) {
+	for _, d := range l.Others {
+		if clean == d || under(clean, d) {
 			return true
 		}
 	}
-	// And a singleton's home, which no family covers. See Others.
-	for _, d := range l.Others {
-		if clean == d || under(clean, d) {
+	if !l.Specified() {
+		return false
+	}
+	for _, fam := range l.Families {
+		if under(clean, fam) {
 			return true
 		}
 	}

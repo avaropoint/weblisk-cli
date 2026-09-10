@@ -154,14 +154,45 @@ func TestTheBuildCommandMustBuildThisComponent(t *testing.T) {
 }
 
 // A gateway's directory is this CLI's convention, not a blueprint's. No rule
-// enforces a path nothing specified.
+// enforces a path nothing specified — and a named component's home is out of
+// bounds anyway.
 func TestAGatewayIsNotHeldToAnUnspecifiedLayout(t *testing.T) {
-	p := &Plan{Target: "gateway", Root: ".", Build: "go build ./...",
-		Files: []PlannedFile{{Path: "cmd/shipping/main.go", Purpose: "p"}}}
-	for _, g := range ValidatePlan(p, minimalRequirements(), nil, LayoutOf(Gateway(), "go")) {
+	gw := LayoutOf(Gateway(), "go")
+	// Its own placement is not enforced: no platform blueprint gives a gateway
+	// a row, and Locate reads the manifest so one placed elsewhere is still
+	// found by `gateway start`.
+	p := &Plan{Target: "gateway", Root: ".", Build: "go build ./cmd/gw",
+		Files: []PlannedFile{{Path: "cmd/gw/main.go", Purpose: "p"}}}
+	for _, g := range ValidatePlan(p, minimalRequirements(), nil, gw) {
 		if strings.Contains(g, "another component's directory") {
 			t.Errorf("a convention was enforced as if a blueprint stated it: %s", g)
 		}
+	}
+	// A named component's home still is. Writing into internal/orchestrator is
+	// wrong under any reading of any blueprint, so nothing gates it — and
+	// without this the gateway was the one component free to claim it.
+	intrusion := &Plan{Target: "gateway", Root: ".", Build: "go build ./cmd/gateway",
+		Files: []PlannedFile{{Path: "internal/orchestrator/registry.go", Purpose: "p"}}}
+	var caught bool
+	for _, g := range ValidatePlan(intrusion, minimalRequirements(), nil, gw) {
+		if strings.Contains(g, "another component's directory") {
+			caught = true
+		}
+	}
+	if !caught {
+		t.Error("a gateway planned the orchestrator's library and nothing refused it")
+	}
+	// And a build command naming another component is caught for a gateway too.
+	badBuild := &Plan{Target: "gateway", Root: ".", Build: "go build ./cmd/orchestrator",
+		Files: []PlannedFile{{Path: "cmd/gateway/main.go", Purpose: "p"}}}
+	caught = false
+	for _, g := range ValidatePlan(badBuild, minimalRequirements(), nil, gw) {
+		if strings.Contains(g, "the build command builds") {
+			caught = true
+		}
+	}
+	if !caught {
+		t.Error("a gateway was allowed to build the orchestrator")
 	}
 }
 
