@@ -320,7 +320,7 @@ func ComponentInit(root string, c Component, platform string) error {
 		if plan.Build != "" {
 			result, repaired, rerr := BuildAndRepair(provider, plan, root, platBP, files, printProgress, req.Checklist, graph.Map,
 				func(current []GeneratedFile) ([]ConformanceResult, string, error) {
-					bin := builtBinary(root, plan.Build)
+					bin := builtBinary(root, plan.Build, c)
 					if bin == "" {
 						return nil, "", nil
 					}
@@ -355,7 +355,15 @@ func ComponentInit(root string, c Component, platform string) error {
 
 			// Layer 4's final word. The loop has already run the component and
 			// repaired what it could; this is the report of where it ended.
-			if bin := builtBinary(root, plan.Build); bin != "" {
+			bin := builtBinary(root, plan.Build, c)
+			if bin == "" {
+				// Said, not skipped. The build passed, so the absence of a
+				// conformance section below is otherwise indistinguishable from
+				// a clean one — and this component was never run at all.
+				fmt.Printf("  [note] conformance did not run: %q produced no binary this tool could find,\n"+
+					"         and there is none at %s. Nothing below reports on running this component.\n\n",
+					plan.Build, BinaryPath(c))
+			} else {
 				results, output, cerr := RunConformance(root, bin, target, graph.Map, nil)
 				conformanceFault = reportConformance(results, output, cerr)
 
@@ -1083,14 +1091,26 @@ func moduleNameFor(root string) string {
 // from the command rather than assumed, because the command is the platform
 // blueprint's and this should not hold a second opinion about where the binary
 // lands.
-func builtBinary(root, buildCmd string) string {
+// builtBinary is the executable a build command produced, or "" if none can be
+// found.
+//
+// The model's own -o first, because that is what the build actually wrote.
+// Then bin/<name>, which is where platforms/go.md says binaries go and where
+// StartComponent builds to — a build command with no -o at all (`go build
+// ./...`) used to return "" here, and the whole conformance and interop layer
+// was then skipped in silence. A suite that does not run reads exactly like a
+// suite that found nothing.
+func builtBinary(root, buildCmd string, c Component) string {
 	fields := strings.Fields(buildCmd)
 	for i, f := range fields {
 		if f == "-o" && i+1 < len(fields) {
-			return filepath.Join(root, fields[i+1])
+			p := filepath.Join(root, fields[i+1])
+			if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+				return p
+			}
 		}
 	}
-	return ""
+	return FindBinary(root, c)
 }
 
 // reportConformance prints what running the component established, and returns

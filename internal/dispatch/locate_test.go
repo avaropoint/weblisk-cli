@@ -294,3 +294,34 @@ func writeExec(t *testing.T, root, rel string) {
 		t.Fatal(err)
 	}
 }
+
+// A build command with no -o must not silently disable the conformance layer.
+//
+// builtBinary returned "" for `go build ./...`, and the caller's `if bin != ""`
+// then skipped RunConformance AND RunInterop without a word. The build printed
+// [ok] and the report simply had no conformance section, which reads exactly
+// like a clean one.
+func TestABuildWithNoOutputFlagStillFindsItsBinary(t *testing.T) {
+	root := t.TempDir()
+	writeExec(t, root, "bin/alerting")
+
+	if got := builtBinary(root, "go build ./...", Agent("alerting")); got == "" {
+		t.Error("a build with no -o found no binary, so conformance would not run")
+	}
+	// The model's own -o wins when it points at something real.
+	writeExec(t, root, "out/custom")
+	if got := builtBinary(root, "go build -o out/custom ./cmd/alerting", Agent("alerting")); got !=
+		filepath.Join(root, "out/custom") {
+		t.Errorf("the build command's own -o was not preferred: %q", got)
+	}
+	// An -o naming something that was never produced falls back rather than
+	// reporting a path with nothing at it.
+	if got := builtBinary(root, "go build -o out/missing ./cmd/alerting", Agent("alerting")); got !=
+		filepath.Join(root, "bin", "alerting") {
+		t.Errorf("an -o path that does not exist was returned anyway: %q", got)
+	}
+	// And with nothing built at all, it says so by returning nothing.
+	if got := builtBinary(t.TempDir(), "go build ./...", Agent("alerting")); got != "" {
+		t.Errorf("a tenant with no binary reported one at %q", got)
+	}
+}
