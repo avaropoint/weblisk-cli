@@ -198,10 +198,12 @@ func ComponentInit(root string, c Component, platform string) error {
 		// which is what the entry-point rule reads.
 		plan.Target = target
 		plan.Owner = key
-		// plan.Root is NOT overridden here. Setting it to the component's
-		// directory looks obviously right and breaks the build, the import
-		// prefix, the manifest coordinate space and reconcile's stale-file
-		// removal all at once — see the note above AgentCreate.
+		// plan.Root is NOT overridden here, on any platform. Setting it to the
+		// component's directory looks obviously right and breaks the build, the
+		// import prefix, the manifest coordinate space and reconcile's
+		// stale-file removal all at once. The component's directories reach the
+		// plan as a PREFIX inside its own file paths instead — `self` above is
+		// what supplies them, and what the plan was checked against.
 
 		fmt.Printf("\n  Plan accepted: %d files in %s/\n", len(plan.Files), plan.Root)
 		for _, f := range plan.Order() {

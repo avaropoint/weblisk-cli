@@ -36,16 +36,15 @@ package dispatch
 //
 // # Status
 //
-// Orchestrator and Gateway are the only kinds ComponentInit is reached with
-// today. `agent create`, `domain create` and `gateway create` were switched to
-// it and REVERTED — see the note above AgentCreate for what that switch broke.
-// Agent and Domain therefore exist here ahead of their use, and the tests below
-// pin the two properties the eventual switch depends on: that instances key
-// their own state, and that a singleton's key is unchanged so no manifest
-// already on disk is orphaned.
+// Every kind reaches ComponentInit: `agent create`, `domain create` and
+// `gateway create` all call SupervisedComponentInit. That switch was made once
+// and reverted, because keying state per instance is necessary and was not
+// sufficient — WHERE an instance's files go is the other half, and it is the
+// platform blueprint's answer rather than a constant. See layout.go.
 //
-// The keying itself is live and is not speculative: ComponentInit stores state
-// under Key() now, and Plan.Owner carries it into the written manifest.
+// The keying is what the tests below pin: that instances key their own state,
+// and that a singleton's key is unchanged so no manifest already on disk is
+// orphaned.
 
 import "strings"
 
