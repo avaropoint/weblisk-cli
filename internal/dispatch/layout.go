@@ -154,9 +154,11 @@ func LayoutOf(c Component, platform string) Layout {
 			l.Dirs = []string{path.Join("src", "domains", c.Name)}
 		case "orchestrator":
 			// The entry point is src/server.ts, which sits OUTSIDE
-			// src/orchestrator/. Listed so the file the process starts at is
-			// inside the component's own directories.
-			l.Dirs = []string{path.Join("src", "orchestrator"), "src"}
+			// src/orchestrator/. It is owned because Owns answers for Entry
+			// directly — listing bare "src" here instead made the orchestrator
+			// the owner of src/agents and src/domains, so Foreign could never
+			// fire for it and it could plan over every agent in the tenant.
+			l.Dirs = []string{path.Join("src", "orchestrator")}
 			l.Entry = path.Join("src", "server.ts")
 		default:
 			l.Dirs = []string{path.Join("src", self)}
@@ -227,10 +229,16 @@ func (l Layout) Specified() bool {
 	return false
 }
 
-// Owns reports whether a tenant-root-relative path is inside this component's
-// own directories.
+// Owns reports whether a tenant-root-relative path is this component's.
+//
+// The entry point counts wherever it sits. On node it is src/server.ts, one
+// level above src/orchestrator/, and the alternative — widening Dirs to "src" —
+// hands the orchestrator ownership of every agent's directory.
 func (l Layout) Owns(rel string) bool {
 	clean := path.Clean(rel)
+	if l.Entry != "" && clean == l.Entry {
+		return true
+	}
 	for _, d := range l.Dirs {
 		if clean == d || under(clean, d) {
 			return true

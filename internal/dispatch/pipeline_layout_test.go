@@ -294,3 +294,24 @@ func write(t *testing.T, root, rel, body string) {
 		t.Fatal(err)
 	}
 }
+
+// The node orchestrator's entry point sits above its directory, and widening
+// its directories to cover it hands it every agent in the tenant.
+func TestTheNodeOrchestratorDoesNotOwnEveryAgent(t *testing.T) {
+	l := LayoutOf(Orchestrator(), "node")
+	if !l.Owns("src/server.ts") {
+		t.Error("the orchestrator does not own its own entry point")
+	}
+	for _, foreign := range []string{"src/agents/billing/index.ts", "src/domains/seo/index.ts"} {
+		if l.Owns(foreign) {
+			t.Errorf("the orchestrator owns %s", foreign)
+		}
+		if !l.Foreign(foreign) {
+			t.Errorf("%s is not foreign to the orchestrator — it could plan over a running agent", foreign)
+		}
+	}
+	// And shared code is still shared.
+	if l.Foreign("src/protocol/types.ts") {
+		t.Error("shared protocol code was treated as a sibling's")
+	}
+}
