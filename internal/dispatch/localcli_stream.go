@@ -64,9 +64,13 @@ const defaultIdleTimeout = 3 * time.Minute
 //
 // A different question, so a different allowance — not a tuned one.
 //
-// Once a stream has started, silence is anomalous: measured on a real build,
-// the provider emits `system/thinking_tokens` events continuously while it
-// thinks, so a model that is working is never quiet for long. Before the first
+// Once a stream has started, silence is anomalous — but ONLY because the call
+// asks for partial messages. That is the load-bearing part and it was left
+// implicit here, which is how a working model came to be abandoned: without
+// `--include-partial-messages` a tool emits whole messages and nothing else,
+// so a long thinking phase is genuinely silent and this timeout fires on a
+// call that was fine. See withPartialMessages for the measurement. With it,
+// the longest gap on a real prompt was 1.8 seconds. Before the first
 // event there is no stream to be stalled, and "thinking about a large prompt"
 // and "hung" are genuinely indistinguishable — so nothing can be concluded and
 // the allowance has to be generous.
@@ -449,6 +453,7 @@ func (p *LocalCLIProvider) chatStreaming(messages []Message) (string, error) {
 			args = append(args, "--verbose")
 		}
 	}
+	args = withPartialMessages(args)
 	if p.Model != "" {
 		args = append(args, "--model", p.Model)
 	}
@@ -479,6 +484,54 @@ func (p *LocalCLIProvider) chatStreaming(messages []Message) (string, error) {
 		return "", fmt.Errorf("%s returned an empty result after %d event(s)", p.Name, res.Activity.Events)
 	}
 	return res.Text, nil
+}
+
+// withPartialMessages asks the tool to stream deltas as well as whole messages.
+//
+// This is what makes the idle detector able to tell thinking from hanging.
+// Without it a model emits nothing at all while it reasons, and the longer the
+// prompt the longer that silence: a planning prompt carries the target's whole
+// blueprint corpus, and `weblisk agent create` was abandoned mid-plan with
+//
+//	claude code produced nothing for 3m2s (after 3m10s and 5 event(s))
+//
+// against a model that was working perfectly. Measured on the same prompt,
+// counting the longest gap between stream lines:
+//
+//	without --include-partial-messages   73 events, longest gap 21.0s
+//	with    --include-partial-messages  107 events, longest gap  1.8s
+//
+// — and on a planning-sized prompt the first case passes three minutes, which
+// is the abort threshold.
+//
+// It is added HERE and not to the presets because claude REFUSES it outside
+// streaming: `--include-partial-messages requires --print and
+// --output-format=stream-json`, and claudeCodeArgs is shared with the
+// non-streaming path. Measured, both ways.
+//
+// Only added when the args actually select a streaming format, so a tool
+// driven entirely from WL_AI_ARGS is not handed a flag it never asked for.
+func withPartialMessages(args []string) []string {
+	if hasFlag(args, "--include-partial-messages") {
+		return args
+	}
+	streaming := false
+	for i, a := range args {
+		v := ""
+		if a == "--output-format" && i+1 < len(args) {
+			v = args[i+1]
+		} else if rest, ok := strings.CutPrefix(a, "--output-format="); ok {
+			v = rest
+		}
+		if strings.Contains(v, "stream") {
+			streaming = true
+			break
+		}
+	}
+	if !streaming {
+		return args
+	}
+	return append(args, "--include-partial-messages")
 }
 
 // replaceOutputFormat swaps the value of --output-format, or adds it.

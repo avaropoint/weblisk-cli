@@ -478,3 +478,48 @@ func TestAllowanceForEachPhase(t *testing.T) {
 		})
 	}
 }
+
+// The idle detector abandons a call that goes quiet for three minutes. That is
+// only safe if a working model is never quiet for that long — and it is not,
+// unless the call asked for partial messages. Without them a tool emits whole
+// messages only, so a long thinking phase is silent and a perfectly healthy
+// planning call is killed. Measured: longest gap 21.0s without, 1.8s with; on
+// a planning-sized prompt the first exceeds the threshold.
+func TestStreamingAsksForPartialMessages(t *testing.T) {
+	got := withPartialMessages([]string{"--print", "--output-format", "stream-json", "--verbose"})
+	if !hasFlag(got, "--include-partial-messages") {
+		t.Error("a streaming call does not ask for partial messages, so the idle timeout " +
+			"is measuring silence that means nothing")
+	}
+
+	// Grok's format spells it differently and must also be covered.
+	got = withPartialMessages([]string{"--output-format", "streaming-messages-json"})
+	if !hasFlag(got, "--include-partial-messages") {
+		t.Error("grok's streaming format was not recognised as streaming")
+	}
+
+	// claude REFUSES the flag outside streaming — "requires --print and
+	// --output-format=stream-json" — so a non-streaming arg set must not get it.
+	got = withPartialMessages([]string{"--print", "--output-format", "json"})
+	if hasFlag(got, "--include-partial-messages") {
+		t.Error("a non-streaming call was given --include-partial-messages; claude exits with an error")
+	}
+
+	// A tool driven entirely from WL_AI_ARGS asked for nothing of the kind.
+	got = withPartialMessages([]string{"--some-other-tool-flag"})
+	if hasFlag(got, "--include-partial-messages") {
+		t.Error("a custom arg set was handed a flag it never asked for")
+	}
+
+	// Idempotent: an operator who already passed it does not get it twice.
+	got = withPartialMessages([]string{"--output-format", "stream-json", "--include-partial-messages"})
+	n := 0
+	for _, a := range got {
+		if a == "--include-partial-messages" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("flag appears %d times", n)
+	}
+}
