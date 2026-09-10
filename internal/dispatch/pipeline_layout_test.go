@@ -315,3 +315,68 @@ func TestTheNodeOrchestratorDoesNotOwnEveryAgent(t *testing.T) {
 		t.Error("shared protocol code was treated as a sibling's")
 	}
 }
+
+// A singleton component's library directory is nobody else's to plan.
+//
+// Families cover kinds that come in multiples: any path under cmd/ or
+// internal/agents/ belongs to whichever instance is named there. A singleton
+// has no family — architecture/orchestrator's library is internal/orchestrator
+// exactly, and internal/ also holds internal/protocol, which is shared.
+//
+// Measured before the fix: Foreign answered false for
+// internal/orchestrator/registry.go asked of an agent. The harm is not the
+// write — it is that the agent's manifest RECORDS the file, so a later
+// `weblisk server init` is refused its own directory by the ownership rule.
+func TestASingletonsLibraryIsNotOpenToEveryComponent(t *testing.T) {
+	cron := LayoutOf(Agent("cron"), "go")
+	for _, foreign := range []string{
+		"internal/orchestrator/registry.go",
+		"internal/admin/api.go",
+		"internal/gateway/routes.go",
+		"internal/content/store.go",
+	} {
+		if !cron.Foreign(foreign) {
+			t.Errorf("%s is not foreign to an agent — it could claim a singleton's library", foreign)
+		}
+	}
+	// Shared code stays shared. The first component into a tenant plans all of
+	// these, and internal/agent is the FRAMEWORK every agent imports — not an
+	// instance of one.
+	for _, shared := range []string{
+		"internal/protocol/types.go",
+		"internal/identity/keys.go",
+		"internal/observability/log.go",
+		"internal/agent/server.go",
+		"internal/domain/controller.go",
+		"internal/storage/jsonl.go",
+	} {
+		if cron.Foreign(shared) {
+			t.Errorf("%s was treated as a sibling's — the first component into a tenant must be able to plan it", shared)
+		}
+	}
+	// And a singleton owns its own while still being kept out of another's.
+	orch := LayoutOf(Orchestrator(), "go")
+	if orch.Foreign("internal/orchestrator/registry.go") {
+		t.Error("the orchestrator is foreign to its own library")
+	}
+	if !orch.Foreign("internal/admin/api.go") {
+		t.Error("the orchestrator may plan the admin surface's library")
+	}
+}
+
+// The same holds on every platform, since Others is derived from the same
+// per-platform directories the component itself is placed by.
+func TestSingletonHomesAreProtectedOnEveryPlatform(t *testing.T) {
+	for _, tc := range []struct{ platform, orchestratorFile string }{
+		{"go", "internal/orchestrator/registry.go"},
+		{"node", "src/orchestrator/registry.ts"},
+		{"cloudflare", "server/src/index.js"},
+		{"rust", "server/src/main.rs"},
+	} {
+		l := LayoutOf(Agent("cron"), tc.platform)
+		if !l.Foreign(tc.orchestratorFile) {
+			t.Errorf("%s: %s is not foreign to an agent (others=%v)",
+				tc.platform, tc.orchestratorFile, l.Others)
+		}
+	}
+}

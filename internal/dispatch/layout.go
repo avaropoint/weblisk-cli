@@ -96,6 +96,24 @@ type Layout struct {
 	// first component generated into a fresh tenant legitimately plans those.
 	// Who owns them afterwards is the manifests' answer, not this type's.
 	Families []string
+	// Others are the directories belonging to components a tenant has at most
+	// ONE of — the orchestrator, the gateway, the admin surface — minus this
+	// component's own.
+	//
+	// Separate from Families because a singleton has no family. A family covers
+	// a kind that comes in multiples: any path under cmd/ or internal/agents/
+	// belongs to whichever instance is named there, so the family alone settles
+	// it. architecture/orchestrator's library is internal/orchestrator EXACTLY,
+	// and nothing above it is a family — internal/ also holds internal/protocol
+	// and internal/identity, which are shared and which the first component
+	// into a tenant legitimately plans.
+	//
+	// Measured, not predicted: with families alone, `Foreign` answered false for
+	// internal/orchestrator/registry.go asked of an agent. The harm is not that
+	// the agent writes the file — it is that the agent's manifest then RECORDS
+	// it, so a later `weblisk server init` is refused its own directory by the
+	// ownership rule.
+	Others []string
 	// Entry is the file the component's process starts at.
 	Entry string
 	// Contained reports whether the component carries its own build manifest —
@@ -116,100 +134,116 @@ type Layout struct {
 // differently is how a component gets generated against one blueprint and laid
 // out per another.
 func LayoutOf(c Component, platform string) Layout {
-	l := Layout{Kind: c.Kind, Name: c.Name, Platform: platform}
+	l := Layout{Kind: c.Kind, Name: c.Name, Platform: platform, Dirs: dirsFor(c, platform)}
+	// Every OTHER singleton's home. See Layout.Others for why a family does not
+	// cover them.
+	for _, k := range singletonKinds {
+		if k == c.Kind {
+			continue
+		}
+		l.Others = append(l.Others, dirsFor(Component{Kind: k}, platform)...)
+	}
 	// The instance's own word — an agent's name, or the kind for a singleton.
-	// It is what every platform names the directory after.
 	self := c.Name
 	if self == "" {
 		self = c.Kind
 	}
 	switch platform {
 	case "cloudflare":
-		// platforms/cloudflare.md: the orchestrator is server/, an agent is
-		// agents/<name>/ and a domain controller is domains/<name>/, each a
-		// Worker with its own wrangler.toml and package.json.
+		// platforms/cloudflare.md: each component is a Worker with its own
+		// wrangler.toml and package.json.
 		l.Contained = true
-		switch c.Kind {
-		case "agent":
-			l.Dirs = []string{path.Join("agents", c.Name)}
-		case "domain":
-			l.Dirs = []string{path.Join("domains", c.Name)}
-		case "orchestrator":
-			l.Dirs = []string{"server"}
-		default:
-			// gateway among them. cloudflare.md states no directory for a
-			// gateway, so this is the name the CLI has always written to rather
-			// than a reading of the blueprint — see Specified.
-			l.Dirs = []string{self}
-		}
 		l.Families = []string{"agents", "domains"}
 		l.Entry = path.Join(l.Dirs[0], "src", "index.js")
 	case "node":
-		// platforms/node.md: one project, one src/. Shared code is imported
-		// from src/protocol, so a component owns only its own subtree.
-		switch c.Kind {
-		case "agent":
-			l.Dirs = []string{path.Join("src", "agents", c.Name)}
-		case "domain":
-			l.Dirs = []string{path.Join("src", "domains", c.Name)}
-		case "orchestrator":
-			// The entry point is src/server.ts, which sits OUTSIDE
-			// src/orchestrator/. It is owned because Owns answers for Entry
-			// directly — listing bare "src" here instead made the orchestrator
-			// the owner of src/agents and src/domains, so Foreign could never
-			// fire for it and it could plan over every agent in the tenant.
-			l.Dirs = []string{path.Join("src", "orchestrator")}
-			l.Entry = path.Join("src", "server.ts")
-		default:
-			l.Dirs = []string{path.Join("src", self)}
-		}
+		// platforms/node.md: one project, one src/. Shared code is imported from
+		// src/protocol, so a component owns only its own subtree.
 		l.Families = []string{path.Join("src", "agents"), path.Join("src", "domains")}
-		if l.Entry == "" {
+		if c.Kind == "orchestrator" {
+			// The entry point is src/server.ts, which sits OUTSIDE
+			// src/orchestrator/. Owns answers for Entry directly rather than
+			// widening Dirs to "src" — see Owns.
+			l.Entry = path.Join("src", "server.ts")
+		} else {
 			l.Entry = path.Join(l.Dirs[0], "index.ts")
 		}
 	case "rust":
-		// platforms/rust.md: a Cargo workspace. weblisk-core is the shared
-		// crate every binary depends on; the orchestrator is server/ and an
-		// agent is agents/<name>/, each a workspace member with its own
-		// Cargo.toml.
+		// platforms/rust.md: a Cargo workspace, each component a member with its
+		// own Cargo.toml depending on the weblisk-core crate.
 		l.Contained = true
-		switch c.Kind {
-		case "agent":
-			l.Dirs = []string{path.Join("agents", c.Name)}
-		case "domain":
-			l.Dirs = []string{path.Join("domains", c.Name)}
-		case "orchestrator":
-			l.Dirs = []string{"server"}
-		default:
-			l.Dirs = []string{self}
-		}
 		l.Families = []string{"agents", "domains"}
 		l.Entry = path.Join(l.Dirs[0], "src", "main.rs")
 	default:
 		// platforms/go.md, and every unrecognised platform, because
 		// PlatformBlueprint sends both here.
-		//
-		// The mapping table is explicit: a running thing is cmd/<name> plus
-		// internal/<the blueprint's name>. An agent's blueprint is
-		// agents/<name>, so its library is internal/agents/<name> — NOT
-		// internal/agent, which is architecture/agent, the framework every
-		// agent imports.
-		switch c.Kind {
-		case "agent":
-			l.Dirs = []string{path.Join("cmd", c.Name), path.Join("internal", "agents", c.Name)}
-		case "domain":
-			l.Dirs = []string{path.Join("cmd", c.Name), path.Join("internal", "domains", c.Name)}
-		default:
-			// orchestrator, gateway, content and anything else a singleton:
-			// cmd/<kind> + internal/<kind>, which is the pair isSelfDir has
-			// always derived and every manifest already on disk was written
-			// against.
-			l.Dirs = []string{path.Join("cmd", self), path.Join("internal", self)}
-		}
 		l.Families = []string{"cmd", path.Join("internal", "agents"), path.Join("internal", "domains")}
 		l.Entry = path.Join("cmd", self, "main.go")
 	}
 	return l
+}
+
+// singletonKinds are the component kinds a tenant has at most one of.
+//
+// Read off platforms/go.md's mapping table, which gives each of them a row:
+// cmd/orchestrator ← architecture/orchestrator, cmd/admin ← architecture/admin.
+// They are listed rather than derived because "which kinds come in multiples"
+// is the blueprint's answer and Component.Named already carries it — this is
+// its complement, and the two must not disagree.
+//
+// NOT included: internal/agent and internal/domain. Those are the FRAMEWORKS
+// every agent and every domain controller imports — architecture/agent, not an
+// instance of one — and the first component into a tenant plans them.
+var singletonKinds = []string{"orchestrator", "gateway", "admin", "content"}
+
+// dirsFor is where one component's own files live on one platform.
+//
+// Factored out of LayoutOf because a layout must be able to say where the
+// OTHER components are, and answering that by calling LayoutOf would recur.
+func dirsFor(c Component, platform string) []string {
+	self := c.Name
+	if self == "" {
+		self = c.Kind
+	}
+	switch platform {
+	case "cloudflare", "rust":
+		// agents/<name>/, domains/<name>/, server/ for the orchestrator.
+		switch c.Kind {
+		case "agent":
+			return []string{path.Join("agents", c.Name)}
+		case "domain":
+			return []string{path.Join("domains", c.Name)}
+		case "orchestrator":
+			return []string{"server"}
+		}
+		// gateway among them. Neither blueprint states a directory for one, so
+		// this is the name the CLI has always written to rather than a reading
+		// of the blueprint — see Specified.
+		return []string{self}
+	case "node":
+		switch c.Kind {
+		case "agent":
+			return []string{path.Join("src", "agents", c.Name)}
+		case "domain":
+			return []string{path.Join("src", "domains", c.Name)}
+		}
+		return []string{path.Join("src", self)}
+	}
+	// go, and every unrecognised platform.
+	//
+	// The mapping table is explicit: a running thing is cmd/<name> plus
+	// internal/<the blueprint's name>. An agent's blueprint is agents/<name>, so
+	// its library is internal/agents/<name> — NOT internal/agent, which is
+	// architecture/agent, the framework every agent imports.
+	switch c.Kind {
+	case "agent":
+		return []string{path.Join("cmd", c.Name), path.Join("internal", "agents", c.Name)}
+	case "domain":
+		return []string{path.Join("cmd", c.Name), path.Join("internal", "domains", c.Name)}
+	}
+	// orchestrator, gateway, admin, content and anything else a singleton:
+	// cmd/<kind> + internal/<kind>, which is the pair isSelfDir always derived
+	// and every manifest already on disk was written against.
+	return []string{path.Join("cmd", self), path.Join("internal", self)}
 }
 
 // Specified reports whether the platform blueprint states where this kind of
@@ -259,6 +293,12 @@ func (l Layout) Foreign(rel string) bool {
 	clean := path.Clean(rel)
 	for _, fam := range l.Families {
 		if under(clean, fam) {
+			return true
+		}
+	}
+	// And a singleton's home, which no family covers. See Others.
+	for _, d := range l.Others {
+		if clean == d || under(clean, d) {
 			return true
 		}
 	}
