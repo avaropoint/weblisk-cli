@@ -262,12 +262,25 @@ func dirsFor(c Component, platform string) []string {
 // Specified reports whether the platform blueprint states where this kind of
 // component goes.
 //
-// False for a gateway, on every platform: architecture/gateway.md describes what
-// a gateway serves and no platform blueprint gives it a row. The directory used
-// for one is therefore the CLI's convention, and the rules that reject a plan
-// for writing outside its layout do not fire on a convention — a rule enforcing
-// a path nothing specified is the pipeline becoming the specification, which is
-// the fault schemas/common calls out and this repo has now hit twice.
+// False for a gateway, and for content, on every platform:
+// architecture/gateway.md describes what a gateway serves and no platform
+// blueprint gives it a row. The directory used for one is therefore the CLI's
+// convention.
+//
+// What that gates is exactly one thing: the FAMILY rule. This component's own
+// directory is inside its family, so rejecting a plan for leaving cmd/ is
+// rejecting it for leaving cmd/gateway — a path nothing specified — and that is
+// the pipeline becoming the specification, the fault schemas/common calls out
+// and this repo has now hit twice.
+//
+// It does NOT gate Others. Writing into internal/orchestrator is wrong under
+// any reading of any blueprint, whatever this component's own placement is
+// specified as, and gating that made the gateway the one component free to do
+// it. Foreign draws the line; read it there.
+//
+// Nothing is lost by leaving a gateway's own placement unenforced: Locate reads
+// the written manifest, so one placed anywhere is still found by
+// `gateway start`, `agent list` and `weblisk validate`.
 func (l Layout) Specified() bool {
 	switch l.Kind {
 	case "orchestrator", "agent", "domain":

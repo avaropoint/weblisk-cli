@@ -55,6 +55,7 @@ func handleInit(args []string, root string) error {
 	encryptKeys := false
 	verifyOnly := false
 	resume := false
+	platformStated := false
 	provider := ""
 	model := ""
 
@@ -76,9 +77,9 @@ func handleInit(args []string, root string) error {
 			model = strings.SplitN(args[i], "=", 2)[1]
 		case args[i] == "--platform" && i+1 < len(args):
 			i++
-			platform = args[i]
+			platform, platformStated = args[i], true
 		case strings.HasPrefix(args[i], "--platform="):
-			platform = strings.SplitN(args[i], "=", 2)[1]
+			platform, platformStated = strings.SplitN(args[i], "=", 2)[1], true
 		case args[i] == "--verify-signatures":
 			verifySignatures = true
 		case args[i] == "--allowed-signers" && i+1 < len(args):
@@ -138,6 +139,12 @@ func handleInit(args []string, root string) error {
 	// The tenant folder IS the module root. Everything a tenant owns is scoped to
 	// that one directory, so there is no server/ subdirectory to guard — the
 	// question is whether this tenant already has generated code in it.
+	// The same hazard --resume exists for. An orchestrator generated for
+	// cloudflare, re-run without --platform, was rebuilt as a Go binary — and
+	// because its manifest names the cloudflare files and the new plan does
+	// not, reconcile then removed them. See dispatch.PlatformFor.
+	platform, platformNote := dispatch.PlatformFor(root, dispatch.Orchestrator(), platform, platformStated)
+
 	if existing := generatedRootMarkers(root); len(existing) > 0 && !resume {
 		return fmt.Errorf("this tenant already contains generated code (%s)\n"+
 			"  Use --resume to continue generating into it (cached files are reused),\n"+
@@ -147,7 +154,11 @@ func handleInit(args []string, root string) error {
 	fmt.Println()
 	fmt.Println("  Weblisk Server Init")
 	fmt.Println()
-	fmt.Printf("  Platform:  %s\n", platform)
+	if platformNote != "" {
+		fmt.Println(platformNote)
+	} else {
+		fmt.Printf("  Platform:  %s\n", platform)
+	}
 	fmt.Printf("  AI Model:  %s\n", dispatch.DiscoverProvider())
 	if encryptKeys {
 		fmt.Println("  Keys:      encrypted at rest")
