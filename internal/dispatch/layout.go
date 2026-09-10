@@ -1,0 +1,271 @@
+package dispatch
+
+// layout.go — WHERE a component's files go.
+//
+// # The question ROADMAP item 3 was stuck on
+//
+// `agent create` was switched to the plan pipeline and reverted the same day.
+// The revert named five places that assume plan.Root is "." and concluded that
+// underneath them sat a design disagreement: the single-shot path put an agent
+// at agents/<name> as a SELF-CONTAINED MODULE, and the plan pipeline refuses to
+// plan a go.mod when the tenant already declares one. Item 3 offered two
+// options — a component is a package set inside the tenant module, or a
+// component is its own module — and said the decision had to come first.
+//
+// It is not a decision. The platform blueprints already answer it, and they do
+// not all give the same answer:
+//
+//	platforms/go.md          one module rooted at the tenant. Its mapping table
+//	                         reads `agents/<name>` -> cmd/<name> +
+//	                         internal/agents/<name>, and its rationale section
+//	                         ("Why one module, and not a copy per binary") is an
+//	                         argument against exactly the layout the deleted
+//	                         path used
+//	platforms/node.md        one project. src/agents/<component>/ per agent,
+//	                         importing ../../protocol
+//	platforms/cloudflare.md  a Worker per agent: agents/<name>/ with its OWN
+//	                         wrangler.toml and package.json
+//	platforms/rust.md        a Cargo workspace: agents/<name>/ with its own
+//	                         Cargo.toml, depending on the weblisk-core crate
+//
+// So "is a component its own module" has no platform-independent answer, which
+// is why picking one broke. Go and node share the tenant's build; cloudflare and
+// rust do not. WHERE the files go is a property of the PLATFORM BLUEPRINT, and
+// the pipeline's job is to read it rather than to decide it.
+//
+// # What that buys, and why plan.Root stays "."
+//
+// Once the layout is a fact the pipeline is TOLD, nothing needs a second
+// coordinate space. plan.Root remains "." for every component on every
+// platform, and the component's directories appear as a PREFIX inside the
+// plan's own file paths:
+//
+//	go/agent billing   cmd/billing/main.go, internal/agents/billing/*.go
+//	cf/agent billing   agents/billing/wrangler.toml, agents/billing/src/*.js
+//
+// Every one of the five assumptions the revert listed then holds, unchanged:
+// RunBuild runs at the tenant root and the model authors plan.Build knowing its
+// paths start at that root; plan.Module is the tenant module and the import
+// prefix is correct because the packages really are in it; manifests and
+// ReadTenantState share one coordinate space; Protected() mixes nothing; and
+// isSelfDir is given these directories rather than deriving internal/<kind>
+// from a key that may read "agent:billing".
+//
+// The cloudflare case is what proves the shape rather than the exception to it:
+// a Worker's package.json is planned INSIDE agents/<name>, and the plan rule
+// that refuses a go.mod refuses it only at the root, where the tenant's own
+// module is declared.
+
+import "path"
+
+// Layout is where one component's files live, and where its process starts.
+type Layout struct {
+	// Kind and Name identify the component, as Component does.
+	Kind string
+	Name string
+	// Platform is the platform blueprint this layout was read from.
+	Platform string
+	// Dirs are the directories this component's own files live in, relative to
+	// the tenant root and slash-separated. First is where a reader would look
+	// first.
+	//
+	// This is the component's OWN code. It is not everything the component's
+	// generation may write: the first component in a fresh tenant also plans
+	// the shared libraries — internal/protocol, internal/identity, src/protocol
+	// — and those belong to no one component's directory. Ownership of those is
+	// settled by the manifests, which is what TenantState.Owned reads.
+	Dirs []string
+	// Families are the directories under which components of a kind live on
+	// this platform — cmd/ on go, src/agents/ on node — one level above a
+	// component's own directory.
+	//
+	// What they are for: a plan that names a path inside a family but not
+	// inside THIS component's directory is writing into a sibling's home, and
+	// that is the failure the revert of the first switch observed. A real
+	// `weblisk agent create billing` planned cmd/agent/main.go and eighteen
+	// more files at tenant-root paths, and nothing rejected it, because the only
+	// check of the kind compared against cmd/<KIND> — which is the name a
+	// sibling would have, not this one.
+	//
+	// Only families are treated this way. A path outside every family is a
+	// SHARED library — internal/protocol, src/protocol, weblisk-core — and the
+	// first component generated into a fresh tenant legitimately plans those.
+	// Who owns them afterwards is the manifests' answer, not this type's.
+	Families []string
+	// Entry is the file the component's process starts at.
+	Entry string
+	// Contained reports whether the component carries its own build manifest —
+	// a Worker's package.json, a crate's Cargo.toml — rather than sharing the
+	// tenant's.
+	//
+	// Read by the rule that refuses to plan a build manifest the tenant already
+	// declares: on go and node that refusal is right, and on cloudflare and
+	// rust the manifest inside Dirs[0] is required.
+	Contained bool
+}
+
+// LayoutOf reads a component's layout from the platform it is generated for.
+//
+// The platform arms mirror PlatformBlueprint exactly, including its default: a
+// platform string nothing recognises resolves to platforms/go.md, so it must
+// resolve to go's layout too. Two functions answering "which platform is this"
+// differently is how a component gets generated against one blueprint and laid
+// out per another.
+func LayoutOf(c Component, platform string) Layout {
+	l := Layout{Kind: c.Kind, Name: c.Name, Platform: platform}
+	// The instance's own word — an agent's name, or the kind for a singleton.
+	// It is what every platform names the directory after.
+	self := c.Name
+	if self == "" {
+		self = c.Kind
+	}
+	switch platform {
+	case "cloudflare":
+		// platforms/cloudflare.md: the orchestrator is server/, an agent is
+		// agents/<name>/ and a domain controller is domains/<name>/, each a
+		// Worker with its own wrangler.toml and package.json.
+		l.Contained = true
+		switch c.Kind {
+		case "agent":
+			l.Dirs = []string{path.Join("agents", c.Name)}
+		case "domain":
+			l.Dirs = []string{path.Join("domains", c.Name)}
+		case "orchestrator":
+			l.Dirs = []string{"server"}
+		default:
+			// gateway among them. cloudflare.md states no directory for a
+			// gateway, so this is the name the CLI has always written to rather
+			// than a reading of the blueprint — see Specified.
+			l.Dirs = []string{self}
+		}
+		l.Families = []string{"agents", "domains"}
+		l.Entry = path.Join(l.Dirs[0], "src", "index.js")
+	case "node":
+		// platforms/node.md: one project, one src/. Shared code is imported
+		// from src/protocol, so a component owns only its own subtree.
+		switch c.Kind {
+		case "agent":
+			l.Dirs = []string{path.Join("src", "agents", c.Name)}
+		case "domain":
+			l.Dirs = []string{path.Join("src", "domains", c.Name)}
+		case "orchestrator":
+			// The entry point is src/server.ts, which sits OUTSIDE
+			// src/orchestrator/. Listed so the file the process starts at is
+			// inside the component's own directories.
+			l.Dirs = []string{path.Join("src", "orchestrator"), "src"}
+			l.Entry = path.Join("src", "server.ts")
+		default:
+			l.Dirs = []string{path.Join("src", self)}
+		}
+		l.Families = []string{path.Join("src", "agents"), path.Join("src", "domains")}
+		if l.Entry == "" {
+			l.Entry = path.Join(l.Dirs[0], "index.ts")
+		}
+	case "rust":
+		// platforms/rust.md: a Cargo workspace. weblisk-core is the shared
+		// crate every binary depends on; the orchestrator is server/ and an
+		// agent is agents/<name>/, each a workspace member with its own
+		// Cargo.toml.
+		l.Contained = true
+		switch c.Kind {
+		case "agent":
+			l.Dirs = []string{path.Join("agents", c.Name)}
+		case "domain":
+			l.Dirs = []string{path.Join("domains", c.Name)}
+		case "orchestrator":
+			l.Dirs = []string{"server"}
+		default:
+			l.Dirs = []string{self}
+		}
+		l.Families = []string{"agents", "domains"}
+		l.Entry = path.Join(l.Dirs[0], "src", "main.rs")
+	default:
+		// platforms/go.md, and every unrecognised platform, because
+		// PlatformBlueprint sends both here.
+		//
+		// The mapping table is explicit: a running thing is cmd/<name> plus
+		// internal/<the blueprint's name>. An agent's blueprint is
+		// agents/<name>, so its library is internal/agents/<name> — NOT
+		// internal/agent, which is architecture/agent, the framework every
+		// agent imports.
+		switch c.Kind {
+		case "agent":
+			l.Dirs = []string{path.Join("cmd", c.Name), path.Join("internal", "agents", c.Name)}
+		case "domain":
+			l.Dirs = []string{path.Join("cmd", c.Name), path.Join("internal", "domains", c.Name)}
+		default:
+			// orchestrator, gateway, content and anything else a singleton:
+			// cmd/<kind> + internal/<kind>, which is the pair isSelfDir has
+			// always derived and every manifest already on disk was written
+			// against.
+			l.Dirs = []string{path.Join("cmd", self), path.Join("internal", self)}
+		}
+		l.Families = []string{"cmd", path.Join("internal", "agents"), path.Join("internal", "domains")}
+		l.Entry = path.Join("cmd", self, "main.go")
+	}
+	return l
+}
+
+// Specified reports whether the platform blueprint states where this kind of
+// component goes.
+//
+// False for a gateway, on every platform: architecture/gateway.md describes what
+// a gateway serves and no platform blueprint gives it a row. The directory used
+// for one is therefore the CLI's convention, and the rules that reject a plan
+// for writing outside its layout do not fire on a convention — a rule enforcing
+// a path nothing specified is the pipeline becoming the specification, which is
+// the fault schemas/common calls out and this repo has now hit twice.
+func (l Layout) Specified() bool {
+	switch l.Kind {
+	case "orchestrator", "agent", "domain":
+		return true
+	}
+	return false
+}
+
+// Owns reports whether a tenant-root-relative path is inside this component's
+// own directories.
+func (l Layout) Owns(rel string) bool {
+	clean := path.Clean(rel)
+	for _, d := range l.Dirs {
+		if clean == d || under(clean, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// Foreign reports whether a path belongs to a component that is not this one.
+//
+// True only inside a family: `cmd/shipping/main.go` asked of billing's layout is
+// foreign, `internal/protocol/types.go` is not — the second is shared code, and
+// a component in a fresh tenant may have to plan it.
+func (l Layout) Foreign(rel string) bool {
+	if l.Owns(rel) {
+		return false
+	}
+	clean := path.Clean(rel)
+	for _, fam := range l.Families {
+		if under(clean, fam) {
+			return true
+		}
+	}
+	return false
+}
+
+// under reports whether clean is inside dir, by path segment.
+//
+// Written out rather than done with strings.HasPrefix, which answers yes for
+// `internal/agentsmith` under `internal/agents`.
+func under(clean, dir string) bool {
+	return len(clean) > len(dir) && clean[:len(dir)] == dir && clean[len(dir)] == '/'
+}
+
+// Home is the directory a reader would be pointed at, and the one an operator is
+// told about when a component is generated.
+func (l Layout) Home() string {
+	if len(l.Dirs) == 0 {
+		return "."
+	}
+	return l.Dirs[0]
+}

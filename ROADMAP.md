@@ -58,7 +58,6 @@ is deliberately NOT in this table for that reason (see Open item 4).
 | `weblisk strategies list \| describe \| create \| update \| delete` | `internal/admin` |
 | `weblisk federation peers \| pending \| accept \| reject \| revoke \| describe \| contracts` | `internal/admin` |
 | `weblisk marketplace search \| describe \| buy \| install \| publish \| update \| delist \| dashboard \| reviews \| review \| collaborations \| usage \| terminate \| activate \| remove` | `internal/marketplace` |
-
 | `weblisk deploy \| deploy rollback` | `internal/deploy` |
 | `weblisk deps \| deps audit` | `internal/deps` |
 | `weblisk policy validate \| test` | `internal/policy` |
@@ -146,21 +145,48 @@ coordinate space, and the entire pipeline assumes there is only one:
 `writtenManifest.Root` is already recorded and never read back, which is a good
 hint the design anticipated this and stopped short.
 
-**The real disagreement.** The deleted path put an agent at `agents/<name>` as a
-**self-contained module** — its prompt asked for "Build configuration (go.mod
-or package.json)", and `weblisk validate` still checks for `agents/<name>/go.mod`.
-The plan pipeline refuses to plan a `go.mod` when the tenant already declares a
-module. The two designs disagree about what an agent *is*, and that is the
-decision to make first:
+**The real disagreement — and it is not a decision.** This entry previously
+said the pipeline had to choose between "a component is a package set inside
+the tenant module" and "a component is its own module", and that the choice
+came first. That was wrong. The platform blueprints already answer it, and
+they do not all give the same answer:
 
-- **A component is a package set inside the tenant module.** Then `plan.Root`
-  stays `"."`, the plan's own file paths carry the `agents/<name>/` prefix,
-  imports are `<module>/agents/<name>/...`, and `weblisk validate` must stop
-  expecting a per-agent `go.mod`.
-- **A component is its own module.** Then the pipeline must learn a non-`"."`
-  root properly: run build and prepare in `root/plan.Root`, allow a planned
-  `go.mod` there, rebase manifest paths on the recorded `Root` when reading
-  another component's, and give `isSelfDir` the directory rather than the key.
+| Platform | Where an agent goes | Own build manifest |
+|---|---|---|
+| `platforms/go.md` | `cmd/<name>` + `internal/agents/<name>` (mapping table, line 134) | no — see its "Why one module, and not a copy per binary" |
+| `platforms/node.md` | `src/agents/<name>`, importing `src/protocol` | no |
+| `platforms/cloudflare.md` | `agents/<name>` with its own `wrangler.toml` | yes |
+| `platforms/rust.md` | `agents/<name>` as a Cargo workspace member | yes |
+
+So there is no platform-independent answer, which is exactly why picking one
+broke. `Component.Dir()` returned `agents/<name>` for every platform — wrong
+for Go twice over, since go.md maps that blueprint to `cmd/<name>` +
+`internal/agents/<name>` and argues against a module per binary. That method
+is now deleted; `internal/dispatch/layout.go` reads the layout from the
+platform instead.
+
+**Which dissolves the coordinate-space problem.** Once the layout is a fact the
+pipeline is told, `plan.Root` stays `"."` for every component on every
+platform, and the component's directories appear as a PREFIX inside the plan's
+own file paths. All five assumptions in the table above then hold unchanged —
+the build runs at the root where the model authored its command, the import
+prefix is right because the packages really are in the tenant module, and
+manifests, `Protected()` and `ReadTenantState` share one frame.
+
+**What is left to do**, now that where-things-go is answered:
+
+1. Give the plan prompt the layout, so the model plans `cmd/billing/main.go`
+   rather than `cmd/agent/main.go`.
+2. Replace `ValidatePlan`'s `cmd/<Target>` rule with `Layout.Foreign`, which
+   rejects a sibling's directory and permits shared libraries. The current rule
+   compares against the KIND — the name a sibling would have, not this one.
+3. Give `isSelfDir` the layout's directories instead of deriving
+   `internal/<kind>` from a key that may read `agent:billing`.
+4. Let a `Contained` component plan its own build manifest, and refuse one only
+   at the tenant root where the tenant's own module is declared.
+5. Then, and only then, point the three commands at `SupervisedComponentInit`
+   again — and verify with a real generation that reaches a passing build,
+   which the first attempt never did.
 
 **Observed, not predicted.** A real `weblisk agent create billing` planned
 eighteen files at tenant-root paths and reasoned in its own plan about importing
