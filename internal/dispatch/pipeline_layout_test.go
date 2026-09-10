@@ -337,7 +337,6 @@ func TestASingletonsLibraryIsNotOpenToEveryComponent(t *testing.T) {
 	cron := LayoutOf(Agent("cron"), "go")
 	for _, foreign := range []string{
 		"internal/orchestrator/registry.go",
-		"internal/admin/api.go",
 		"internal/gateway/routes.go",
 		"internal/content/store.go",
 	} {
@@ -365,8 +364,34 @@ func TestASingletonsLibraryIsNotOpenToEveryComponent(t *testing.T) {
 	if orch.Foreign("internal/orchestrator/registry.go") {
 		t.Error("the orchestrator is foreign to its own library")
 	}
-	if !orch.Foreign("internal/admin/api.go") {
-		t.Error("the orchestrator may plan the admin surface's library")
+	if !orch.Foreign("internal/gateway/routes.go") {
+		t.Error("the orchestrator may plan the gateway's library")
+	}
+}
+
+// The orchestrator serves the admin surface, so internal/admin is not another
+// component's home.
+//
+// Fourteen of the orchestrator's twenty-one required endpoints are /v1/admin/*
+// and architecture/admin.md is in its graph. platforms/go.md gives admin a row
+// in its mapping table, and reading that row as "another component owns
+// internal/admin" would have rejected a correct `weblisk server init` plan.
+// The admin BINARY is still protected, because cmd is a family.
+func TestTheOrchestratorMayPlanTheAdminSurfaceItServes(t *testing.T) {
+	orch := LayoutOf(Orchestrator(), "go")
+	if orch.Foreign("internal/admin/operators.go") {
+		t.Error("the orchestrator was refused the admin library whose endpoints it serves")
+	}
+	agent := LayoutOf(Agent("billing"), "go")
+	if agent.Foreign("internal/admin/operators.go") {
+		t.Error("internal/admin is shared, so an agent is not refused it either")
+	}
+	// The binary is another matter, and the family covers it.
+	if !agent.Foreign("cmd/admin/main.go") {
+		t.Error("an agent may plan the admin binary's entry point")
+	}
+	if !orch.Foreign("cmd/admin/main.go") {
+		t.Error("the orchestrator may plan the admin binary's entry point")
 	}
 }
 

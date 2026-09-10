@@ -182,18 +182,31 @@ func LayoutOf(c Component, platform string) Layout {
 	return l
 }
 
-// singletonKinds are the component kinds a tenant has at most one of.
+// singletonKinds are the component kinds a tenant has at most one of, and whose
+// library directory therefore belongs to that one component.
 //
-// Read off platforms/go.md's mapping table, which gives each of them a row:
-// cmd/orchestrator ← architecture/orchestrator, cmd/admin ← architecture/admin.
-// They are listed rather than derived because "which kinds come in multiples"
-// is the blueprint's answer and Component.Named already carries it — this is
-// its complement, and the two must not disagree.
+// Listed rather than derived because "which kinds come in multiples" is the
+// blueprint's answer and Component.Named already carries it — this is its
+// complement, and the two must not disagree.
 //
-// NOT included: internal/agent and internal/domain. Those are the FRAMEWORKS
-// every agent and every domain controller imports — architecture/agent, not an
-// instance of one — and the first component into a tenant plans them.
-var singletonKinds = []string{"orchestrator", "gateway", "admin", "content"}
+// NOT included, and each for a measured reason:
+//
+//	internal/agent, internal/domain   the FRAMEWORKS every agent and every
+//	                                  domain controller imports —
+//	                                  architecture/agent, not an instance of
+//	                                  one. The first component into a tenant
+//	                                  plans them.
+//	internal/admin                    platforms/go.md gives admin a row, but
+//	                                  the ORCHESTRATOR serves its surface:
+//	                                  fourteen of the orchestrator's
+//	                                  twenty-one required endpoints are
+//	                                  /v1/admin/*, and architecture/admin.md
+//	                                  is in its graph. Treating internal/admin
+//	                                  as another component's home would reject
+//	                                  a correct `weblisk server init` plan.
+//	                                  cmd/admin is still protected — cmd is a
+//	                                  family.
+var singletonKinds = []string{"orchestrator", "gateway", "content"}
 
 // dirsFor is where one component's own files live on one platform.
 //
