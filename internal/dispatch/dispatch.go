@@ -51,8 +51,9 @@ func SupervisedComponentInit(root string, c Component, platform string) error {
 	// not retried, and the operator is told the thing they actually need to
 	// know: nothing generated so far has been lost.
 	if f := FaultOf(err); f != nil && f.Class() == FaultPermanent && permanentMessage(f.Message) {
-		fmt.Printf("\n  Nothing generated so far is lost — every completed file is cached.\n" +
-			"  Re-run with --resume when the limit clears and only what remains is generated.\n\n")
+		fmt.Printf("\n  Nothing generated so far is lost — every completed file is cached.\n"+
+			"  When the limit clears, run this and only what remains is generated:\n"+
+			"    %s\n\n", ResumeCommand(c))
 	}
 	return err
 }

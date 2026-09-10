@@ -120,3 +120,28 @@ func (c Component) Valid() string {
 	}
 	return ""
 }
+
+// ResumeCommand is what an operator runs to continue a build that stopped.
+//
+// Named per component rather than printed as a constant. The message said
+// "Re-run with --resume", which is right for `server init` — that command
+// refuses to write into a tenant that already holds generated code, and
+// --resume is what lifts the refusal. `agent create` has no such guard, and
+// accepts no such flag, so the advice named a flag that does not exist for
+// three of the four commands that can print it.
+//
+// Nothing is lost either way: generation is cached per file on the inputs that
+// produced it, so continuing is what re-running already does.
+func ResumeCommand(c Component) string {
+	switch c.Kind {
+	case "orchestrator":
+		// The one command with an overwrite guard to lift.
+		return "weblisk server init --resume"
+	case "gateway":
+		return "weblisk gateway create"
+	}
+	if c.Name != "" {
+		return "weblisk " + c.Kind + " create " + c.Name
+	}
+	return "weblisk component " + c.Kind + " init"
+}

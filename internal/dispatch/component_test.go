@@ -1,6 +1,9 @@
 package dispatch
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Two agents must not share stored state. Keyed by kind alone — which is what
 // ComponentInit did — the second agent's build reuses the first's plan
@@ -81,5 +84,36 @@ func TestTheBlueprintIsChosenByKindNotByInstance(t *testing.T) {
 	// Every agent is graded against the same assertions, whatever it is called.
 	if GenerationRoots(Agent("a").Kind, "go")[2] != GenerationRoots(Agent("b").Kind, "go")[2] {
 		t.Error("two agents resolve different blueprint roots")
+	}
+}
+
+// The advice printed when a build stops must name a command that exists.
+//
+// It said "Re-run with --resume" for every component. Only `server init` and
+// `tenant create` accept that flag; `agent create`, `domain create` and
+// `gateway create` do not, and pointing three commands at a flag that does not
+// exist is worse than saying nothing — the operator is told the banked files
+// need a switch to reach, when re-running is what reaches them.
+func TestResumeAdviceNamesACommandThatExists(t *testing.T) {
+	for _, tc := range []struct {
+		c    Component
+		want string
+	}{
+		{Orchestrator(), "weblisk server init --resume"},
+		{Agent("alerting"), "weblisk agent create alerting"},
+		{Domain("seo"), "weblisk domain create seo"},
+		{Gateway(), "weblisk gateway create"},
+		{Component{Kind: "content"}, "weblisk component content init"},
+	} {
+		if got := ResumeCommand(tc.c); got != tc.want {
+			t.Errorf("ResumeCommand(%s) = %q, want %q", tc.c.Key(), got, tc.want)
+		}
+	}
+	// And only the command that has a guard to lift mentions the flag.
+	for _, c := range []Component{Agent("a"), Domain("d"), Gateway()} {
+		if strings.Contains(ResumeCommand(c), "--resume") {
+			t.Errorf("%s is told to pass a flag its command does not accept: %q",
+				c.Key(), ResumeCommand(c))
+		}
 	}
 }
