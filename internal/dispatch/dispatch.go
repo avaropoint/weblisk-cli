@@ -365,14 +365,15 @@ func ComponentInit(root string, c Component, platform string) error {
 					plan.Build, BinaryPath(c))
 			} else {
 				results, output, cerr := RunConformance(root, bin, target, graph.Map, nil)
-				conformanceFault = reportConformance(results, output, cerr)
+				conformanceFault = reportConformance("Conformance L1 (this component alone)", results, output, cerr)
 
 				// Interoperability, against the real orchestrator of this tenant.
 				// A component can satisfy every assertion about itself and be
 				// unable to register — eight faults were found that way by hand.
 				iresults, ioutput, ierr := RunInterop(root, bin, target, graph.Map, nil)
 				if len(iresults) > 0 {
-					if ifault := reportConformance(iresults, ioutput, ierr); ifault != nil && conformanceFault == nil {
+					if ifault := reportConformance("Conformance L4 (against this tenant's orchestrator)",
+						iresults, ioutput, ierr); ifault != nil && conformanceFault == nil {
 						conformanceFault = ifault
 					}
 				}
@@ -1131,7 +1132,13 @@ func builtBinary(root, buildCmd string, c Component) string {
 // A test with no harness is NOT a failure and does not count here: "we have not
 // verified this" and "this is wrong" are different facts, and conflating them
 // would make the unrun count a reason to fail a correct build.
-func reportConformance(results []ConformanceResult, output string, err error) error {
+// reportConformance prints one layer's results and returns the fault, if any.
+//
+// layer names which one. It was hardcoded "L1" and reused for the interop
+// results too, so a run printed two sections both headed "Conformance L1" —
+// one of them the layer its own caller calls "Layer 4's final word". A report
+// that misnames what it ran is a report you cannot act on.
+func reportConformance(layer string, results []ConformanceResult, output string, err error) error {
 	if err != nil {
 		// It never answered. Its own output is the finding.
 		fmt.Printf("  [failed] the component does not run\n           %v\n\n", err)
@@ -1142,7 +1149,7 @@ func reportConformance(results []ConformanceResult, output string, err error) er
 		return fmt.Errorf("the component does not run: %w", err)
 	}
 	passed, failed, unrun := ConformanceSummary(results)
-	fmt.Printf("  Conformance L1: %d passed, %d failed, %d unrun\n", passed, failed, unrun)
+	fmt.Printf("  %s: %d passed, %d failed, %d unrun\n", layer, passed, failed, unrun)
 	for _, r := range results {
 		switch {
 		case r.Unrun:

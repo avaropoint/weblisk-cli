@@ -325,7 +325,7 @@ func TestAFailureMentioningWarningIsStillAFailure(t *testing.T) {
 // that it costs time and looks like diligence.
 func TestANonRunningComponentIsAFailure(t *testing.T) {
 	startupPanic := errors.New("exit status 2: panic: pattern \"/v1/x\" conflicts with \"GET /v1/{name}\"")
-	if err := reportConformance(nil, "goroutine 1 [running]:", startupPanic); err == nil {
+	if err := reportConformance("Conformance L1", nil, "goroutine 1 [running]:", startupPanic); err == nil {
 		t.Fatal("a component that does not run was reported as success")
 	}
 }
@@ -336,7 +336,7 @@ func TestAFailedConformanceTestIsAFailure(t *testing.T) {
 		{ID: "L1-01", Name: "health answers", Passed: true},
 		{ID: "L1-02", Name: "register verifies the signature", Passed: false, Detail: "accepted an invalid signature"},
 	}
-	if err := reportConformance(results, "", nil); err == nil {
+	if err := reportConformance("Conformance L1", results, "", nil); err == nil {
 		t.Fatal("a failed conformance test was reported as success")
 	}
 }
@@ -348,7 +348,22 @@ func TestAnUnrunTestIsNotAFailure(t *testing.T) {
 		{ID: "L1-01", Name: "health answers", Passed: true},
 		{ID: "L1-09", Name: "survives a restart", Unrun: true, Detail: "no harness yet"},
 	}
-	if err := reportConformance(results, "", nil); err != nil {
+	if err := reportConformance("Conformance L1", results, "", nil); err != nil {
 		t.Fatalf("an unrun test failed the build: %v", err)
+	}
+}
+
+// Each conformance layer names itself. The label was hardcoded "L1" and reused
+// for the interop results, so a run printed two sections both headed
+// "Conformance L1" — one of them the layer its own caller calls Layer 4.
+func TestEachConformanceLayerNamesItself(t *testing.T) {
+	results := []ConformanceResult{{ID: "t1", Name: "n", Passed: true, Evidence: "e"}}
+	for _, layer := range []string{"Conformance L1 (alone)", "Conformance L4 (against the orchestrator)"} {
+		out := captureStdout(t, func() {
+			_ = reportConformance(layer, results, "", nil)
+		})
+		if !strings.Contains(out, layer) {
+			t.Errorf("the report does not name the layer %q:\n%s", layer, out)
+		}
 	}
 }
