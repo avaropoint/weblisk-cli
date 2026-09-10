@@ -197,3 +197,39 @@ func TestARelocatedGoComponentKeepsItsLibraryDirectory(t *testing.T) {
 		t.Errorf("dirs = %v, want internal/gateway kept", l.Dirs)
 	}
 }
+
+// An unstated platform continues what the component was generated for.
+//
+// `weblisk agent create billing` defaults to go. Run against an agent that was
+// generated for cloudflare, the default rebuilt it as a Go binary — and because
+// the manifest names the cloudflare files, reconcile then DELETED them. A
+// platform migration is a real thing to want and not a thing to do by omission.
+func TestAnUnstatedPlatformContinuesWhatWasGenerated(t *testing.T) {
+	root := t.TempDir()
+	writeManifestOn(t, root, Agent("billing").Key(), "cloudflare", "agents/billing/wrangler.toml")
+
+	got, note := PlatformFor(root, Agent("billing"), "go", false)
+	if got != "cloudflare" {
+		t.Errorf("platform = %q, want cloudflare — the default silently migrated it", got)
+	}
+	if !strings.Contains(note, "--platform go") {
+		t.Errorf("the operator is not told how to move it: %q", note)
+	}
+
+	// Stated and different: it happens, and it says what it is about to do.
+	got, note = PlatformFor(root, Agent("billing"), "go", true)
+	if got != "go" {
+		t.Errorf("an explicit --platform go was not honoured: %q", got)
+	}
+	if !strings.Contains(note, "will be removed") {
+		t.Errorf("a migration does not say the old files go: %q", note)
+	}
+
+	// Stated and the same, or nothing recorded: nothing to say.
+	if _, note := PlatformFor(root, Agent("billing"), "cloudflare", true); note != "" {
+		t.Errorf("a rebuild on the same platform reported something: %q", note)
+	}
+	if got, note := PlatformFor(root, Agent("fresh"), "go", false); got != "go" || note != "" {
+		t.Errorf("a first generation reported something: %q %q", got, note)
+	}
+}

@@ -28,25 +28,30 @@ func Handle(args []string, root string) error {
 }
 
 func handleCreate(args []string, root string) error {
-	platform := "go"
+	platform, stated := "go", false
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--platform" && i+1 < len(args):
 			i++
-			platform = args[i]
+			platform, stated = args[i], true
 		case strings.HasPrefix(args[i], "--platform="):
-			platform = strings.SplitN(args[i], "=", 2)[1]
+			platform, stated = strings.SplitN(args[i], "=", 2)[1], true
 		}
 	}
 
-	if l, found := dispatch.Locate(root, dispatch.Gateway()); found {
-		fmt.Printf("  Rebuilding the gateway in %s/\n", l.Home())
-	}
+	platform, note := dispatch.PlatformFor(root, dispatch.Gateway(), platform, stated)
 
 	fmt.Println()
 	fmt.Println("  Weblisk Gateway Create")
 	fmt.Println()
-	fmt.Printf("  Platform:  %s\n", platform)
+	if l, found := dispatch.Locate(root, dispatch.Gateway()); found {
+		fmt.Printf("  Rebuilding: %s/\n", l.Home())
+	}
+	if note != "" {
+		fmt.Println(note)
+	} else {
+		fmt.Printf("  Platform:  %s\n", platform)
+	}
 	fmt.Printf("  AI Model:  %s\n", dispatch.DiscoverProvider())
 	fmt.Println()
 

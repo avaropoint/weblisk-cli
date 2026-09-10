@@ -273,3 +273,31 @@ func runIn(dir, name string, args ...string) error {
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
 }
+
+// PlatformFor settles which platform a component is generated for, and returns
+// a line to print when that is not simply what was asked for.
+//
+// `weblisk agent create billing` defaults to go. Run against an agent that was
+// generated for cloudflare, the default silently rebuilt it as a Go binary —
+// and because the manifest names the cloudflare files, reconcile then DELETED
+// them. A platform migration is a real thing to want and not a thing to do by
+// omission, so an unstated platform now continues whatever the component was
+// generated for, and a stated one that differs says what it is about to do.
+func PlatformFor(root string, c Component, requested string, stated bool) (platform, note string) {
+	m, ok := readManifest(manifestName(root, c.Key()))
+	was := ""
+	if ok {
+		was = m.Platform
+	}
+	switch {
+	case was == "" || was == requested:
+		return requested, ""
+	case !stated:
+		return was, fmt.Sprintf("  Platform:  %s — continuing what this %s was generated for.\n"+
+			"             Pass --platform %s to move it.", was, c.Kind, requested)
+	default:
+		return requested, fmt.Sprintf("  [warn] this %s was generated for %s and is being rebuilt for %s.\n"+
+			"         Its %s files are recorded in its manifest and will be removed.",
+			c.Kind, was, requested, was)
+	}
+}

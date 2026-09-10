@@ -34,15 +34,15 @@ func Handle(args []string, root string) error {
 }
 
 func handleCreate(name string, args []string, root string) error {
-	platform := "go"
+	platform, stated := "go", false
 	fromMarketplace := false
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--platform" && i+1 < len(args):
 			i++
-			platform = args[i]
+			platform, stated = args[i], true
 		case strings.HasPrefix(args[i], "--platform="):
-			platform = strings.SplitN(args[i], "=", 2)[1]
+			platform, stated = strings.SplitN(args[i], "=", 2)[1], true
 		case args[i] == "--from" && i+1 < len(args):
 			i++
 			if args[i] == "marketplace" {
@@ -53,15 +53,21 @@ func handleCreate(name string, args []string, root string) error {
 		}
 	}
 
-	if l, found := dispatch.Locate(root, dispatch.Domain(name)); found {
-		fmt.Printf("  Rebuilding the %s domain controller in %s/\n", name, l.Home())
-	}
+	c := dispatch.Domain(name)
+	platform, note := dispatch.PlatformFor(root, c, platform, stated)
 
 	fmt.Println()
 	fmt.Println("  Weblisk Domain Create")
 	fmt.Println()
 	fmt.Printf("  Domain:    %s\n", name)
-	fmt.Printf("  Platform:  %s\n", platform)
+	if l, found := dispatch.Locate(root, c); found {
+		fmt.Printf("  Rebuilding: %s/\n", l.Home())
+	}
+	if note != "" {
+		fmt.Println(note)
+	} else {
+		fmt.Printf("  Platform:  %s\n", platform)
+	}
 	if fromMarketplace {
 		fmt.Println("  Source:    marketplace purchase")
 	}

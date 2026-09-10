@@ -39,30 +39,36 @@ func Handle(args []string, root string) error {
 }
 
 func handleCreate(name string, args []string, root string) error {
-	platform := "go"
+	platform, stated := "go", false
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--platform" && i+1 < len(args):
 			i++
-			platform = args[i]
+			platform, stated = args[i], true
 		case strings.HasPrefix(args[i], "--platform="):
-			platform = strings.SplitN(args[i], "=", 2)[1]
+			platform, stated = strings.SplitN(args[i], "=", 2)[1], true
 		}
 	}
 
-	// Not a directory check. Where an agent lives is the platform blueprint's
-	// answer — cmd/<name> on go, agents/<name> on cloudflare — and a rebuild is
-	// a supported act anyway: the manifest keyed to this agent is what decides
-	// which of its files may be replaced.
-	if l, found := dispatch.Locate(root, dispatch.Agent(name)); found {
-		fmt.Printf("  Rebuilding the %s agent in %s/\n", name, l.Home())
-	}
+	c := dispatch.Agent(name)
+	platform, note := dispatch.PlatformFor(root, c, platform, stated)
 
 	fmt.Println()
 	fmt.Println("  Weblisk Agent Create")
 	fmt.Println()
 	fmt.Printf("  Agent:     %s\n", name)
-	fmt.Printf("  Platform:  %s\n", platform)
+	// Not a directory check. Where an agent lives is the platform blueprint's
+	// answer — cmd/<name> on go, agents/<name> on cloudflare — and a rebuild is
+	// a supported act anyway: the manifest keyed to this agent is what decides
+	// which of its files may be replaced.
+	if l, found := dispatch.Locate(root, c); found {
+		fmt.Printf("  Rebuilding: %s/\n", l.Home())
+	}
+	if note != "" {
+		fmt.Println(note)
+	} else {
+		fmt.Printf("  Platform:  %s\n", platform)
+	}
 	fmt.Printf("  AI Model:  %s\n", dispatch.DiscoverProvider())
 	fmt.Println()
 
