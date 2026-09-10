@@ -51,9 +51,12 @@ func Handle(args []string, root, version string) error {
 	switch args[0] {
 	case "search":
 		return handleSearch(args[1:])
-	case "describe":
+	// `info` is the spelling architecture/marketplace uses; `describe` is the
+	// one every other noun in this CLI uses. Both reach the same request rather
+	// than one of them erroring, because the capability was never the gap.
+	case "describe", "info":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: weblisk marketplace describe <id>")
+			return fmt.Errorf("usage: weblisk marketplace %s <id>", args[0])
 		}
 		return handleDescribe(args[1])
 	case "buy":
@@ -207,6 +210,8 @@ func handleList() error {
 
 	fmt.Println()
 	fmt.Println("  Marketplace Products")
+	fmt.Println("  Activated on this machine — this reads the local store and makes")
+	fmt.Println("  no request. Seller-side purchases are `marketplace dashboard`.")
 	fmt.Println()
 	for _, e := range store.Entries {
 		domain := e.Domain
@@ -528,12 +533,12 @@ func PrintHelp() {
 	fmt.Print(`
   Marketplace Commands:
     weblisk marketplace search <q>    Search the marketplace
-    weblisk marketplace describe <id> Full listing detail
+    weblisk marketplace describe <id> Full listing detail (also: info)
     weblisk marketplace buy <id>      Purchase a listing
       --accept-contract               Accept data contract without review
       --accept-pricing                Accept pricing without review
     weblisk marketplace install <id>  Download an installable asset
-    weblisk marketplace list          List active purchases and subscriptions
+    weblisk marketplace list          Products activated on THIS machine
     weblisk marketplace publish       Publish a capability or asset
       --type <t>                      Listing type: capability, installable
       --config <file>                 Path to listing config YAML

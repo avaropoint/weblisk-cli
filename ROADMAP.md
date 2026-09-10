@@ -251,17 +251,21 @@ Two were worse than the class:
 `TestNoCheckReachesAVerdictFromAnEmptyArtifact` walks every check with a probe
 assertion it applies to, and fails if a check is added without one.
 
-### 6. Marketplace: two rows are not what the spec asked for
+### 6. Marketplace: the two mismatched rows are closed
 
-Nearly every verb exists. Two do not match the spec:
+| Spec | Was | Now |
+|------|-----|-----|
+| `weblisk marketplace info <id>` | no `info` verb — it errored. The capability existed as `describe` | both spellings reach the same request; the usage line echoes whichever was typed |
+| `weblisk marketplace list` | reads the LOCAL activation store and makes no HTTP request, while the help called it "List active purchases and subscriptions" | the help says "Products activated on this machine", and the output says it read the local store and made no request |
 
-| Spec | Reality |
-|------|---------|
-| `weblisk marketplace info <id>` | no `info` verb — `weblisk marketplace info X` errors. The capability exists as `describe` |
-| `weblisk marketplace list` | reads the LOCAL activation store (`loadStore`, `marketplace.go:194`) and makes no HTTP request, while `main.go`'s help calls it "List active purchases and subscriptions" |
+`list` was NOT changed to call the hub. Nothing in this package requests a
+purchase list, so an endpoint for one would have been invented here rather than
+read from the specification — and the local store is what `activate` and
+`remove` write, so listing it is a real answer to a real question. Seller-side
+state is `marketplace dashboard`.
 
-Beyond those two, what is unestablished is that each verb round-trips against a
-real hub — which is conformance coverage, and blocked on item 4.
+What remains unestablished is that each verb round-trips against a real hub —
+which is conformance coverage, and blocked on item 4.
 
 ### 7. Fixed in passing, recorded so it is not re-broken
 

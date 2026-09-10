@@ -769,10 +769,10 @@ func printHelp() {
 
   Marketplace:
     marketplace search <q>  Search marketplace listings
-    marketplace describe <id> Full listing detail
+    marketplace describe <id> Full listing detail (also: info)
     marketplace buy <id>    Purchase a listing
     marketplace install <id> Download an installable asset
-    marketplace list        List active purchases and subscriptions
+    marketplace list        Products activated on this machine
     marketplace publish     Publish a capability or asset
     marketplace update <id> Update a published listing
     marketplace delist <id> Remove a listing
