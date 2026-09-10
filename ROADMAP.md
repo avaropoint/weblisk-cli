@@ -228,19 +228,28 @@ manifest the harness cannot yet mint; L1-06/07/08 need WLT token minting
 including expired and mis-signed ones; the L2 and L3 rows need a registered
 agent, a live event exchange, a workflow, or a peer hub.
 
-### 5. Structural checks that verify what they never read
+### 5. Structural checks that verify what they never read — swept
 
 `internal/dispatch/verify.go`'s "HTTP handlers do not panic" check returned
 `OutcomeVerified` — the strongest positive verdict — when every Go file failed
 to parse, or when the tenant contained no handler-shaped function at all. It
-searched, found no panic, and reported that as proof. Fixed 2026-09-09 to
-return `markInconclusive` in both cases, which the file already had a mechanism
-for.
+searched, found no panic, and reported that as proof. Fixed 2026-09-09.
 
-The class is worth a sweep rather than one fix: `d51d9ab` corrected the mirror
-image of this ("I cannot read this" reported as "this is wrong") for route
-resolution. Every other entry in `structuralChecks` should be read for the same
-question — *can this return a verdict when it examined nothing?*
+That entry asked for a sweep of the rest. **Seven more had it**, all the same
+shape: search an index, find nothing wrong, report that as proof. Fixed as a
+precondition rather than eight edits — `structuralCheck.reads` names what a
+check needs and reports what the context does not carry, and the runner turns
+that into `OutcomeInconclusive` before the check runs.
+
+Two were worse than the class:
+
+| Check | What it did |
+|---|---|
+| `registered codes carry the status the protocol assigns` | returned a PASS when the blueprints carried no error-code table, under a comment reading *"No table to check against: say so rather than pass"* |
+| `referenced endpoint is routed` | reported "no handler is registered" when NO route registration of any kind had been read. It already treated the readable-but-unresolvable case as inconclusive; the nothing-at-all case fell through to a refutation — the same failure `d51d9ab` records as having refuted twenty-one correct assertions in one run |
+
+`TestNoCheckReachesAVerdictFromAnEmptyArtifact` walks every check with a probe
+assertion it applies to, and fails if a check is added without one.
 
 ### 6. Marketplace: two rows are not what the spec asked for
 
