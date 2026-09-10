@@ -2,9 +2,6 @@ package gateway
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/avaropoint/weblisk-cli/internal/dispatch"
@@ -42,9 +39,8 @@ func handleCreate(args []string, root string) error {
 		}
 	}
 
-	gatewayDir := filepath.Join(root, "gateway")
-	if _, err := os.Stat(gatewayDir); err == nil {
-		return fmt.Errorf("gateway/ already exists\n  Remove it first to regenerate")
+	if l, found := dispatch.Locate(root, dispatch.Gateway()); found {
+		fmt.Printf("  Rebuilding the gateway in %s/\n", l.Home())
 	}
 
 	fmt.Println()
@@ -62,44 +58,7 @@ func handleCreate(args []string, root string) error {
 }
 
 func handleStart(args []string, root string) error {
-	gatewayDir := filepath.Join(root, "gateway")
-
-	if _, err := os.Stat(filepath.Join(gatewayDir, "go.mod")); err == nil {
-		return startGoGateway(gatewayDir, args)
-	}
-
-	if _, err := os.Stat(filepath.Join(gatewayDir, "wrangler.toml")); err == nil {
-		return startCFGateway(gatewayDir, args)
-	}
-
-	return fmt.Errorf("no gateway found in gateway/\n  Run 'weblisk gateway create' first")
-}
-
-func startGoGateway(dir string, args []string) error {
-	fmt.Println("  Building gateway...")
-	build := exec.Command("go", "build", "-o", "gateway", ".")
-	build.Dir = dir
-	build.Stdout = os.Stdout
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		return fmt.Errorf("build failed: %w", err)
-	}
-
-	cmdArgs := append([]string{filepath.Join(dir, "gateway")}, args...)
-	run := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	run.Stdout = os.Stdout
-	run.Stderr = os.Stderr
-	run.Stdin = os.Stdin
-	return run.Run()
-}
-
-func startCFGateway(dir string, args []string) error {
-	run := exec.Command("npx", append([]string{"wrangler", "dev"}, args...)...)
-	run.Dir = dir
-	run.Stdout = os.Stdout
-	run.Stderr = os.Stderr
-	run.Stdin = os.Stdin
-	return run.Run()
+	return dispatch.StartComponent(root, dispatch.Gateway(), args)
 }
 
 func PrintHelp() {

@@ -222,6 +222,12 @@ func GenerationRoots(target, platform string) []string {
 	return roots
 }
 
+// blueprintExists reports whether a blueprint resolves from any source.
+func blueprintExists(root, name string) bool {
+	_, err := LoadBlueprint(root, name)
+	return err == nil
+}
+
 // BlueprintGraph is the blueprint set one implementation is generated from,
 // together with where each copy came from.
 type BlueprintGraph struct {
@@ -272,9 +278,26 @@ func (g *BlueprintGraph) Joined() string {
 // building against a second, and grading against a third.
 //
 // One resolution, used by all three.
-func ResolveGraph(root, target, platform string) (*BlueprintGraph, error) {
+func ResolveGraph(root string, c Component, platform string) (*BlueprintGraph, error) {
 	srcs := ResolveSources(root)
-	bpMap, order, missing, err := ResolveDeclared(root, GenerationRoots(target, platform)...)
+	roots := GenerationRoots(c.Kind, platform)
+	// The blueprint for THIS instance, when the corpus carries one.
+	//
+	// architecture/agent.md says what every agent is; agents/alerting.md says
+	// what an alerting agent does. The single-shot generator passed the second
+	// as "Domain Knowledge" and the plan pipeline did not read it at all, so
+	// two agents were planned from byte-identical prompts and `agent create
+	// alerting` and `agent create cron` differed only in their directory.
+	//
+	// Added only when it resolves. A name the corpus has no blueprint for is
+	// not a gap to report — most names are not in it — and listing it as a
+	// missing declared requirement would say otherwise on every run.
+	if c.Name != "" {
+		if instance := DomainBlueprint(c.Name); blueprintExists(root, instance) {
+			roots = append(roots, instance)
+		}
+	}
+	bpMap, order, missing, err := ResolveDeclared(root, roots...)
 	if err != nil {
 		return nil, err
 	}

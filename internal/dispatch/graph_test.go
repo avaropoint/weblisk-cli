@@ -91,7 +91,7 @@ func TestChecklistCoversEverySentBlueprint(t *testing.T) {
 	// terminated on — the pipeline graded against a narrower specification than
 	// the one it built from.
 	root := graphFixture(t)
-	g, err := ResolveGraph(root, "orchestrator", "go")
+	g, err := ResolveGraph(root, Orchestrator(), "go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestStarterHubDoesNotInheritTheWholeFramework(t *testing.T) {
 	// requires list covers every component type it can describe; following it
 	// while building a starter hub pulls in agent, domain, gateway and lifecycle.
 	root := graphFixture(t)
-	g, err := ResolveGraph(root, "orchestrator", "go")
+	g, err := ResolveGraph(root, Orchestrator(), "go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestStarterHubDoesNotInheritTheWholeFramework(t *testing.T) {
 
 func TestGraphReportsWhichCopyItRead(t *testing.T) {
 	root := graphFixture(t)
-	g, err := ResolveGraph(root, "orchestrator", "go")
+	g, err := ResolveGraph(root, Orchestrator(), "go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestPlanAndPromptsShareOneCorpus(t *testing.T) {
 	// decides which files exist is made from a different specification than the
 	// files are generated from.
 	root := graphFixture(t)
-	g, err := ResolveGraph(root, "orchestrator", "go")
+	g, err := ResolveGraph(root, Orchestrator(), "go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestWhatIsDeclaredAndNotFollowedIsStated(t *testing.T) {
 	// pull the whole framework into a starter hub. Declining is right. Declining
 	// silently is the fault that cost this pipeline protocol/types.md.
 	root := graphFixture(t)
-	g, err := ResolveGraph(root, "orchestrator", "go")
+	g, err := ResolveGraph(root, Orchestrator(), "go")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,9 +2,6 @@ package agent
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/avaropoint/weblisk-cli/internal/dispatch"
@@ -53,9 +50,12 @@ func handleCreate(name string, args []string, root string) error {
 		}
 	}
 
-	agentDir := filepath.Join(root, "agents", name)
-	if _, err := os.Stat(agentDir); err == nil {
-		return fmt.Errorf("agents/%s/ already exists\n  Remove it first or choose a different name", name)
+	// Not a directory check. Where an agent lives is the platform blueprint's
+	// answer — cmd/<name> on go, agents/<name> on cloudflare — and a rebuild is
+	// a supported act anyway: the manifest keyed to this agent is what decides
+	// which of its files may be replaced.
+	if l, found := dispatch.Locate(root, dispatch.Agent(name)); found {
+		fmt.Printf("  Rebuilding the %s agent in %s/\n", name, l.Home())
 	}
 
 	fmt.Println()
@@ -74,45 +74,7 @@ func handleCreate(name string, args []string, root string) error {
 }
 
 func handleStart(name string, args []string, root string) error {
-	agentDir := filepath.Join(root, "agents", name)
-
-	if _, err := os.Stat(filepath.Join(agentDir, "go.mod")); err == nil {
-		return startGoAgent(agentDir, name, args)
-	}
-
-	if _, err := os.Stat(filepath.Join(agentDir, "wrangler.toml")); err == nil {
-		return startCFAgent(agentDir, args)
-	}
-
-	return fmt.Errorf("no agent found at agents/%s/\n  Run 'weblisk agent create %s' first", name, name)
-}
-
-func startGoAgent(dir, name string, args []string) error {
-	fmt.Printf("  Building %s agent...\n", name)
-	binaryName := "agent-" + name
-	build := exec.Command("go", "build", "-o", binaryName, ".")
-	build.Dir = dir
-	build.Stdout = os.Stdout
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		return fmt.Errorf("build failed: %w", err)
-	}
-
-	cmdArgs := append([]string{filepath.Join(dir, binaryName)}, args...)
-	run := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	run.Stdout = os.Stdout
-	run.Stderr = os.Stderr
-	run.Stdin = os.Stdin
-	return run.Run()
-}
-
-func startCFAgent(dir string, args []string) error {
-	run := exec.Command("npx", append([]string{"wrangler", "dev"}, args...)...)
-	run.Dir = dir
-	run.Stdout = os.Stdout
-	run.Stderr = os.Stderr
-	run.Stdin = os.Stdin
-	return run.Run()
+	return dispatch.StartComponent(root, dispatch.Agent(name), args)
 }
 
 func handleVerify(args []string) error {
@@ -150,15 +112,18 @@ func handleList(root string) error {
 	fmt.Println("  Agents")
 	fmt.Println()
 
-	agentsDir := filepath.Join(root, "agents")
-	entries, err := os.ReadDir(agentsDir)
-	if err == nil && len(entries) > 0 {
+	// Read from the manifests, not from a directory listing. The manifest names
+	// its owner exactly — "agent:billing" — while on go every agent shares cmd/
+	// with the orchestrator and the gateway, and a scan would have to guess.
+	agents := dispatch.GeneratedOfKind(root, "agent")
+	if len(agents) > 0 {
 		fmt.Println("  Generated agents:")
-		for _, e := range entries {
-			if e.IsDir() {
-				platform := detectPlatform(filepath.Join(agentsDir, e.Name()))
-				fmt.Printf("    %-15s  [%s]  agents/%s/\n", e.Name(), platform, e.Name())
+		for _, a := range agents {
+			home, platform := "not on disk", "-"
+			if l, found := dispatch.Locate(root, a); found {
+				home, platform = l.Home()+"/", l.Platform
 			}
+			fmt.Printf("    %-15s  [%s]  %s\n", a.Name, platform, home)
 		}
 		fmt.Println()
 	} else {
@@ -186,22 +151,6 @@ func handleList(root string) error {
 	fmt.Println("  Custom agents:    Any program implementing the Weblisk Agent Protocol")
 	fmt.Println()
 	return nil
-}
-
-func detectPlatform(dir string) string {
-	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-		return "go"
-	}
-	if _, err := os.Stat(filepath.Join(dir, "wrangler.toml")); err == nil {
-		return "cloudflare"
-	}
-	if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err == nil {
-		return "rust"
-	}
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
-		return "node"
-	}
-	return "unknown"
 }
 
 // Port deterministically assigns a port to an agent name.

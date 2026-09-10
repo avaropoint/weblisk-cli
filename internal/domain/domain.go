@@ -2,9 +2,6 @@ package domain
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/avaropoint/weblisk-cli/internal/dispatch"
@@ -56,9 +53,8 @@ func handleCreate(name string, args []string, root string) error {
 		}
 	}
 
-	domainDir := filepath.Join(root, "domains", name)
-	if _, err := os.Stat(domainDir); err == nil {
-		return fmt.Errorf("domains/%s/ already exists\n  Remove it first or choose a different name", name)
+	if l, found := dispatch.Locate(root, dispatch.Domain(name)); found {
+		fmt.Printf("  Rebuilding the %s domain controller in %s/\n", name, l.Home())
 	}
 
 	fmt.Println()
@@ -80,45 +76,7 @@ func handleCreate(name string, args []string, root string) error {
 }
 
 func handleStart(name string, args []string, root string) error {
-	domainDir := filepath.Join(root, "domains", name)
-
-	if _, err := os.Stat(filepath.Join(domainDir, "go.mod")); err == nil {
-		return startGoDomain(domainDir, name, args)
-	}
-
-	if _, err := os.Stat(filepath.Join(domainDir, "wrangler.toml")); err == nil {
-		return startCFDomain(domainDir, args)
-	}
-
-	return fmt.Errorf("no domain found at domains/%s/\n  Run 'weblisk domain create %s' first", name, name)
-}
-
-func startGoDomain(dir, name string, args []string) error {
-	fmt.Printf("  Building %s domain controller...\n", name)
-	binaryName := "domain-" + name
-	build := exec.Command("go", "build", "-o", binaryName, ".")
-	build.Dir = dir
-	build.Stdout = os.Stdout
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		return fmt.Errorf("build failed: %w", err)
-	}
-
-	cmdArgs := append([]string{filepath.Join(dir, binaryName)}, args...)
-	run := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	run.Stdout = os.Stdout
-	run.Stderr = os.Stderr
-	run.Stdin = os.Stdin
-	return run.Run()
-}
-
-func startCFDomain(dir string, args []string) error {
-	run := exec.Command("npx", append([]string{"wrangler", "dev"}, args...)...)
-	run.Dir = dir
-	run.Stdout = os.Stdout
-	run.Stderr = os.Stderr
-	run.Stdin = os.Stdin
-	return run.Run()
+	return dispatch.StartComponent(root, dispatch.Domain(name), args)
 }
 
 func PrintHelp() {
