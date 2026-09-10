@@ -102,3 +102,30 @@ func TestParseKeyIsKeysInverse(t *testing.T) {
 		}
 	}
 }
+
+// The node orchestrator's entry point sits outside its own directory, so a
+// marker looked for INSIDE that directory misses one that was generated
+// correctly.
+func TestTheNodeOrchestratorIsFoundAtItsEntryPoint(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "src/server.ts", "export {}\n")
+	write(t, root, "src/orchestrator/registry.ts", "export {}\n")
+
+	l, found := Locate(root, Orchestrator())
+	if !found {
+		t.Fatal("a generated node orchestrator could not be found")
+	}
+	if l.Platform != "node" {
+		t.Errorf("platform = %q, want node", l.Platform)
+	}
+}
+
+// The layout names one extension because a prompt must name one. Finding the
+// component afterwards should not depend on which was emitted.
+func TestANodeComponentEmittedAsJavaScriptIsStillFound(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "src/agents/billing/index.js", "module.exports = {}\n")
+	if _, found := Locate(root, Agent("billing")); !found {
+		t.Error("a node agent emitted as .js was not found")
+	}
+}

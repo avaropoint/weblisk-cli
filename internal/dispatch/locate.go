@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,27 +48,41 @@ func Locate(root string, c Component) (l Layout, found bool) {
 
 // platformMarker is the file that says a component here was built for this
 // platform, or "" if there is none.
+//
+// The split is Layout.Contained, which is the same distinction the plan rules
+// read: a platform that gives each component its own build manifest is
+// identified by that manifest, and one that does not is identified by the file
+// its process starts at.
+//
+// Not "a file inside Home()": the node orchestrator's entry point is
+// src/server.ts, which sits OUTSIDE src/orchestrator/, and looking only inside
+// the directory would have failed to find one that had been generated
+// correctly. That is the same shape as the ownership bug Layout.Owns carries a
+// note about.
 func platformMarker(root string, l Layout, platform string) string {
 	if len(l.Dirs) == 0 {
 		return ""
 	}
-	home := filepath.Join(root, filepath.FromSlash(l.Home()))
-	var names []string
-	switch platform {
-	case "cloudflare":
-		names = []string{"wrangler.toml"}
-	case "rust":
-		names = []string{"Cargo.toml"}
-	case "node":
-		names = []string{"index.ts", "index.js", "package.json"}
-	default:
-		// go. The entry point, because platforms/go.md gives a component no
-		// build manifest of its own — one module is rooted at the tenant.
-		names = []string{filepath.Base(l.Entry)}
-		home = filepath.Join(root, filepath.FromSlash(filepath.Dir(l.Entry)))
+	var rels []string
+	switch {
+	case platform == "cloudflare":
+		rels = []string{path.Join(l.Home(), "wrangler.toml")}
+	case platform == "rust":
+		rels = []string{path.Join(l.Home(), "Cargo.toml")}
+	case l.Entry != "":
+		// go and node. The entry point, because neither gives a component a
+		// build manifest of its own — one module, or one project, is rooted at
+		// the tenant.
+		rels = []string{l.Entry}
+		// A TypeScript project may have been emitted as JavaScript. The layout
+		// names one extension because a prompt has to name one; finding the
+		// component afterwards should not depend on which was chosen.
+		if ext := path.Ext(l.Entry); ext == ".ts" {
+			rels = append(rels, strings.TrimSuffix(l.Entry, ext)+".js")
+		}
 	}
-	for _, n := range names {
-		p := filepath.Join(home, n)
+	for _, rel := range rels {
+		p := filepath.Join(root, filepath.FromSlash(rel))
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
