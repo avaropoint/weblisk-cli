@@ -115,52 +115,61 @@ federation, and missing the two that create one:
 | `weblisk federation init` | absent |
 | `weblisk federation peer add <url>` | absent |
 
-### 3. One generation pipeline — done
+### 3. One generation pipeline — attempted, reverted, and now specified
 
-`agent create`, `domain create` and `gateway create` each made ONE
-`provider.Chat` call and split the reply on `// filename:` markers. That is the
-path that timed out with nothing to show: one call either returns every file or
-returns nothing, so a build that died at minute nine banked zero, while
-`server init` had a per-file cache that let it resume from the file it reached.
+`agent create`, `domain create` and `gateway create` still make ONE
+`provider.Chat` call and split the reply on `// filename:` markers. That is
+still the path that banks nothing when it fails.
 
-They now call `SupervisedComponentInit`, the same entry point as `server init`.
-The single-shot prompts and their three system prompts are deleted — 4,590
-bytes of a path nothing takes.
+They were switched to `SupervisedComponentInit` on 2026-09-09 and the switch
+was **reverted the same day**. It is worth writing down why, because the switch
+looked correct, compiled, passed the whole suite, and was wrong.
 
-It was smaller than it looked, because `ComponentInit` was already generic over
-the target and `GenerationRoots` already had `agent`, `domain` and `gateway`
-arms. Two things were genuinely missing.
+**What was assumed.** `ComponentInit` is generic over the target, and
+`GenerationRoots` has had `agent`, `domain` and `gateway` arms all along. So
+the only apparent gap was that a tenant has many agents while the plan cache,
+the tenant state, the prior records and the written manifest were all keyed by
+KIND — which is real, and destructive, since the manifest decides which files a
+rebuild may delete.
 
-**A name.** A tenant has one orchestrator and one gateway, and any number of
-agents and domains. Everything — the plan cache, the tenant-state read, the
-prior-records lookup, and the written manifest — was keyed by KIND. Two agents
-therefore shared all four, and the manifest is what `DecideRebuild` reads to
-decide which files the current plan no longer lists and may delete. So building
-`agents/billing` after `agents/shipping` could delete shipping's files.
-`Component{Kind, Name}` in `component.go` carries both, and the two are not
-interchangeable: kind chooses the blueprint and the assertions, key identifies
-this instance's state.
+**What was missed.** Setting `plan.Root` to `agents/<name>` introduces a second
+coordinate space, and the entire pipeline assumes there is only one:
 
-**A directory that is decided, not guessed.** `plan.Root` came from the model's
-JSON, and the plan prompt tells it root is `"."`. It is now set from
-`Component.Dir()` — `agents/billing`, `domains/x`, `gateway`, `.` — the same
-paths the old commands wrote to, for the same reason `Module` and `Target`
-already were: a fact two files must agree on should not be guessed twice.
+| Assumes `plan.Root == "."` | Consequence |
+|---|---|
+| `RunBuild(root, plan.Build)` runs at the TENANT root | the model, told "root is `.`", plans `go build ./cmd/agent`; the files are at `agents/<name>/cmd/agent`; the build fails naming a package no repair round can map to a planned file |
+| `plan.Module` is the tenant module, stated to every file prompt | `main.go` is told to import `<module>/internal/agent` while that package is written to `<module>/agents/<name>/internal/agent` |
+| manifests record Root-relative paths; `ReadTenantState` reads them as tenant-relative | the first agent's `cmd/agent/main.go` is reported as owning the second agent's identically-named file, so the second agent can never produce a plan that validates |
+| `Protected()` mixes the same two spaces | reconcile stops removing stale files — the duplicate-declaration failure that file exists to prevent |
+| `isSelfDir` builds `internal/<target>` | a component whose files are not at the root is shown its own previous output as somebody else's |
 
-`Plan.Owner` was split from `Plan.Target` in the process. They were briefly one
-field read for opposite purposes — validation wants the kind, so two agents
-both get `cmd/agent/main.go` rather than a path containing a colon; the
-manifest wants the instance. Setting one, validating, then overwriting it
-worked only until somebody reordered the two steps.
+`writtenManifest.Root` is already recorded and never read back, which is a good
+hint the design anticipated this and stopped short.
 
-**Found by running it:** `weblisk agent create` died with
-`planning: fork/exec .../claude: argument list too long`, before the model was
-reached. Claude Code was passed its prompt on argv while grok had been given
-`--prompt-file` for exactly this, measured, and claude has no such flag — it
-reads stdin instead. A planning prompt carries the target's whole blueprint
-corpus and a single argv entry is capped at 128 KiB whatever `ARG_MAX` says.
-This was not agent-specific; it is the size of the prompt, so it was reachable
-from `server init` too.
+**The real disagreement.** The deleted path put an agent at `agents/<name>` as a
+**self-contained module** — its prompt asked for "Build configuration (go.mod
+or package.json)", and `weblisk validate` still checks for `agents/<name>/go.mod`.
+The plan pipeline refuses to plan a `go.mod` when the tenant already declares a
+module. The two designs disagree about what an agent *is*, and that is the
+decision to make first:
+
+- **A component is a package set inside the tenant module.** Then `plan.Root`
+  stays `"."`, the plan's own file paths carry the `agents/<name>/` prefix,
+  imports are `<module>/agents/<name>/...`, and `weblisk validate` must stop
+  expecting a per-agent `go.mod`.
+- **A component is its own module.** Then the pipeline must learn a non-`"."`
+  root properly: run build and prepare in `root/plan.Root`, allow a planned
+  `go.mod` there, rebase manifest paths on the recorded `Root` when reading
+  another component's, and give `isSelfDir` the directory rather than the key.
+
+**Observed, not predicted.** A real `weblisk agent create billing` planned
+eighteen files at tenant-root paths and reasoned in its own plan about importing
+the tenant's `acme/internal/observability` — it believed it was part of the
+tenant module, because that is what it was told.
+
+**Kept from the attempt**, because they are correct independently: `Component`
+and its keying, `Plan.Owner` split from `Plan.Target`, and the guard that stops
+`weblisk component <kind> init` generating a named kind into `agents/`.
 
 ### 4. `test conformance` — honest now, still mostly unimplemented
 

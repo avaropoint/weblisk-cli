@@ -33,6 +33,19 @@ package dispatch
 //
 // Passing Key where Kind belongs asks for a blueprint named `agent:billing`.
 // Passing Kind where Key belongs is the bug above.
+//
+// # Status
+//
+// Orchestrator and Gateway are the only kinds ComponentInit is reached with
+// today. `agent create`, `domain create` and `gateway create` were switched to
+// it and REVERTED — see the note above AgentCreate for what that switch broke.
+// Agent and Domain therefore exist here ahead of their use, and the tests below
+// pin the two properties the eventual switch depends on: that instances key
+// their own state, and that a singleton's key is unchanged so no manifest
+// already on disk is orphaned.
+//
+// The keying itself is live and is not speculative: ComponentInit stores state
+// under Key() now, and Plan.Owner carries it into the written manifest.
 
 import (
 	"path"
