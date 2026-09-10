@@ -305,6 +305,16 @@ func evaluateOne(item ChecklistItem, ctx *CheckContext) ChecklistResult {
 		if !sc.applies(a) {
 			continue
 		}
+		// Before the check runs: does the context carry what it reads? A check
+		// that searches an empty index finds nothing wrong and would report that
+		// as proof. See structuralCheck.reads.
+		if sc.reads != nil {
+			if missing := sc.reads(a, ctx); missing != "" {
+				r.Check = sc.name
+				r.Outcome, r.Detail = OutcomeInconclusive, missing
+				return r
+			}
+		}
 		ok, detail, blame := sc.test(a, ctx)
 		r.Check = sc.name
 		switch {

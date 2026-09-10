@@ -758,6 +758,18 @@ type structuralCheck struct {
 	oneWay bool
 	// applies reports whether this check has anything to say about an assertion.
 	applies func(a assertion) bool
+	// reads reports what this check needs and did not get, or "" when the
+	// context carries its input.
+	//
+	// The class this exists for: a check that searches an EMPTY index finds
+	// nothing wrong and reports that as proof. "No quantum-vulnerable algorithm
+	// is imported" from an artifact whose imports were never parsed is not a
+	// pass; it is a failure to read. The panic check was fixed for exactly this
+	// on 2026-09-09 and the sweep it asked for found seven more.
+	//
+	// A verdict from an empty index is not merely weak — it is the one this
+	// tool exists to prevent. See OutcomeInconclusive.
+	reads func(a assertion, c *CheckContext) string
 	// test returns whether the condition holds, detail when it does not, and the
 	// generated files the failure is about.
 	//
@@ -867,6 +879,12 @@ var structuralChecks = []structuralCheck{
 		// set, which is what "constrained" claims.
 		name:   "enum values are declared",
 		oneWay: true,
+		reads: func(a assertion, c *CheckContext) string {
+			if len(c.Values) == 0 {
+				return "no named string-constant type was parsed, so no declared value could be found"
+			}
+			return ""
+		},
 		applies: func(a assertion) bool {
 			return strings.Contains(a.Lower, "enum") && strings.Contains(a.Lower, "constrained") && len(a.Values) > 1
 		},
@@ -899,6 +917,10 @@ var structuralChecks = []structuralCheck{
 		// Their ABSENCE settles it, and that is the common generation fault.
 		name:   "declared JSON keys exist on the named type",
 		oneWay: true,
+		// No reads guard: a.Types is drawn from the types the SOURCE declares,
+		// so an artifact that parsed to nothing makes applies false and this
+		// check is never reached. A type declared with no fields really is
+		// missing its keys, which is a refutation and not a blind one.
 		applies: func(a assertion) bool {
 			return len(a.Types) == 1 && len(a.Keys) > 0
 		},
@@ -928,6 +950,19 @@ var structuralChecks = []structuralCheck{
 		name:    "referenced endpoint is routed",
 		oneWay:  true,
 		applies: func(a assertion) bool { return len(a.Routes) > 0 },
+		reads: func(a assertion, c *CheckContext) string {
+			// No route AND no unreadable registration means this tool saw no mux
+			// registration of any kind. For a generated hub, "I did not read the
+			// route table" is the better claim than "this hub routes nothing" —
+			// the second refuted twenty-one correct assertions in one run, and
+			// the check below already treats the readable-but-unresolvable case
+			// that way.
+			if len(c.Routes) == 0 && len(c.UnroutableCalls) == 0 {
+				return "no route registration of any kind was found in the source, " +
+					"so whether an endpoint is routed could not be established"
+			}
+			return ""
+		},
 		test: func(a assertion, c *CheckContext) (bool, string, []string) {
 			var missing []string
 			for _, r := range a.Routes {
@@ -980,6 +1015,12 @@ var structuralChecks = []structuralCheck{
 		// the second.
 		name:   "error codes are centrally registered",
 		oneWay: true,
+		reads: func(a assertion, c *CheckContext) string {
+			if len(c.Codes) == 0 && len(c.Registered) == 0 {
+				return "no error-code literal and no code registry were found in the source"
+			}
+			return ""
+		},
 		applies: func(a assertion) bool {
 			return strings.Contains(a.Lower, "error code") &&
 				(strings.Contains(a.Lower, "registered centrally") ||
@@ -1012,14 +1053,23 @@ var structuralChecks = []structuralCheck{
 		// written into the tooling — a second copy is a second thing to keep
 		// right, and it would disagree with the blueprint the moment either moved.
 		name: "registered codes carry the status the protocol assigns",
+		reads: func(a assertion, c *CheckContext) string {
+			if len(c.CodeStatus) == 0 {
+				return "no registry entry carried an HTTP status, so none could be compared"
+			}
+			return ""
+		},
 		applies: func(a assertion) bool {
 			return strings.Contains(a.Lower, "error code") && strings.Contains(a.Lower, "http status")
 		},
 		test: func(a assertion, c *CheckContext) (bool, string, []string) {
 			want := specErrorTable(c.Spec)
 			if len(want) == 0 {
-				// No table to check against: say so rather than pass.
-				return true, "", nil
+				// No table to check against. The comment here said "say so
+				// rather than pass" and the code returned a pass — a verdict
+				// reached by comparing the artifact against nothing.
+				return false, markInconclusive(
+					"the blueprints carry no error-code table, so no status could be compared against one"), nil
 			}
 			var wrong []string
 			for code, spec := range want {
@@ -1046,6 +1096,12 @@ var structuralChecks = []structuralCheck{
 		// Settled, not one-way: go.mod is the complete statement of what a Go
 		// module depends on, and every import can be checked against it.
 		name: "dependency policy",
+		reads: func(a assertion, c *CheckContext) string {
+			if len(c.Files) == 0 {
+				return "no file was generated, so nothing declares or imports anything"
+			}
+			return ""
+		},
 		applies: func(a assertion) bool {
 			return strings.Contains(a.Lower, "no dependency beyond")
 		},
@@ -1110,6 +1166,12 @@ var structuralChecks = []structuralCheck{
 		// "No quantum-vulnerable algorithms (Ed25519, ECDSA, RSA) are used
 		// anywhere" — an absence claim over imports, which a parser settles.
 		name: "forbidden algorithms are absent",
+		reads: func(a assertion, c *CheckContext) string {
+			if len(c.Imports) == 0 {
+				return "no import was parsed from any file, so no algorithm could be seen"
+			}
+			return ""
+		},
 		applies: func(a assertion) bool {
 			return strings.Contains(a.Lower, "quantum-vulnerable") ||
 				strings.Contains(a.Lower, "no other signing algorithm")
@@ -1132,6 +1194,16 @@ var structuralChecks = []structuralCheck{
 		// "Protocol paths are all prefixed with `/v1`" — every routed path, which
 		// the AST gives exactly.
 		name: "every routed path is version-prefixed",
+		reads: func(a assertion, c *CheckContext) string {
+			if len(c.Paths) == 0 {
+				if n := len(c.UnroutableCalls); n > 0 {
+					return fmt.Sprintf("no routed path could be resolved, and %d registration(s) "+
+						"were unreadable to this tool", n)
+				}
+				return "no routed path was found, so there was no prefix to check"
+			}
+			return ""
+		},
 		applies: func(a assertion) bool {
 			return strings.Contains(a.Lower, "prefixed with") && strings.Contains(a.Text, "/v1")
 		},
@@ -1158,6 +1230,12 @@ var structuralChecks = []structuralCheck{
 		// the moment it specified a module with cmd/ and internal/. A check that
 		// encodes a layout outlives the layout.
 		name: "binaries are package main and shared code is not",
+		reads: func(a assertion, c *CheckContext) string {
+			if len(c.Files) == 0 {
+				return "no file was generated, so no package clause could be read"
+			}
+			return ""
+		},
 		applies: func(a assertion) bool {
 			return strings.Contains(a.Lower, "package main")
 		},
@@ -1247,6 +1325,12 @@ var structuralChecks = []structuralCheck{
 		// One-way: the constant existing does not prove it is enforced.
 		name:   "declared sizes appear as literals",
 		oneWay: true,
+		reads: func(a assertion, c *CheckContext) string {
+			if strings.TrimSpace(c.Source) == "" {
+				return "the source was empty, so no literal could appear in it"
+			}
+			return ""
+		},
 		applies: func(a assertion) bool {
 			return regexp.MustCompile(`\b(1952|3309)\b`).MatchString(a.Text)
 		},
