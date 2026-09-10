@@ -89,7 +89,12 @@ func Validate(root string, args []string) error {
 
 	// The tenant folder is the module root, so the orchestrator is validated
 	// where it lives rather than in a server/ subdirectory that no longer exists.
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+	//
+	// Gated on finding it, not on a go.mod existing. A tenant may hold agents
+	// and no orchestrator, and the presence of a module is not a claim that one
+	// was generated — asking go.mod reported every such tenant as an
+	// orchestrator whose files had gone missing.
+	if _, found := Locate(root, Orchestrator()); found {
 		p, f := validateComponent(root, Orchestrator())
 		passed += p
 		issues += f

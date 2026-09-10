@@ -165,6 +165,13 @@ func ValidatePlan(p *Plan, req *Requirements, st *TenantState, self Layout) []st
 	// goes: internal/protocol is shared code the first component legitimately
 	// plans, and a gateway's directory is this CLI's convention rather than
 	// anything a blueprint states. See Layout.Specified.
+	//
+	// A singleton whose kind the platform table does not name — gateway,
+	// content — is therefore not checked here. It is not unprotected: every
+	// component now goes through this pipeline, so every generated sibling has
+	// a manifest, and the ownership rule below rejects its files by name. That
+	// is the stronger source. A sibling with no manifest was never generated,
+	// so there is nothing there to replace.
 	if self.Specified() {
 		for _, f := range p.Files {
 			if self.Foreign(filepath.ToSlash(filepath.Clean(f.Path))) {
