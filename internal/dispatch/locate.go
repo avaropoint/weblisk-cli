@@ -241,13 +241,8 @@ func StartComponent(root string, c Component, args []string) error {
 	case "rust":
 		return runIn(root, "cargo", append([]string{"run", "-p", l.Name}, args...)...)
 	case "go":
-		// Built from the tenant root, which is where the module is. The binary
-		// is bin/<name>, the path platforms/go.md states for it.
-		self := c.Name
-		if self == "" {
-			self = c.Kind
-		}
-		bin := filepath.Join("bin", self)
+		// Built from the tenant root, which is where the module is.
+		bin := BinaryPath(c)
 		fmt.Printf("  Building %s...\n", c.Label())
 		if err := runIn(root, "go", "build", "-o", bin, "./"+filepath.Dir(l.Entry)); err != nil {
 			return fmt.Errorf("build failed: %w", err)
@@ -300,4 +295,47 @@ func PlatformFor(root string, c Component, requested string, stated bool) (platf
 			"         Its %s files are recorded in its manifest and will be removed.",
 			c.Kind, was, requested, was)
 	}
+}
+
+// BinaryPath is where a component's compiled binary goes, relative to the
+// tenant root.
+//
+// platforms/go.md states it: `bin/ # compiled binaries`, one per cmd/ entry.
+// Defined once because two places look for the same file — the thing that
+// builds it and the thing that runs it — and they disagreed: conformance
+// probed bin/orchestrator, ./orchestrator and server/orchestrator under a
+// comment saying it read the manifest, which it did not.
+func BinaryPath(c Component) string {
+	self := c.Name
+	if self == "" {
+		self = c.Kind
+	}
+	return filepath.Join("bin", self)
+}
+
+// FindBinary is the built binary for a component, or "" if there is none.
+//
+// The record first, then the layout, then the two paths older tenants used —
+// `weblisk server init` once built ./orchestrator and server/orchestrator, and
+// a tenant generated then still has one there.
+func FindBinary(root string, c Component) string {
+	candidates := []string{BinaryPath(c)}
+	if l, found := Locate(root, c); found && l.Entry != "" {
+		// A component found by its record may not be at the conventional
+		// place, and its binary takes the name of the directory it was built
+		// from — that is what `go build -o` was given.
+		candidates = append(candidates, filepath.Join("bin", path.Base(path.Dir(l.Entry))))
+	}
+	self := c.Name
+	if self == "" {
+		self = c.Kind
+	}
+	candidates = append(candidates, self, filepath.Join("server", self))
+	for _, rel := range candidates {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
 }

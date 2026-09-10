@@ -8,6 +8,8 @@ package dispatch
 // would have produced agents that build and cannot be started or listed.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -231,5 +233,64 @@ func TestAnUnstatedPlatformContinuesWhatWasGenerated(t *testing.T) {
 	}
 	if got, note := PlatformFor(root, Agent("fresh"), "go", false); got != "go" || note != "" {
 		t.Errorf("a first generation reported something: %q %q", got, note)
+	}
+}
+
+// The binary a component was built into is found by one rule, not three
+// guesses under a comment claiming a fourth.
+func TestTheBuiltBinaryIsFoundWhereItWasBuilt(t *testing.T) {
+	if got := BinaryPath(Orchestrator()); got != filepath.Join("bin", "orchestrator") {
+		t.Errorf("BinaryPath(orchestrator) = %q", got)
+	}
+	if got := BinaryPath(Agent("billing")); got != filepath.Join("bin", "billing") {
+		t.Errorf("BinaryPath(agent billing) = %q — the binary takes the instance's name", got)
+	}
+
+	root := t.TempDir()
+	if got := FindBinary(root, Orchestrator()); got != "" {
+		t.Errorf("an unbuilt orchestrator was reported at %q", got)
+	}
+	writeExec(t, root, "bin/orchestrator")
+	if FindBinary(root, Orchestrator()) == "" {
+		t.Error("a built orchestrator was not found at the path go.md states")
+	}
+
+	// A tenant generated before bin/ was the convention still resolves.
+	old := t.TempDir()
+	writeExec(t, old, "server/orchestrator")
+	if FindBinary(old, Orchestrator()) == "" {
+		t.Error("an orchestrator built by an older layout was not found")
+	}
+
+	// A directory named like the binary is not the binary.
+	shadow := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(shadow, "bin", "orchestrator"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindBinary(shadow, Orchestrator()); got != "" {
+		t.Errorf("a directory was reported as the binary: %q", got)
+	}
+}
+
+// A relocated component's binary is named for the directory it was built from,
+// which is what `go build -o` was given.
+func TestARelocatedComponentsBinaryIsFound(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "cmd/gw/main.go", "package main\n\nfunc main() {}\n")
+	writeManifestOn(t, root, Gateway().Key(), "go", "cmd/gw/main.go")
+	writeExec(t, root, "bin/gw")
+	if FindBinary(root, Gateway()) == "" {
+		t.Error("a gateway built from cmd/gw was not found at bin/gw")
+	}
+}
+
+func writeExec(t *testing.T, root, rel string) {
+	t.Helper()
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }

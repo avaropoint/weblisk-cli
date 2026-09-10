@@ -30,7 +30,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -78,7 +77,7 @@ func RunInterop(root, binary, component string, blueprints map[string]string,
 
 	caps := standardCapabilitiesFrom(blueprints)
 
-	orchBin := findOrchestratorBinary(root)
+	orchBin := FindBinary(root, Orchestrator())
 	if orchBin == "" {
 		var out []ConformanceResult
 		for _, t := range tests {
@@ -94,7 +93,7 @@ func RunInterop(root, binary, component string, blueprints map[string]string,
 		return nil, "", err
 	}
 	orchBase := fmt.Sprintf("http://127.0.0.1:%d", orchPort)
-	orchCmd, orchLog, err := startComponent(orchBin, root, orchPort, "")
+	orchCmd, orchLog, err := runComponentBinary(orchBin, root, orchPort, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -119,7 +118,7 @@ func RunInterop(root, binary, component string, blueprints map[string]string,
 		if t.standalone {
 			orchFor = "" // deliberately unconfigured
 		}
-		cmd, log, serr := startComponent(binary, root, port, orchFor)
+		cmd, log, serr := runComponentBinary(binary, root, port, orchFor)
 		if serr != nil {
 			return results, combined.String(), serr
 		}
@@ -393,22 +392,10 @@ func probeDirectory(orchBase string) ([]dirAgent, error) {
 
 // --- helpers ---------------------------------------------------------------
 
-// findOrchestratorBinary locates the tenant's orchestrator, by the manifest
-// that recorded it where possible.
-func findOrchestratorBinary(root string) string {
-	for _, p := range []string{
-		filepath.Join(root, "bin", "orchestrator"),
-		filepath.Join(root, "orchestrator"),
-		filepath.Join(root, "server", "orchestrator"),
-	} {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
-			return p
-		}
-	}
-	return ""
-}
-
-func startComponent(binary, root string, port int, orchURL string) (*exec.Cmd, *strings.Builder, error) {
+// runComponentBinary starts an already-built binary for a conformance run.
+// Named apart from StartComponent, which builds and runs a component the
+// operator asked for — one capital letter between two different acts.
+func runComponentBinary(binary, root string, port int, orchURL string) (*exec.Cmd, *strings.Builder, error) {
 	args := []string{"--port", fmt.Sprintf("%d", port)}
 	if orchURL != "" {
 		args = append(args, "--orch", orchURL)
