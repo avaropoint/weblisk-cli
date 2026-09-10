@@ -56,7 +56,11 @@ package dispatch
 // that refuses a go.mod refuses it only at the root, where the tenant's own
 // module is declared.
 
-import "path"
+import (
+	"fmt"
+	"path"
+	"strings"
+)
 
 // Layout is where one component's files live, and where its process starts.
 type Layout struct {
@@ -268,4 +272,63 @@ func (l Layout) Home() string {
 		return "."
 	}
 	return l.Dirs[0]
+}
+
+// Directories renders Dirs as prose, for a prompt.
+func (l Layout) Directories() string {
+	switch len(l.Dirs) {
+	case 0:
+		return "the tenant root"
+	case 1:
+		return l.Dirs[0] + "/"
+	}
+	out := ""
+	for i, d := range l.Dirs {
+		switch {
+		case i == 0:
+			out = d + "/"
+		case i == len(l.Dirs)-1:
+			out += " and " + d + "/"
+		default:
+			out += ", " + d + "/"
+		}
+	}
+	return out
+}
+
+// FormatLayout states where this component's files go, for the plan prompt.
+//
+// Stated on EVERY generation, including the first into an empty directory.
+// These sentences used to live inside FormatTenantState, which returns nothing
+// when there is no tenant yet — so the one generation with no other component to
+// collide with was also the only one told nothing about its own directories.
+//
+// The paths are the platform blueprint's, not a constant: `agent create billing`
+// was told its entry point was cmd/agent/main.go, planned exactly that, and the
+// ownership check then rejected the file the instruction had just demanded.
+func (l Layout) FormatLayout() string {
+	if len(l.Dirs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("--- WHERE YOUR FILES GO ---\n\n")
+	fmt.Fprintf(&b, "Every path in your plan is relative to the tenant root.\n")
+	fmt.Fprintf(&b, "Your component's own directories are %s.\n", l.Directories())
+	if l.Entry != "" {
+		fmt.Fprintf(&b, "Its entry point is %s, and your build command must build it.\n", l.Entry)
+	}
+	if len(l.Families) > 0 {
+		fmt.Fprintf(&b, "Other components live beside you under %s. None of their\n",
+			strings.Join(l.Families, "/, ")+"/")
+		b.WriteString("directories are yours to write — replacing one replaces a running component.\n")
+	}
+	if l.Contained {
+		fmt.Fprintf(&b, "This platform gives each component its own build manifest: plan yours\n"+
+			"inside %s/, not at the tenant root.\n", l.Dirs[0])
+	} else {
+		b.WriteString("Shared code — the protocol types and helpers every component imports —\n" +
+			"lives outside those directories, and you may plan it if it is not there yet.\n")
+	}
+	b.WriteString("\n")
+	return b.String()
 }

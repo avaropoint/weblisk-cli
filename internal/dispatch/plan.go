@@ -13,6 +13,7 @@ package dispatch
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -149,8 +150,40 @@ func ParsePlan(raw string) (*Plan, error) {
 //
 // Returns the gaps, so the model can be asked for a revision naming exactly what
 // is missing rather than being told to try again.
-func ValidatePlan(p *Plan, req *Requirements, st *TenantState) []string {
+func ValidatePlan(p *Plan, req *Requirements, st *TenantState, self Layout) []string {
 	var gaps []string
+
+	// Nobody else's directory, and nobody else's binary.
+	//
+	// Checked against the LAYOUT, outside the tenant-state block: a fresh tenant
+	// has no state and is exactly where the first component of a kind is
+	// generated. The rule this replaces compared a path against cmd/<KIND> —
+	// the name a SIBLING would have, not this one — so `agent create billing`
+	// planning cmd/agent/main.go passed a check written to catch it.
+	//
+	// Only inside a family, and only where the blueprint says where a kind
+	// goes: internal/protocol is shared code the first component legitimately
+	// plans, and a gateway's directory is this CLI's convention rather than
+	// anything a blueprint states. See Layout.Specified.
+	if self.Specified() {
+		for _, f := range p.Files {
+			if self.Foreign(filepath.ToSlash(filepath.Clean(f.Path))) {
+				gaps = append(gaps, fmt.Sprintf(
+					"%q is inside another component's directory — yours are %s",
+					f.Path, self.Directories()))
+			}
+		}
+		// The build command has to build THIS component. A plan whose files are
+		// all correct and whose build command names a sibling produces a green
+		// build of code this run never wrote.
+		for _, tok := range buildPaths(p.Build) {
+			if self.Foreign(tok) {
+				gaps = append(gaps, fmt.Sprintf(
+					"the build command builds %s, which is another component — build %s",
+					tok, path.Dir(self.Entry)))
+			}
+		}
+	}
 
 	// Ownership, enforced rather than requested.
 	//
@@ -166,9 +199,6 @@ func ValidatePlan(p *Plan, req *Requirements, st *TenantState) []string {
 			}
 			if clean == "go.mod" && st.Module != "" {
 				gaps = append(gaps, fmt.Sprintf("go.mod already exists and declares module %s — do not plan it", st.Module))
-			}
-			if dir := filepath.ToSlash(filepath.Dir(clean)); strings.HasPrefix(dir, "cmd/") && dir != "cmd/"+p.Target {
-				gaps = append(gaps, fmt.Sprintf("%q is in another component's command directory — your entry point is cmd/%s/main.go", f.Path, p.Target))
 			}
 		}
 	}
@@ -341,12 +371,21 @@ func (p *Plan) Order() []PlannedFile {
 }
 
 // planPrompt asks for a plan.
-func planPrompt(req *Requirements, target, platform, specs, platBP string, st *TenantState) string {
+func planPrompt(req *Requirements, self Layout, platform, specs, platBP string, st *TenantState) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Plan a %s implementation for the %s platform.\n\n", target, platform)
+	what := self.Kind
+	if self.Name != "" {
+		// Named, so two agents are not asked the same question. The blueprint
+		// for this one is in the corpus below under its own name.
+		what = self.Kind + " named " + self.Name
+	}
+	fmt.Fprintf(&b, "Plan a %s implementation for the %s platform.\n\n", what, platform)
+	// Where the files go, before what must be in them — the requirements are
+	// satisfied by files, and a file is only in the right place once.
+	b.WriteString(self.FormatLayout())
 	// Before the requirements, because it changes what satisfying them means: a
 	// type the tenant already declares is satisfied by importing it.
-	if ts := st.FormatTenantState(target); ts != "" {
+	if ts := st.FormatTenantState(); ts != "" {
 		b.WriteString(ts)
 	}
 	b.WriteString("REQUIREMENTS — every one of these must be placed in your plan.\n\n")
@@ -402,7 +441,7 @@ func planPrompt(req *Requirements, target, platform, specs, platBP string, st *T
 
 // MakePlan asks the model for a structure and validates it, re-planning with the
 // specific gaps when it does not satisfy the blueprints.
-func MakePlan(provider Provider, req *Requirements, target, platform, specs, platBP string,
+func MakePlan(provider Provider, req *Requirements, self Layout, platform, specs, platBP string,
 	st *TenantState, onProgress ProgressFunc) (*Plan, error) {
 	if onProgress == nil {
 		onProgress = func(Progress) {}
@@ -419,7 +458,7 @@ func MakePlan(provider Provider, req *Requirements, target, platform, specs, pla
 		}
 		onProgress(Progress{Path: "plan", Status: status, Attempt: attempt, Detail: detail})
 
-		prompt := planPrompt(req, target, platform, specs, platBP, st)
+		prompt := planPrompt(req, self, platform, specs, platBP, st)
 		if len(lastGaps) > 0 {
 			prompt = "Your previous plan was rejected:\n  - " + strings.Join(lastGaps, "\n  - ") +
 				"\n\nProduce a corrected plan.\n\n" + prompt
@@ -442,8 +481,8 @@ func MakePlan(provider Provider, req *Requirements, target, platform, specs, pla
 		// cmd/orchestrator/main.go. The model complied, and the ownership check
 		// then rejected the file the same guard had just demanded. A guard reading
 		// a value the thing it guards supplied can enforce the bug.
-		plan.Target = target
-		if gaps := ValidatePlan(plan, req, st); len(gaps) > 0 {
+		plan.Target = self.Kind
+		if gaps := ValidatePlan(plan, req, st, self); len(gaps) > 0 {
 			lastGaps = gaps
 			continue
 		}
@@ -451,6 +490,26 @@ func MakePlan(provider Provider, req *Requirements, target, platform, specs, pla
 	}
 	return nil, fmt.Errorf("no valid plan after %d attempts; last gaps: %s",
 		maxFileAttempts, strings.Join(lastGaps, "; "))
+}
+
+// buildPaths are the path-shaped arguments in a build command.
+//
+// Used to ask whether a build command names a sibling's directory. Deliberately
+// loose about what a path is and strict about what counts as foreign: a token
+// that is not under a component family answers false, so `npm run build` and
+// `cargo build --workspace` produce no findings at all.
+func buildPaths(cmd string) []string {
+	var out []string
+	for _, tok := range strings.FieldsFunc(cmd, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '"' || r == '\'' || r == '=' ||
+			r == ';' || r == '&' || r == '|'
+	}) {
+		tok = strings.TrimSuffix(strings.TrimPrefix(tok, "./"), "/...")
+		if tok = strings.TrimSuffix(tok, "/"); strings.Contains(tok, "/") {
+			out = append(out, path.Clean(tok))
+		}
+	}
+	return out
 }
 
 // planPackage is the package a planned file will belong to, from its directory.

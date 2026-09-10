@@ -173,7 +173,7 @@ func (c *GenerationCache) Prune(live map[string]bool) (int, error) {
 // merely wasteful: a model that plans ten files where it planned twelve
 // invalidates every per-file cache entry, so the file cache never hits and the
 // whole run regenerates. Caching the plan is what makes caching the files work.
-func planKey(req *Requirements, target, platform, platBP, systemPrompt string) string {
+func planKey(req *Requirements, target, platform, platBP, systemPrompt, layout string) string {
 	h := sha256.New()
 	h.Write([]byte(target))
 	h.Write([]byte(platform))
@@ -206,6 +206,10 @@ func planKey(req *Requirements, target, platform, platBP, systemPrompt string) s
 	}
 	h.Write([]byte(platBP))
 	h.Write([]byte(systemPrompt))
+	// Where the files go is now told to the planner, so it must reach the key
+	// too — see the note above on the forty-three files served against a module
+	// path that no longer existed.
+	h.Write([]byte(layout))
 	return "plan-" + hex.EncodeToString(h.Sum(nil))
 }
 

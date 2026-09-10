@@ -74,6 +74,10 @@ func ComponentInit(root string, c Component, platform string) error {
 	// instance's plan, manifest and records. See component.go on why keying
 	// both by kind alone let one agent's rebuild delete another's files.
 	target, key := c.Kind, c.Key()
+	// And WHERE its files go, read from the platform blueprint rather than
+	// assumed. See layout.go: this is what the first switch to this pipeline
+	// was missing, and it is why the switch was reverted.
+	self := LayoutOf(c, platform)
 	provider, err := RequireProvider()
 	if err != nil {
 		return err
@@ -170,16 +174,16 @@ func ComponentInit(root string, c Component, platform string) error {
 		// model re-plans every run — ten files where it planned twelve — and every
 		// per-file cache entry is invalidated by a plan entry nobody changed.
 		// What this tenant already contains, before anything is planned into it.
-		st := ReadTenantState(root, key)
+		st := ReadTenantState(root, key, self)
 
 		cache := NewGenerationCache(root)
-		pk := planKey(req, key, platform, platBP, planSystemPrompt+st.Shape())
+		pk := planKey(req, key, platform, platBP, planSystemPrompt+st.Shape(), self.FormatLayout())
 		plan := cache.GetPlan(pk)
 		if plan != nil {
 			fmt.Println("  Plan reused — requirements unchanged since the last run")
 		} else {
 			var perr error
-			plan, perr = MakePlan(provider, req, target, platform, specs, platBP, st, printProgress)
+			plan, perr = MakePlan(provider, req, self, platform, specs, platBP, st, printProgress)
 			if perr != nil {
 				return perr
 			}

@@ -68,7 +68,7 @@ func goodPlan() *Plan {
 }
 
 func TestAValidPlanPasses(t *testing.T) {
-	if gaps := ValidatePlan(goodPlan(), minimalRequirements(), nil); len(gaps) > 0 {
+	if gaps := ValidatePlan(goodPlan(), minimalRequirements(), nil, Layout{}); len(gaps) > 0 {
 		t.Errorf("a complete plan was rejected: %v", gaps)
 	}
 }
@@ -78,7 +78,7 @@ func TestAMissingTypeIsNamed(t *testing.T) {
 	// a guess.
 	p := goodPlan()
 	p.Files[0].Declares = []string{"AgentManifest"}
-	gaps := ValidatePlan(p, minimalRequirements(), nil)
+	gaps := ValidatePlan(p, minimalRequirements(), nil, Layout{})
 	if len(gaps) == 0 {
 		t.Fatal("a plan omitting a required type was accepted")
 	}
@@ -90,7 +90,7 @@ func TestAMissingTypeIsNamed(t *testing.T) {
 func TestAMissingEndpointIsNamed(t *testing.T) {
 	p := goodPlan()
 	p.Files[1].Serves = []string{"GET /v1/health"}
-	gaps := ValidatePlan(p, minimalRequirements(), nil)
+	gaps := ValidatePlan(p, minimalRequirements(), nil, Layout{})
 	if !strings.Contains(strings.Join(gaps, " "), "/v1/register") {
 		t.Errorf("the gap does not name the unserved endpoint: %v", gaps)
 	}
@@ -102,7 +102,7 @@ func TestAMissingEndpointIsNamed(t *testing.T) {
 func TestASymbolInTwoFilesIsRejectedBeforeGenerating(t *testing.T) {
 	p := goodPlan()
 	p.Files[1].Declares = []string{"AgentManifest"}
-	gaps := ValidatePlan(p, minimalRequirements(), nil)
+	gaps := ValidatePlan(p, minimalRequirements(), nil, Layout{})
 	if !strings.Contains(strings.Join(gaps, " "), "more than one file") {
 		t.Errorf("a duplicate declaration was not caught in the plan: %v", gaps)
 	}
@@ -135,7 +135,7 @@ func TestOrderPutsDependenciesFirst(t *testing.T) {
 func TestACycleIsRejected(t *testing.T) {
 	p := goodPlan()
 	p.Files[0].DependsOn = []string{"orchestrator.go"}
-	gaps := ValidatePlan(p, minimalRequirements(), nil)
+	gaps := ValidatePlan(p, minimalRequirements(), nil, Layout{})
 	if !strings.Contains(strings.Join(gaps, " "), "cycle") {
 		t.Errorf("a dependency cycle was accepted: %v", gaps)
 	}
@@ -144,7 +144,7 @@ func TestACycleIsRejected(t *testing.T) {
 func TestAnEscapingPathIsRejectedInThePlan(t *testing.T) {
 	p := goodPlan()
 	p.Files[0].Path = "../../etc/passwd"
-	gaps := ValidatePlan(p, minimalRequirements(), nil)
+	gaps := ValidatePlan(p, minimalRequirements(), nil, Layout{})
 	if len(gaps) == 0 {
 		t.Error("a traversing path was accepted in a plan")
 	}
@@ -222,7 +222,7 @@ func TestPlanCannotClaimAnotherComponentsFiles(t *testing.T) {
 		PlannedFile{Path: "internal/protocol/types.go", Purpose: "wire types"},
 	)
 
-	gaps := ValidatePlan(p, minimalRequirements(), st)
+	gaps := ValidatePlan(p, minimalRequirements(), st, Layout{})
 	joined := strings.Join(gaps, "\n")
 	for _, want := range []string{
 		"cmd/orchestrator/main.go",
@@ -239,7 +239,7 @@ func TestPlanCannotClaimAnotherComponentsFiles(t *testing.T) {
 func TestPlanOwnershipGuardIsQuietOnAnEmptyTenant(t *testing.T) {
 	p := goodPlan()
 	p.Target = "orchestrator"
-	if gaps := ValidatePlan(p, minimalRequirements(), &TenantState{Owned: map[string]string{}}); len(gaps) > 0 {
+	if gaps := ValidatePlan(p, minimalRequirements(), &TenantState{Owned: map[string]string{}}, Layout{}); len(gaps) > 0 {
 		t.Errorf("ownership guard fired on an empty tenant: %v", gaps)
 	}
 }
@@ -266,7 +266,7 @@ func TestPlanTargetComesFromTheCallerNotTheModel(t *testing.T) {
     }`}}
 
 	st := &TenantState{Module: "hubgen", Owned: map[string]string{"cmd/orchestrator/main.go": "orchestrator"}}
-	plan, err := MakePlan(provider, minimalRequirements(), "content", "go", "SPEC", "PLAT", st, nil)
+	plan, err := MakePlan(provider, minimalRequirements(), LayoutOf(Component{Kind: "content"}, "go"), "go", "SPEC", "PLAT", st, nil)
 	if err != nil {
 		t.Fatalf("a plan writing its own cmd/content/main.go was rejected: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestAPlanMustDeclareTheOperationsItWasGiven(t *testing.T) {
 		{Path: "internal/orchestrator/registry.go", Purpose: "the registry",
 			Declares: []string{"Registry", "(*Registry).Get", "(*Registry).Put", "(*Registry).List"}},
 	}}
-	gaps := ValidatePlan(renamed, req, nil)
+	gaps := ValidatePlan(renamed, req, nil, Layout{})
 	if !anyContains(gaps, "GetAgent") {
 		t.Fatalf("a plan that renamed GetAgent to Get was accepted: %v", gaps)
 	}
@@ -299,7 +299,7 @@ func TestAPlanMustDeclareTheOperationsItWasGiven(t *testing.T) {
 			Declares: []string{"Registry", "(*Registry).GetAgent", "(*Registry).PutAgent",
 				"(*Registry).ListAgents"}},
 	}}
-	for _, g := range ValidatePlan(correct, req, nil) {
+	for _, g := range ValidatePlan(correct, req, nil, Layout{}) {
 		if strings.Contains(g, "architecture/storage declares") {
 			t.Fatalf("a correctly named plan was rejected: %s", g)
 		}

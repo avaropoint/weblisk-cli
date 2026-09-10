@@ -74,7 +74,14 @@ type TenantPackage struct {
 //
 // Excluding self matters: a rebuild of the orchestrator must not be told the
 // orchestrator's own files are somebody else's to leave alone.
-func ReadTenantState(root, selfTarget string) *TenantState {
+//
+// selfKey identifies the instance whose manifest is skipped; self is where that
+// instance's files LIVE. The two were one string, and for an agent the string
+// read "agent:billing" — from which the directory `internal/agent:billing` was
+// derived, matching nothing, so a re-run of `agent create billing` was offered
+// its own previous package as somebody's to import and never told the names it
+// had just declared.
+func ReadTenantState(root, selfKey string, self Layout) *TenantState {
 	st := &TenantState{Owned: map[string]string{}}
 
 	if b, err := os.ReadFile(filepath.Join(root, "go.mod")); err == nil {
@@ -93,7 +100,7 @@ func ReadTenantState(root, selfTarget string) *TenantState {
 			continue
 		}
 		owner, files := readManifestOwner(filepath.Join(root, cacheDirName, e.Name()))
-		if owner == "" || owner == selfTarget {
+		if owner == "" || owner == selfKey {
 			continue
 		}
 		for _, f := range files {
@@ -101,41 +108,29 @@ func ReadTenantState(root, selfTarget string) *TenantState {
 		}
 	}
 
-	st.Packages, st.SelfNames = readTenantPackages(root, st.Owned, selfOwned(root, selfTarget), selfTarget)
+	st.Packages, st.SelfNames = readTenantPackages(root, st.Owned, selfOwned(root, selfKey), self)
 	return st
 }
 
 // selfOwned is the set of paths the component being built wrote last time.
-func selfOwned(root, selfTarget string) map[string]bool {
+func selfOwned(root, selfKey string) map[string]bool {
 	out := map[string]bool{}
-	if selfTarget == "" {
+	if selfKey == "" {
 		return out
 	}
-	_, files := readManifestOwner(manifestName(root, selfTarget))
+	_, files := readManifestOwner(manifestName(root, selfKey))
 	for _, f := range files {
 		out[filepath.Clean(f)] = true
 	}
 	return out
 }
 
-// isSelfDir reports whether a directory belongs to the component being built.
-//
-// Checked by path as well as by manifest, because a first build has no manifest
-// and a run interrupted before RecordWritten has a stale one.
-func isSelfDir(dir, selfTarget string) bool {
-	if selfTarget == "" {
-		return false
-	}
-	for _, own := range []string{"internal/" + selfTarget, "cmd/" + selfTarget} {
-		if dir == own || strings.HasPrefix(dir, own+"/") {
-			return true
-		}
-	}
-	return false
-}
-
 // readTenantPackages lists the Go packages present and what each exports.
-func readTenantPackages(root string, owned map[string]string, mine map[string]bool, selfTarget string) ([]TenantPackage, []string) {
+//
+// A directory is the component's own when the LAYOUT says so — checked by path
+// as well as by manifest, because a first build has no manifest and a run
+// interrupted before RecordWritten has a stale one.
+func readTenantPackages(root string, owned map[string]string, mine map[string]bool, self Layout) ([]TenantPackage, []string) {
 	byDir := map[string]*TenantPackage{}
 	var selfNames []string
 	fset := token.NewFileSet()
@@ -164,7 +159,7 @@ func readTenantPackages(root string, owned map[string]string, mine map[string]bo
 			return nil // unparseable is not this function's problem to report
 		}
 		dir := filepath.ToSlash(filepath.Dir(rel))
-		if mine[filepath.Clean(rel)] || isSelfDir(dir, selfTarget) {
+		if mine[filepath.Clean(rel)] || self.Owns(dir) {
 			// This component's own output, which this run replaces. Not a
 			// package to import — but its names are worth keeping.
 			selfNames = append(selfNames, exportedDecls(f)...)
@@ -249,7 +244,12 @@ func dedupeStrings(in []string) []string {
 }
 
 // FormatTenantState renders what the tenant already has, for the plan prompt.
-func (st *TenantState) FormatTenantState(target string) string {
+//
+// What the tenant HAS. Where this component GOES is FormatLayout's, and the two
+// were one block: the directories were stated inside this one, so a component
+// generated into an empty directory — where this returns "" — was told nothing
+// about where its own files belonged.
+func (st *TenantState) FormatTenantState() string {
 	if st == nil || (st.Module == "" && len(st.Packages) == 0) {
 		return ""
 	}
@@ -277,9 +277,6 @@ func (st *TenantState) FormatTenantState(target string) string {
 		}
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "Your component's own directories are internal/%s/ and cmd/%s/.\n", target, target)
-	fmt.Fprintf(&b, "Its entry point is cmd/%s/main.go. Another component's cmd/ directory is\n", target)
-	b.WriteString("never yours to write — replacing it replaces a component that is running.\n\n")
 	if len(st.SelfNames) > 0 {
 		// Framed as a naming baseline, NOT as code to leave alone. The
 		// distinction is the whole point: this component's previous output is

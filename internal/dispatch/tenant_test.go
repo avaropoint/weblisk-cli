@@ -37,7 +37,7 @@ func TestAComponentIsNotShownItsOwnPreviousOutput(t *testing.T) {
 	os.Rename(filepath.Join(root, cacheDirName, "written-aaaaaaaaaaaa.json"),
 		manifestName(root, "orchestrator"))
 
-	st := ReadTenantState(root, "content")
+	st := ReadTenantState(root, "content", LayoutOf(Component{Kind: "content"}, "go"))
 
 	if st.Module != "hubgen" {
 		t.Errorf("module = %q, want hubgen", st.Module)
@@ -179,7 +179,7 @@ func NewRegistry() *Registry { return nil }
 type Agent struct{}
 `)
 
-	st := ReadTenantState(root, "orchestrator")
+	st := ReadTenantState(root, "orchestrator", LayoutOf(Orchestrator(), "go"))
 
 	if !containsStr(st.SelfNames, "NewRegistry") || !containsStr(st.SelfNames, "Registry") {
 		t.Fatalf("the component was not shown its own previous names: %v", st.SelfNames)
@@ -190,7 +190,7 @@ type Agent struct{}
 		}
 	}
 
-	prompt := st.FormatTenantState("orchestrator")
+	prompt := st.FormatTenantState()
 	if !strings.Contains(prompt, "KEEP a name where the") {
 		t.Fatal("the planner is not told to keep names it was not asked to change")
 	}

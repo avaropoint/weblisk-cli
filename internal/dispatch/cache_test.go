@@ -130,7 +130,7 @@ func TestRenamingADeclaredNameReDerivesThePlan(t *testing.T) {
 		},
 		Operations: []string{"GetAgent", "PutAgent"},
 	}
-	key := func(r *Requirements) string { return planKey(r, "orchestrator", "go", "plat", "sys") }
+	key := func(r *Requirements) string { return planKey(r, "orchestrator", "go", "plat", "sys", "layout") }
 	original := key(base)
 
 	renamedOp := *base
