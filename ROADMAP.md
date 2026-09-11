@@ -125,90 +125,105 @@ So an operator using this CLI can join a federation somebody else starts and
 cannot start one. Whether they should be able to, and what the verb is called,
 belongs in `architecture/cli.md`. It is not this repo's to invent.
 
-### 3. One generation pipeline — attempted, reverted, and now specified
+### 3. One generation pipeline — done and verified
 
-`agent create`, `domain create` and `gateway create` still make ONE
-`provider.Chat` call and split the reply on `// filename:` markers. That is
-still the path that banks nothing when it fails.
+`agent create`, `domain create` and `gateway create` call
+`SupervisedComponentInit`. The single-shot path that made one `provider.Chat`
+call and split the reply on `// filename:` markers is deleted, with its three
+system prompts and three prompt builders.
 
-They were switched to `SupervisedComponentInit` on 2026-09-09 and the switch
-was **reverted the same day**. It is worth writing down why, because the switch
-looked correct, compiled, passed the whole suite, and was wrong.
+**Verified by a real generation on 2026-09-11**, which is the standard this
+entry set after the first attempt "compiled, passed the whole suite, and was
+wrong":
 
-**What was assumed.** `ComponentInit` is generic over the target, and
-`GenerationRoots` has had `agent`, `domain` and `gateway` arms all along. So
-the only apparent gap was that a tenant has many agents while the plan cache,
-the tenant state, the prior records and the written manifest were all keyed by
-KIND — which is real, and destructive, since the manifest decides which files a
-rebuild may delete.
+```
+  Plan accepted: 24 files in ./
+    cmd/alerting/main.go — The binary...
+    internal/agents/alerting/*.go ...
+    internal/protocol/, internal/identity/, internal/observability/, internal/agent/
+  [ok] Generated 24 files in ./ (11m13s)
+  [ok] builds with "go build -o bin/alerting ./cmd/alerting"
 
-**What was missed.** Setting `plan.Root` to `agents/<name>` introduces a second
-coordinate space, and the entire pipeline assumes there is only one:
+$ weblisk agent list
+    alerting         [go]  cmd/alerting/
+$ weblisk validate
+  [ok] agent alerting: platform=go, in cmd/alerting/
+  [ok] agent alerting: protocol markers present
+$ weblisk agent start alerting
+  Building agent alerting...
+  {"ts":"...","level":"warn","msg":"private key is unencrypted — development only","component":"alerting"}
+```
 
-| Assumes `plan.Root == "."` | Consequence |
-|---|---|
-| `RunBuild(root, plan.Build)` runs at the TENANT root | the model, told "root is `.`", plans `go build ./cmd/agent`; the files are at `agents/<name>/cmd/agent`; the build fails naming a package no repair round can map to a planned file |
-| `plan.Module` is the tenant module, stated to every file prompt | `main.go` is told to import `<module>/internal/agent` while that package is written to `<module>/agents/<name>/internal/agent` |
-| manifests record Root-relative paths; `ReadTenantState` reads them as tenant-relative | the first agent's `cmd/agent/main.go` is reported as owning the second agent's identically-named file, so the second agent can never produce a plan that validates |
-| `Protected()` mixes the same two spaces | reconcile stops removing stale files — the duplicate-declaration failure that file exists to prevent |
-| `isSelfDir` builds `internal/<target>` | a component whose files are not at the root is shown its own previous output as somebody else's |
+`go build ./...` run independently in the tenant also passes. The plan named
+`cmd/alerting/main.go`, **not** `cmd/agent/main.go` — the exact failure that
+caused the revert — and `internal/agent/` (the framework) was correctly
+permitted alongside `internal/agents/alerting/` (this instance).
 
-`writtenManifest.Root` is already recorded and never read back, which is a good
-hint the design anticipated this and stopped short.
+Conformance then found two real faults in the generated agent, which is the
+layer doing its job rather than a pipeline failure: `L1-01 Health Check` and
+`L1-07 Protected Endpoints Require Auth` both answered **405**, a
+method-mismatch between what the agent routes and what the harness requests.
+Recorded in item 4. L4 correctly reported 4 tests unrun — this tenant has no
+orchestrator — and said out loud that unrun is NOT a pass.
 
-**The real disagreement — and it is not a decision.** This entry previously
-said the pipeline had to choose between "a component is a package set inside
-the tenant module" and "a component is its own module", and that the choice
-came first. That was wrong. The platform blueprints already answer it, and
-they do not all give the same answer:
+**Why the first attempt failed, kept because the lesson is the expensive part.**
+It set `plan.Root` to the component's directory, `agents/<name>`, and the whole
+pipeline assumes `plan.Root` is `"."` — the build runs at the tenant root, the
+module path has no `agents/<name>` segment, and manifests record tenant-root
+paths. A real run planned eighteen files at tenant-root paths and reasoned
+about importing the tenant's own packages, because it had been told it was part
+of the tenant module.
+
+Underneath sat what looked like a decision — is a component a package set or its
+own module — and is not one. The platform blueprints answer it, differently:
 
 | Platform | Where an agent goes | Own build manifest |
 |---|---|---|
-| `platforms/go.md` | `cmd/<name>` + `internal/agents/<name>` (mapping table, line 134) | no — see its "Why one module, and not a copy per binary" |
-| `platforms/node.md` | `src/agents/<name>`, importing `src/protocol` | no |
+| `platforms/go.md` | `cmd/<name>` + `internal/agents/<name>` | no |
+| `platforms/node.md` | `src/agents/<name>` | no |
 | `platforms/cloudflare.md` | `agents/<name>` with its own `wrangler.toml` | yes |
-| `platforms/rust.md` | `agents/<name>` as a Cargo workspace member | yes |
+| `platforms/rust.md` | `agents/<name>` as a workspace member | yes |
 
-So there is no platform-independent answer, which is exactly why picking one
-broke. `Component.Dir()` returned `agents/<name>` for every platform — wrong
-for Go twice over, since go.md maps that blueprint to `cmd/<name>` +
-`internal/agents/<name>` and argues against a module per binary. That method
-is now deleted; `internal/dispatch/layout.go` reads the layout from the
-platform instead.
+So `plan.Root` stays `"."` everywhere and the component's directories appear as
+a PREFIX inside the plan's own paths. `internal/dispatch/layout.go` reads them
+from the platform blueprint.
 
-**Which dissolves the coordinate-space problem.** Once the layout is a fact the
-pipeline is told, `plan.Root` stays `"."` for every component on every
-platform, and the component's directories appear as a PREFIX inside the plan's
-own file paths. All five assumptions in the table above then hold unchanged —
-the build runs at the root where the model authored its command, the import
-prefix is right because the packages really are in the tenant module, and
-manifests, `Protected()` and `ReadTenantState` share one frame.
+**What the switch needed beyond that**, each found by running it rather than
+reading it:
 
-**What is left to do**, now that where-things-go is answered:
+- The per-instance blueprint reaches the graph. Without `agents/<name>.md`, two
+  agents are planned from byte-identical prompts.
+- `locate.go`, so a component can be found again. `agent start` and `agent list`
+  read `agents/<name>/` and looked for a `go.mod` — the shape the deleted
+  generator wrote. The switch would have produced Go agents that build and
+  cannot be started or listed.
+- `weblisk validate` walked `agents/` for a `go.mod` and would have reported
+  every correctly generated Go agent as "no platform detected".
+- The stop message named `--resume`, which only `server init` accepts.
+- Every directory `ValidatePlan` rejects is now named in the prompt, so a guard
+  cannot fire on something the instruction never mentioned.
 
-1. Give the plan prompt the layout, so the model plans `cmd/billing/main.go`
-   rather than `cmd/agent/main.go`.
-2. Replace `ValidatePlan`'s `cmd/<Target>` rule with `Layout.Foreign`, which
-   rejects a sibling's directory and permits shared libraries. The current rule
-   compares against the KIND — the name a sibling would have, not this one.
-3. Give `isSelfDir` the layout's directories instead of deriving
-   `internal/<kind>` from a key that may read `agent:billing`.
-4. Let a `Contained` component plan its own build manifest, and refuse one only
-   at the tenant root where the tenant's own module is declared.
-5. Then, and only then, point the three commands at `SupervisedComponentInit`
-   again — and verify with a real generation that reaches a passing build,
-   which the first attempt never did.
+**Known behaviour changes**
 
-**Observed, not predicted.** A real `weblisk agent create billing` planned
-eighteen files at tenant-root paths and reasoned in its own plan about importing
-the tenant's `acme/internal/observability` — it believed it was part of the
-tenant module, because that is what it was told.
-
-**Kept from the attempt**, because they are correct independently: `Component`
-and its keying, `Plan.Owner` split from `Plan.Target`, and the guard that stops
-`weblisk component <kind> init` generating a named kind into `agents/`.
+- `agent create <existing>` rebuilds rather than refusing.
+- An agent on disk from the OLD generator — `agents/<name>/` with its own
+  `go.mod` — is invisible to `agent list`, `start` and `validate`. Regenerate it.
+- `domain create` and `gateway create` share the verified code path but were not
+  themselves run end to end.
 
 ### 4. `test conformance` — honest now, still mostly unimplemented
+
+**New, from the 2026-09-11 verification run.** A generated alerting agent
+answered **405** to two L1 tests — `L1-01 Health Check` ("status 405, want 200")
+and `L1-07 Protected Endpoints Require Auth` ("/v1/services answered 405 without
+a token"). 405 is a METHOD mismatch, so either the blueprint's declared method
+and the harness's request disagree, or the generated route table registers a
+method the harness does not use. `protocol/spec.md` declares `POST /v1/health`;
+a harness issuing `GET` would produce exactly this. Whichever it is, one of the
+two is wrong and the conformance layer cannot currently say which — it reports
+the status and stops. Worth settling before reading L1 failures as generation
+faults.
+
 
 Fixed 2026-09-09. It declared 24 assertions and issued a request for four; the
 other 20 reached a `default: return true` marked "pass by default until full
