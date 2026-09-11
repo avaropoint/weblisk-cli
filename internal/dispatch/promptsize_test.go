@@ -81,3 +81,49 @@ func TestTheCorpusReachesThePlanCacheKey(t *testing.T) {
 		t.Error("the plan cache key is unchanged when the corpus the planner reads changes")
 	}
 }
+
+// Against the real corpus, almost the whole prompt is a shared prefix.
+//
+// This is the guard that matters. TestTheInvariantPrefixIsIdenticalAcrossFiles
+// uses a few-kilobyte fixture where the ownership block is a large fraction of
+// the total, so it can only assert a loose 90%. Measured against the corpus a
+// real run loads, two file prompts share 99.81% of their bytes — so a
+// regression that moved 10% of a 385 KB prompt out of the prefix would sail
+// through the loose test and cost 38 KB of re-processed prefix on every file.
+//
+// WHAT THE REMAINING 0.19% IS, so nobody spends effort on it twice: the
+// divergence begins inside formatOwnership, which sits in the block whose
+// comment says it is "in the invariant prefix, because it is the same for every
+// file in the run". It is not — it filters to the caller's own package. That
+// observation is correct and worth 746 bytes of 385,521. Measured before
+// acting; not worth reordering for.
+func TestTheRealPromptIsAlmostEntirelyASharedPrefix(t *testing.T) {
+	g, err := ResolveGraph("", Agent("alerting"), "go")
+	if err != nil {
+		t.Skipf("no blueprint corpus on this machine: %v", err)
+	}
+	platBP := g.Map[PlatformBlueprint("go")]
+	req := GatherRequirements(g, "agent")
+	plan := &Plan{Target: "agent", Root: ".", Module: "acme", Files: []PlannedFile{
+		{Path: "internal/agents/alerting/types.go", Purpose: "types", Declares: []string{"AlertEvent"}},
+		{Path: "internal/agents/alerting/dedup.go", Purpose: "dedup", Declares: []string{"Dedup"}},
+		{Path: "cmd/alerting/main.go", Purpose: "entry", Declares: []string{"main"}},
+	}}
+	mk := func(i int) string {
+		return filePrompt(plan.Files[i], plan, "go", g.Map, g.Order, platBP, nil, nil,
+			req.Checklist, req.Bindings, &TenantState{})
+	}
+	for _, pair := range [][2]int{{0, 1}, {0, 2}} {
+		a, b := mk(pair[0]), mk(pair[1])
+		shared := 0
+		for shared < len(a) && shared < len(b) && a[shared] == b[shared] {
+			shared++
+		}
+		ratio := float64(shared) / float64(len(a))
+		if ratio < 0.99 {
+			t.Errorf("%s vs %s: only %.2f%% shared (%d of %d bytes). Every byte outside the "+
+				"prefix is re-processed on every file of the run",
+				plan.Files[pair[0]].Path, plan.Files[pair[1]].Path, ratio*100, shared, len(a))
+		}
+	}
+}

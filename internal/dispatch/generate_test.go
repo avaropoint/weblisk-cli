@@ -355,6 +355,13 @@ func TestTheInvariantPrefixIsIdenticalAcrossFiles(t *testing.T) {
 	}
 	// The specification is the bulk of the prompt; nearly all of it must be
 	// shared, or the ordering has regressed.
+	//
+	// 0.9 is deliberately loose HERE, because this fixture's corpus is a few
+	// kilobytes and its ownership block is a large fraction of it. Against the
+	// real corpus the measured figure is 99.81% — see
+	// TestTheRealPromptIsAlmostEntirelyASharedPrefix, which is the one that
+	// would notice a regression. A threshold that a real prompt beats by 10
+	// points is not a guard.
 	if ratio := float64(shared) / float64(len(a)); ratio < 0.9 {
 		t.Errorf("only %.0f%% of the prompt is a shared prefix (%d of %d bytes) — "+
 			"the invariant block is no longer first and caching is defeated",
