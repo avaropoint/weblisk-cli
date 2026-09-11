@@ -213,16 +213,33 @@ reading it:
 
 ### 4. `test conformance` — honest now, still mostly unimplemented
 
-**New, from the 2026-09-11 verification run.** A generated alerting agent
-answered **405** to two L1 tests — `L1-01 Health Check` ("status 405, want 200")
-and `L1-07 Protected Endpoints Require Auth` ("/v1/services answered 405 without
-a token"). 405 is a METHOD mismatch, so either the blueprint's declared method
-and the harness's request disagree, or the generated route table registers a
-method the harness does not use. `protocol/spec.md` declares `POST /v1/health`;
-a harness issuing `GET` would produce exactly this. Whichever it is, one of the
-two is wrong and the conformance layer cannot currently say which — it reports
-the status and stops. Worth settling before reading L1 failures as generation
-faults.
+**Settled: the harness was wrong, and it is fixed.** The 2026-09-11 run
+reported a conformant agent as failing two L1 tests, both with **405**. The
+blueprints are unambiguous — `architecture/agent.md` declares
+`| POST | /v1/health |` and says in prose "POST /v1/health rather than GET is
+deliberate and is the protocol's choice", while `protocol/spec.md` gives the
+ORCHESTRATOR `GET /v1/health`. The harness issued GET to everything.
+
+Three faults, one shape — a test asking a question the specification did not ask:
+
+| Fault | Effect |
+|---|---|
+| `L1-01` hardcoded `get(base, "/v1/health")` | every conformant agent answered 405 and was failed |
+| `ProtectedGETsFor` discarded every non-GET protected endpoint | an agent, whose `/v1/services` is POST, produced an empty list |
+| the empty list fell back to the ORCHESTRATOR's surface, probed with GET | a conformant agent was reported as serving a protected endpoint without auth |
+
+Each test now asks with the method that component's own blueprint declares, the
+fallback list is gone (`protectedEndpoints` returns nothing when the corpus
+declares nothing), and a probe of nothing is **unrun rather than failed** — the
+same distinction the structural checks draw, since failing a component for want
+of a list is failing a question never put to it.
+
+Re-run against the same generated agent: `L1-07` and `L1-10` now pass. `L1-01`
+now reports a REAL fault it had been masking — the agent answers `503` where
+`architecture/agent` reserves 503 for shutdown ("stop accepting new tasks"), and
+reports `"unhealthy"` where `L4-04` requires `"degraded"` with no orchestrator.
+The failure detail now names both, because conformance results feed the repair
+round.
 
 
 Fixed 2026-09-09. It declared 24 assertions and issued a request for four; the

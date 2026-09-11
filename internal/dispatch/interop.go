@@ -256,14 +256,19 @@ func l4Tests(component string) []interopTest {
 				}
 				var wrong []string
 				checked := 0
-				for _, p := range protectedPaths(e.component, e.blueprints) {
-					c, b2, e2 := get(e.componentBase, p)
+				for _, pe := range protectedEndpoints(e.component, e.blueprints) {
+					p := pe.Path
+					// Its declared method. GET against an endpoint the blueprint
+					// declares as POST answers 405, which is neither 401 nor 403
+					// and was reported as answering without a key.
+					c, b2, e2 := request(e.componentBase, pe.Method, p)
 					if e2 != nil || c == 404 {
 						continue
 					}
 					checked++
 					if c != 401 && c != 403 {
-						wrong = append(wrong, fmt.Sprintf("%s answered %d with no issuer key", p, c))
+						wrong = append(wrong, fmt.Sprintf("%s %s answered %d with no issuer key",
+							pe.Method, p, c))
 						continue
 					}
 					var er map[string]any

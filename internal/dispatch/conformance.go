@@ -72,15 +72,25 @@ type conformanceTest struct {
 // against a content service reports "no protected endpoint answered at all",
 // which is a correct implementation failing a test that asked the wrong
 // question.
-func protectedPaths(component string, blueprints map[string]string) []string {
-	if got := ProtectedGETsFor(component, blueprints); len(got) > 0 {
+func protectedEndpoints(component string, blueprints map[string]string) []ProtectedEndpoint {
+	if got := ProtectedEndpointsFor(component, blueprints); len(got) > 0 {
 		return got
 	}
-	// No corpus supplied, or a component whose blueprint states no Auth column.
-	// The orchestrator's surface is the fallback rather than nothing, because a
-	// probe of nothing reports "no protected endpoint answered" — a correct
-	// implementation failing for want of a list.
-	return []string{"/v1/services", "/v1/audit", "/v1/admin/overview"}
+	// No fallback list any more.
+	//
+	// It was the ORCHESTRATOR's surface — /v1/services, /v1/audit,
+	// /v1/admin/overview — handed to whatever component was under test, and
+	// probed with GET. An agent declares /v1/services as POST, so it answered
+	// 405, which is neither 401 nor 403, and a conformant agent was reported as
+	// serving a protected endpoint without auth.
+	//
+	// The comment above this function already states the rule it broke:
+	// "Probing the orchestrator's surface against a content service reports 'no
+	// protected endpoint answered at all', which is a correct implementation
+	// failing a test that asked the wrong question." Returning nothing lets the
+	// caller say the corpus is silent, which is true, instead of inventing a
+	// list and failing the component against it.
+	return nil
 }
 
 // startupTimeout bounds how long a component may take to answer.
@@ -151,6 +161,19 @@ func RunConformance(root, binary, component string, blueprints map[string]string
 			continue
 		}
 		ok, detail, evidence := t.run(base, component, blueprints)
+		// A test that could not ask its question has not refuted anything.
+		//
+		// Same distinction the structural checks draw, and for the same reason:
+		// reporting "this component has no protected endpoint that refuses an
+		// unauthenticated request" when the corpus simply declares none is a
+		// correct implementation failing a question that was never put to it.
+		// Unrun is already reported as explicitly NOT a pass.
+		if stripped, unresolved := splitInconclusive(detail); unresolved {
+			results = append(results, ConformanceResult{ID: t.id, Name: t.name,
+				Unrun: true, Detail: stripped})
+			onProgress(Progress{Path: t.id, Status: "unrun", Detail: t.name})
+			continue
+		}
 		results = append(results, ConformanceResult{ID: t.id, Name: t.name,
 			Passed: ok, Detail: detail, Evidence: evidence})
 		onProgress(Progress{Path: t.id, Status: map[bool]string{true: "passed", false: "failed"}[ok],
@@ -197,6 +220,64 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
+// declaredMethodFor is the method a component's own blueprint declares for a
+// path, or "" when it declares none.
+//
+// A conformance test must ask the question the specification asks. `/v1/health`
+// is POST on an agent and GET on the orchestrator — architecture/agent.md says
+// so in a row and then again in prose: "POST /v1/health rather than GET is
+// deliberate and is the protocol's choice". A test that GETs it regardless
+// fails every conformant agent with a 405, which is a correct implementation
+// being told it is broken.
+func declaredMethodFor(component, path string, blueprints map[string]string) string {
+	body, ok := blueprints[targetBlueprint(component)]
+	if !ok {
+		return ""
+	}
+	// By column NAME, the same reader ProtectedEndpointsFor uses. Not
+	// ExtractEndpointOperations, which wants the `## Endpoints` section around
+	// the table — this has to answer from whatever table declares the row, and
+	// derive.go's comment records what depending on cell position cost.
+	for _, t := range TablesWithColumns(body, "method", "path") {
+		for _, row := range t.Rows {
+			if strings.Trim(strings.TrimSpace(row["path"]), "`") != path {
+				continue
+			}
+			if m := strings.ToUpper(strings.TrimSpace(row["method"])); isHTTPMethod(m) {
+				return m
+			}
+		}
+	}
+	return ""
+}
+
+// request issues one method against a path. get is GET, kept because most
+// callers want exactly that.
+func request(base, method, path string) (int, []byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var body io.Reader
+	if method == "POST" || method == "PUT" || method == "PATCH" {
+		// An empty JSON object, so a handler that decodes its body before
+		// checking auth does not fail on the decode and report the wrong thing.
+		body = strings.NewReader("{}")
+	}
+	req, err := http.NewRequestWithContext(ctx, method, base+path, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b, nil
+}
+
 func get(base, path string) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -223,12 +304,42 @@ var l1Tests = []conformanceTest{
 		id: "L1-01", name: "Health Check",
 		applies: map[string]bool{"orchestrator": true, "agent": true, "admin": true, "content": true},
 		run: func(base, component string, blueprints map[string]string) (bool, string, string) {
-			code, body, err := get(base, "/v1/health")
+			// The method this component's blueprint declares, not a constant.
+			// GET when the corpus says nothing, which is the orchestrator's
+			// case and what this test always did.
+			method := declaredMethodFor(component, "/v1/health", blueprints)
+			if method == "" {
+				method = "GET"
+			}
+			code, body, err := request(base, method, "/v1/health")
 			if err != nil {
 				return false, "no response: " + err.Error(), ""
 			}
+			if code == 405 {
+				return false, fmt.Sprintf("%s /v1/health answered 405 — this component's "+
+					"blueprint declares %s for it, so one of the two is wrong", method, method), ""
+			}
 			if code != 200 {
-				return false, fmt.Sprintf("status %d, want 200", code), ""
+				// A degraded component still answers 200 and SAYS degraded.
+				// architecture/agent reserves 503 for shutdown — "stop
+				// accepting new tasks (return 503 Service Unavailable)" — and
+				// L4-04 requires a component with no orchestrator to report
+				// status "degraded", which is a body a caller has to be able to
+				// read. Naming that here matters because this detail is fed
+				// back to the repair round.
+				extra := ""
+				var h map[string]any
+				if json.Unmarshal(body, &h) == nil {
+					if st, ok := h["status"].(string); ok {
+						extra = fmt.Sprintf(" (the body already reports status %q)", st)
+					}
+				}
+				if code == 503 {
+					return false, fmt.Sprintf("status 503, want 200%s. Health reports state in "+
+						"its BODY; 503 is for refusing work during shutdown. A degraded "+
+						"component answers 200 with status \"degraded\"", extra), ""
+				}
+				return false, fmt.Sprintf("status %d, want 200%s", code, extra), ""
 			}
 			var h map[string]any
 			if json.Unmarshal(body, &h) != nil {
@@ -251,7 +362,7 @@ var l1Tests = []conformanceTest{
 			default:
 				return false, fmt.Sprintf("status is %q; protocol/types allows healthy, degraded, unhealthy", status), ""
 			}
-			return true, "", fmt.Sprintf("200, status=%q, all HealthStatus fields present", status)
+			return true, "", fmt.Sprintf("%s 200, status=%q, all HealthStatus fields present", method, status)
 		},
 	},
 	{
@@ -260,11 +371,23 @@ var l1Tests = []conformanceTest{
 		run: func(base, component string, blueprints map[string]string) (bool, string, string) {
 			// This component's protected surface. Health is deliberately absent:
 			// it is the one endpoint that must answer without a token.
-			protected := protectedPaths(component, blueprints)
+			protected := protectedEndpoints(component, blueprints)
+			if len(protected) == 0 {
+				// Nothing declared, so nothing to ask. A test that examined
+				// nothing has not established that the component refuses
+				// anything, and saying "no protected endpoint answered" made a
+				// correct implementation fail for want of a list.
+				return false, markInconclusive(component + "'s blueprint declares no protected " +
+					"endpoint, so there was nothing to probe"), ""
+			}
 			var wrong []string
 			checked := 0
-			for _, p := range protected {
-				code, _, err := get(base, p)
+			for _, e := range protected {
+				// Its OWN method. Asking GET of an endpoint the blueprint
+				// declares as POST gets 405, which is neither 401 nor 403 and
+				// was reported as "answered without a token" — a conformant
+				// agent failing because the question was wrong.
+				code, _, err := request(base, e.Method, e.Path)
 				if err != nil {
 					continue // not routed on this component; L1-10 covers shape
 				}
@@ -272,12 +395,19 @@ var l1Tests = []conformanceTest{
 				if code == 404 {
 					continue // this component does not serve it
 				}
+				if code == 405 {
+					wrong = append(wrong, fmt.Sprintf("%s %s answered 405, but its blueprint "+
+						"declares that method", e.Method, e.Path))
+					continue
+				}
 				if code != 401 && code != 403 {
-					wrong = append(wrong, fmt.Sprintf("%s answered %d without a token", p, code))
+					wrong = append(wrong, fmt.Sprintf("%s %s answered %d without a token",
+						e.Method, e.Path, code))
 				}
 			}
 			if checked == 0 {
-				return false, "no protected endpoint answered at all", ""
+				return false, markInconclusive("none of " + component + "'s declared protected " +
+					"endpoints answered at all"), ""
 			}
 			if len(wrong) > 0 {
 				return false, strings.Join(wrong, "; "), ""
@@ -293,8 +423,9 @@ var l1Tests = []conformanceTest{
 			// endpoint and an unknown route, which every component has.
 			var faults []string
 			seen := 0
-			for _, p := range protectedPaths(component, blueprints) {
-				code, body, err := get(base, p)
+			for _, pe := range protectedEndpoints(component, blueprints) {
+				p := pe.Path
+				code, body, err := request(base, pe.Method, p)
 				if err != nil || code < 400 || code >= 600 {
 					continue
 				}
