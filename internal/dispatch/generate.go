@@ -156,6 +156,13 @@ func contractViolation(content string, f PlannedFile, operations map[string]stri
 	if why := notSourceIn(f.Path, trimmed); why != "" {
 		return why
 	}
+	// And it must PARSE. notSourceIn asks whether this looks like the right
+	// language; a file can pass that and still be unparseable, and nothing
+	// downstream noticed until the build — which runs once, after every file.
+	// Asked here, the model is told the line while it still has the file.
+	if why := syntaxFault(f.Path, trimmed); why != "" {
+		return why
+	}
 	// Verify declarations by PARSING where a language extractor exists, not by
 	// substring. A plan writes a method as "(ScopeLevel).Valid"; Go source writes
 	// "func (s ScopeLevel) Valid() bool". Substring matching rejected correct code
@@ -602,6 +609,10 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 		onProgress = func(Progress) {}
 	}
 	ordered := plan.Order()
+	// Which package each file belongs to, so a package can be type-checked the
+	// moment its last planned file exists rather than an hour later. See
+	// typecheck.go.
+	gate := newPackageGate(plan)
 	generated := make([]GeneratedFile, 0, len(ordered))
 	written := make([]string, 0, len(ordered))
 	decls := map[string][]Declaration{}
@@ -704,6 +715,27 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 		decls[f.Path] = ExtractDeclarations(f.Path, content)
 		owner = claimedSymbols(plan, decls)
 		onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path, Status: "written"})
+
+		// Layer 2, brought forward. The build used to run once, after every
+		// file — so a type error in file four was found seventy minutes later,
+		// or on three of four real runs, never, because the session limit
+		// arrived first. A package is checkable the moment its last planned
+		// file exists, and not one file before: a half-generated package is
+		// legitimately full of undefined symbols.
+		//
+		// Reported, not fatal. The authority is still the build at the end; this
+		// says the same thing sooner, while the fault is one package instead of
+		// twenty-four files. Everything generated so far is already banked in
+		// the cache, so acting on it costs nothing to re-reach.
+		if pkg := gate.done(f.Path); pkg != "" {
+			if why := typeCheckPackage(root, pkg, generated); why != "" {
+				onProgress(Progress{Step: i + 1, Total: len(ordered), Path: pkg,
+					Status: "package-failed", Detail: why})
+			} else {
+				onProgress(Progress{Step: i + 1, Total: len(ordered), Path: pkg,
+					Status: "package-ok"})
+			}
+		}
 	}
 
 	if sum := cache.Summary(); sum != "" {

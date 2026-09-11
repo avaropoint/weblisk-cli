@@ -951,6 +951,14 @@ func printProgress(p Progress) {
 		fmt.Printf("  [%d/%d] %s — retry %d: %s\n", p.Step, p.Total, p.Path, p.Attempt, p.Detail)
 	case "written":
 		fmt.Printf("  [%d/%d] %s [ok]\n", p.Step, p.Total, p.Path)
+	case "package-ok":
+		fmt.Printf("         %s compiles\n", p.Path)
+	case "package-failed":
+		// Said the moment it is knowable, and said loudly. The build at the end
+		// is still what decides the run; this is the same fault, an hour early.
+		fmt.Printf("  [warn] %s does not compile yet — found now rather than after the\n"+
+			"         remaining files, which is when the build used to run:\n%s\n",
+			p.Path, indentBlock(p.Detail, "           "))
 	case "failed":
 		if p.Step == 0 {
 			fmt.Printf("  %s [failed] %s\n", p.Path, p.Detail)
