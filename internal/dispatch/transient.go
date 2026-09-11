@@ -25,6 +25,7 @@ package dispatch
 // into a long silence.
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -103,13 +104,32 @@ func isTransient(err error) bool {
 	// did: six retries of a ten-minute deadline, sixty minutes spent reaching
 	// the answer the first attempt already had. A deterministic local abort
 	// cannot be waited out.
-	switch err.(type) {
-	case *idleAbort:
+	// errors.As, not a type switch.
+	//
+	// A bare `switch err.(type)` does not see through a wrap, and the one
+	// caller that matters wraps: generate.go returns `generating %s: %w`, and
+	// Supervise asks about THAT error. So the rule below — which exists to stop
+	// a self-reproducing failure being retried — was being skipped by the whole
+	// outer retry layer, and an idle abort resumed the entire component five
+	// times with twenty-seven minutes of waiting between attempts.
+	//
+	// advisoryExhausted escaped only because its sentence happens to contain no
+	// transient phrase. The comment below already called that an accident.
+	var idle *idleAbort
+	var spent *advisoryExhausted
+	var deadline *deadlineAbort
+	switch {
+	case errors.As(err, &idle):
 		// The stream went silent and we abandoned it. Retrying reproduces it
 		// exactly — and did: six retries of a ten-minute deadline, sixty
 		// minutes spent reaching the answer the first attempt already had.
 		return false
-	case *advisoryExhausted:
+	case errors.As(err, &deadline):
+		// We stopped waiting on a non-streaming call. Same shape as an idle
+		// abort and the same answer: the deadline is ours, so the next attempt
+		// runs into the identical one. See deadlineAbort.
+		return false
+	case errors.As(err, &spent):
 		// An advisory step ran out of the budget derived for it. Retrying
 		// spends the budget again to reach the same place.
 		//

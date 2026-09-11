@@ -231,11 +231,7 @@ func (p *LocalCLIProvider) Chat(messages []Message) (string, error) {
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			// Retryable: 408 is the status for exactly this, and a subprocess
-			// that ran out of time on one attempt often finishes on the next.
-			return "", &ProviderFault{Provider: p.Name, Status: 408,
-				Message: fmt.Sprintf("timed out after %s — the model may still be working; "+
-					"raise WL_AI_TIMEOUT if generation legitimately takes longer", timeout)}
+			return "", &deadlineAbort{Provider: p.Name, After: timeout}
 		}
 		// A non-zero exit still prints the result envelope on stdout, and that
 		// envelope carries the status and terminal reason that decide whether

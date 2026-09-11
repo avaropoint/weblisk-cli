@@ -187,6 +187,47 @@ type streamResult struct {
 // Its own type because the retry policy must be able to tell OUR decision from
 // the provider's condition. An idle abort is not transient: nothing about the
 // provider changed, we stopped waiting — and retrying reproduces it exactly.
+// deadlineAbort is OUR decision to stop waiting on a non-streaming call.
+//
+// # What this replaced, and why it is not a 408
+//
+// The non-streaming path returned ProviderFault{Status: 408} here, under the
+// comment "Retryable: 408 is the status for exactly this, and a subprocess that
+// ran out of time on one attempt often finishes on the next."
+//
+// That rationale was written on 2026-09-04. Three days later the STREAMING path
+// was rewritten because of a measured incident whose header still reads: "the
+// deadline killed it, the abort was reported as HTTP 408, 408 was classified
+// transient, and the retry ran the same call into the same deadline six more
+// times." The streaming path was fixed. This one kept the sentence the fix
+// refuted.
+//
+// The deadline is OURS. Nothing about the provider changed when it expired, so
+// the next attempt runs into the identical deadline — and 408 is classified
+// transient, so withTransientRetry spent seven attempts at ten minutes each,
+// and Supervise then resumed the whole component five more times. Worst case
+// was hours on one file that was never going to finish.
+//
+// Non-streaming is codex and local-cli; claude and grok stream. Their idle
+// abort is idleAbort, which this mirrors — the same decision, about a call with
+// no event stream to go silent.
+//
+// Its message deliberately avoids the words "timed out" and "timeout":
+// transientMessage matches both, and isTransient falls through to message
+// matching for anything its type rules do not catch. A type rule that a
+// reworded sentence can defeat is the fault advisoryExhausted's comment
+// records escaping by accident.
+type deadlineAbort struct {
+	Provider string
+	After    time.Duration
+}
+
+func (e *deadlineAbort) Error() string {
+	return fmt.Sprintf("%s did not finish within %s — abandoned, because that limit is ours and "+
+		"the next attempt would reach the same one. Raise WL_AI_TIMEOUT if generation "+
+		"legitimately takes longer than this", e.Provider, e.After)
+}
+
 type idleAbort struct {
 	IdleFor  time.Duration
 	Elapsed  time.Duration

@@ -725,7 +725,8 @@ func notReady(err error) bool {
 	// rather than inferred from it.
 	var exhausted *advisoryExhausted
 	var idle *idleAbort
-	if errors.As(err, &exhausted) || errors.As(err, &idle) {
+	var deadline *deadlineAbort
+	if errors.As(err, &exhausted) || errors.As(err, &idle) || errors.As(err, &deadline) {
 		return false
 	}
 	// No structured fault: a subprocess that would not start, a binary that is
