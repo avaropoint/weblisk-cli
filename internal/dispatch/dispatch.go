@@ -112,7 +112,9 @@ func ComponentInit(root string, c Component, platform string) error {
 		fmt.Println()
 	}
 
-	specs := graph.Joined()
+	// Without the platform blueprint, which planPrompt sends as its own labelled
+	// section immediately before this. See JoinedExcept.
+	specs := graph.JoinedExcept(PlatformBlueprint(platform))
 
 	// Recorded before anything is generated, so a run that fails part-way still
 	// leaves a statement of what it was reading. architecture/cli requires the
@@ -178,7 +180,7 @@ func ComponentInit(root string, c Component, platform string) error {
 		st := ReadTenantState(root, key, self)
 
 		cache := NewGenerationCache(root)
-		pk := planKey(req, key, platform, platBP, planSystemPrompt+st.Shape(), self.FormatLayout())
+		pk := planKey(req, key, platform, platBP, planSystemPrompt+st.Shape(), self.FormatLayout()+specs)
 		plan := cache.GetPlan(pk)
 		if plan != nil {
 			fmt.Println("  Plan reused — requirements unchanged since the last run")

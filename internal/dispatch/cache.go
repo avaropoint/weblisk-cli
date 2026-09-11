@@ -207,8 +207,11 @@ func planKey(req *Requirements, target, platform, platBP, systemPrompt, layout s
 	h.Write([]byte(platBP))
 	h.Write([]byte(systemPrompt))
 	// Where the files go is now told to the planner, so it must reach the key
-	// too — see the note above on the forty-three files served against a module
-	// path that no longer existed.
+	// too — and so does the corpus itself. The plan prompt has always carried
+	// `specs`, the joined blueprints, and this key has never hashed them: a
+	// blueprint edit that changed what the planner was told served the plan made
+	// from the old text. That is the same drift the note above records costing
+	// forty-three files against a module path that no longer existed.
 	h.Write([]byte(layout))
 	return "plan-" + hex.EncodeToString(h.Sum(nil))
 }

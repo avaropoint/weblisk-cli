@@ -143,3 +143,19 @@ func joinBlueprints(sel map[string]string, order []string) string {
 	}
 	return b.String()
 }
+
+// without returns order with one name removed.
+//
+// Used to keep a blueprint out of the corpus join when it is already sent as
+// its own labelled section. Operates on the ORDER rather than the map so the
+// caller's map stays shared and unmutated — two prompts are built from the same
+// map in one run.
+func without(order []string, name string) []string {
+	out := make([]string, 0, len(order))
+	for _, n := range order {
+		if n != name {
+			out = append(out, n)
+		}
+	}
+	return out
+}

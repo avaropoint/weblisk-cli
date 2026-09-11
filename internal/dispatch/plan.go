@@ -438,7 +438,9 @@ func planPrompt(req *Requirements, self Layout, platform, specs, platBP string, 
 		b.WriteString(c)
 		b.WriteString("\n")
 	}
-	b.WriteString("\n--- PLATFORM BLUEPRINT ---\n")
+	// Named, so the source attribution is not lost now that this blueprint is
+	// excluded from the join below rather than appearing in both.
+	fmt.Fprintf(&b, "\n--- PLATFORM BLUEPRINT (%s) ---\n", PlatformBlueprint(platform))
 	b.WriteString(platBP)
 	b.WriteString("\n\n--- PROTOCOL AND ARCHITECTURE BLUEPRINTS ---\n")
 	b.WriteString(specs)

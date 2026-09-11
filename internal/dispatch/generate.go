@@ -395,10 +395,34 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 	// Nothing here is changed in content — the model receives exactly what it
 	// received before, in the order that lets a cache work on it. The specific
 	// ask moves to the end, where an instruction belongs anyway.
-	b.WriteString("--- BLUEPRINTS ---\n")
-	b.WriteString(joinBlueprints(relevantBlueprints(f, blueprints), bpOrder))
-	b.WriteString("\n\n--- PLATFORM BLUEPRINT ---\n")
+	//
+	// The platform blueprint is written ONCE, here, and excluded from the corpus
+	// join below.
+	//
+	// GenerationRoots makes it a root, so it was in bpOrder AND passed
+	// separately as platBP — the same file resolved by the same LoadBlueprint
+	// from the same sources, so byte-identical. Every per-file prompt carried it
+	// twice: 36,467 bytes of platforms/go.md duplicated across 28 files is a
+	// megabyte a run, for nothing.
+	//
+	// It is the separate section that survives, not the join's copy, because
+	// relevantBlueprints can return an empty map for a file that declares and
+	// serves nothing (see relevance.go) — the labelled section is the only
+	// carrier guaranteed to reach every file. Its header names the file so the
+	// source attribution joinBlueprints provides is not lost; checklist items
+	// are keyed by that path.
+	//
+	// Written FIRST so the order the model reads is unchanged. Dropping the
+	// join's copy alone would have moved the platform blueprint from first
+	// document to last, and relevance.go's own standard for a change like that
+	// is to measure its effect on build errors rather than assume it. This way
+	// there is nothing to measure: the same documents arrive in the same order,
+	// one of them no longer twice.
+	platName := PlatformBlueprint(platform)
+	fmt.Fprintf(&b, "--- PLATFORM BLUEPRINT (%s) ---\n", platName)
 	b.WriteString(platBP)
+	b.WriteString("\n\n--- BLUEPRINTS ---\n")
+	b.WriteString(joinBlueprints(relevantBlueprints(f, blueprints), without(bpOrder, platName)))
 	if c := FormatChecklist(checklist); c != "" {
 		b.WriteString("\n\n--- ACCEPTANCE CRITERIA ---\n")
 		b.WriteString(c)

@@ -252,8 +252,22 @@ type BlueprintGraph struct {
 // Joined renders the graph as one document, for prompts that take the corpus
 // whole rather than per file.
 func (g *BlueprintGraph) Joined() string {
+	return g.JoinedExcept("")
+}
+
+// JoinedExcept renders the graph without one blueprint.
+//
+// For the caller that sends a blueprint as its own labelled section and would
+// otherwise send it twice: GenerationRoots makes the platform blueprint a root,
+// so it is in Order AND is loaded separately as platBP — byte-identical, since
+// both resolve the same path through the same sources. The plan prompt carried
+// both copies.
+func (g *BlueprintGraph) JoinedExcept(skip string) string {
 	parts := make([]string, 0, len(g.Order))
 	for _, name := range g.Order {
+		if name == skip {
+			continue
+		}
 		parts = append(parts, g.Map[name])
 	}
 	return strings.Join(parts, "\n\n---\n\n")
