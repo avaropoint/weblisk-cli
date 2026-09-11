@@ -196,6 +196,30 @@ type retryingProvider struct {
 	inner Provider
 }
 
+// WithBounds forwards a bound to the provider underneath, keeping the retry.
+//
+// Without this the advisory budget was never applied to anything. advisory.go
+// asks `p.(boundable)` of the provider as handed, and what every real run hands
+// it is this wrapper: RequireProvider -> NewProvider -> WithTransientRetry. The
+// assertion failed, AdvisoryProvider returned the provider unbounded, and the
+// run printed "cannot be time-bounded" — which read as a statement about the
+// backend and was a statement about this missing method.
+//
+// The result is re-wrapped, because a bounded provider still needs the
+// transient handling every other call path gets. Bounding a step is not a
+// reason to stop retrying a 529.
+//
+// Reports false when the inner provider cannot be bounded, so the honesty
+// advisory.go's comment asks for is preserved: "a provider that cannot enforce
+// a bound must not be handed one and left to ignore it."
+func (r *retryingProvider) WithBounds(idle, total time.Duration) Provider {
+	b, ok := r.inner.(boundable)
+	if !ok {
+		return r
+	}
+	return WithTransientRetry(b.WithBounds(idle, total))
+}
+
 // WithTransientRetry wraps a provider so failures that say they are temporary
 // are tried again.
 func WithTransientRetry(p Provider) Provider {

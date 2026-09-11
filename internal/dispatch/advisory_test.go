@@ -121,6 +121,9 @@ func TestBoundingCopiesEveryFieldItShould(t *testing.T) {
 		"IdleTimeout": "tightened for advisory work",
 		"TotalCap":    "the advisory budget",
 		"OnActivity":  "deliberately dropped: an advisory step must not overwrite the state a person is watching",
+		"Timeout": "clamped to the budget, not carried. IdleTimeout and TotalCap are read " +
+			"only by runStreaming, so a non-streaming provider that copied Timeout " +
+			"reported a bound and ran to the ten-minute default",
 	}
 	// Fields that cannot be compared or copied.
 	skip := map[string]string{

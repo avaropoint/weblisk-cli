@@ -75,12 +75,20 @@ type boundable interface {
 // whatever state the original's was in.
 func (p *LocalCLIProvider) WithBounds(idle, total time.Duration) Provider {
 	return &LocalCLIProvider{
-		Bin:         p.Bin,
-		Name:        p.Name,
-		Args:        p.Args,
-		Model:       p.Model,
-		JSON:        p.JSON,
-		Timeout:     p.Timeout,
+		Bin:   p.Bin,
+		Name:  p.Name,
+		Args:  p.Args,
+		Model: p.Model,
+		JSON:  p.JSON,
+		// Timeout is CLAMPED, not carried over.
+		//
+		// IdleTimeout and TotalCap are read only by runStreaming. codex and
+		// local-cli do not stream, so a copy that set only those two reported a
+		// bound and then ran to the ten-minute default — the same field-vs-path
+		// mismatch discover.go's readiness clamp exists for, and its comment
+		// records: "the other two are read ONLY by runStreaming, so setting them
+		// alone left codex bounded by the 10-minute default."
+		Timeout:     tighter(p.Timeout, total),
 		Dir:         p.Dir,
 		Stream:      p.Stream,
 		IdleTimeout: idle,
@@ -113,9 +121,20 @@ func (p *LocalCLIProvider) WithBounds(idle, total time.Duration) Provider {
 func AdvisoryProvider(p Provider, generationElapsed time.Duration) (Provider, bool) {
 	b, ok := p.(boundable)
 	if !ok {
+		// Not reachable for a local CLI any more — retryingProvider forwards
+		// WithBounds — but a decorator added later that does not forward will
+		// land here, and falling back unbounded WITH THAT SAID is the
+		// documented behaviour rather than a silent miss.
 		return p, false
 	}
-	return b.WithBounds(advisoryIdle, AdvisoryBudget(generationElapsed)), true
+	bounded := b.WithBounds(advisoryIdle, AdvisoryBudget(generationElapsed))
+	// A forwarder that cannot bound its inner provider returns itself. Taking
+	// that as success would report a bound nothing enforces, which is the exact
+	// thing the second return value exists to prevent.
+	if bounded == p {
+		return p, false
+	}
+	return bounded, true
 }
 
 // advisoryExhausted describes a budget that ran out.
@@ -129,4 +148,19 @@ func (e *advisoryExhausted) Error() string {
 		"skipped, and the build is unaffected. This step reads every generated file at once, "+
 		"so it is the first thing to outgrow a budget on a large tenant",
 		e.Provider, e.Budget.Round(time.Second))
+}
+
+// tighter is the smaller of a provider's existing limit and a new bound.
+//
+// A bound must never loosen what was already there, and an unset limit is not a
+// small one — it means the default applies, which is larger than any budget an
+// advisory step derives.
+func tighter(existing, bound time.Duration) time.Duration {
+	if bound <= 0 {
+		return existing
+	}
+	if existing <= 0 || existing > bound {
+		return bound
+	}
+	return existing
 }
