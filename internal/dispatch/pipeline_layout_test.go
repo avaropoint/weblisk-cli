@@ -442,3 +442,29 @@ func TestSingletonHomesAreProtectedOnEveryPlatform(t *testing.T) {
 		}
 	}
 }
+
+// Every directory the validator rejects is named in the prompt.
+//
+// ValidatePlan rejects a plan naming another component's home. The prompt
+// listed only the FAMILIES, so a component could be refused for planning
+// internal/orchestrator having never been told about it — and a guard that
+// fires on something the instruction never mentioned costs a replanning round
+// to teach what one sentence teaches for free.
+func TestThePromptNamesEverythingTheValidatorRejects(t *testing.T) {
+	for _, tc := range []struct {
+		c        Component
+		platform string
+	}{
+		{Agent("cron"), "go"}, {Agent("cron"), "node"},
+		{Agent("cron"), "cloudflare"}, {Orchestrator(), "go"}, {Gateway(), "go"},
+	} {
+		l := LayoutOf(tc.c, tc.platform)
+		prompt := l.FormatLayout()
+		for _, d := range l.Others {
+			if !strings.Contains(prompt, d) {
+				t.Errorf("%s/%s: %s is rejected by ValidatePlan and never named in the prompt:\n%s",
+					tc.c.Key(), tc.platform, d, prompt)
+			}
+		}
+	}
+}

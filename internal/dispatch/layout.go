@@ -412,6 +412,14 @@ func (l Layout) FormatLayout() string {
 			strings.Join(l.Families, "/, ")+"/")
 		b.WriteString("directories are yours to write — replacing one replaces a running component.\n")
 	}
+	if len(l.Others) > 0 {
+		// Named outright, because these are not under a family and the model has
+		// no way to infer them. ValidatePlan rejects a plan that names one, and a
+		// guard that fires on something the prompt never mentioned costs a
+		// replanning round to teach what one sentence teaches here.
+		fmt.Fprintf(&b, "These belong to a specific other component and are never yours: %s.\n",
+			strings.Join(l.Others, ", "))
+	}
 	if l.Contained {
 		fmt.Fprintf(&b, "This platform gives each component its own build manifest: plan yours\n"+
 			"inside %s/, not at the tenant root.\n", l.Dirs[0])
