@@ -478,7 +478,21 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 
 	// VARIABLE SUFFIX — grows as files are written, then the ask itself.
 	if len(written) > 0 {
-		fmt.Fprintf(&b, "\nAlready generated in this package: %s\n", strings.Join(written, ", "))
+		// "in this component", not "in this package".
+		//
+		// `written` is every file generated so far in the run, across every
+		// package — the loop appends each one unconditionally. The label claimed
+		// a scope the content does not have, and the list immediately below it
+		// is the proof: it names files from packages the reader is not in.
+		//
+		// The CONTENT is deliberately unscoped and stays that way. A file in
+		// internal/agents/<name> calling protocol.Canonicalize needs that
+		// signature, and it comes from a file completed at an earlier level.
+		// Narrowing this to the reader's own package would re-open the fault
+		// this block exists to close: of the first real run's 73 errors, 36 were
+		// symbols declared twice or called and never written. Same-package
+		// ownership is a separate, narrower block — see formatOwnership.
+		fmt.Fprintf(&b, "\nAlready generated in this component: %s\n", strings.Join(written, ", "))
 		if d := FormatDeclarations(decls, written); d != "" {
 			b.WriteString("\nThese symbols ALREADY EXIST. Do not redeclare them, and call them " +
 				"with exactly these signatures:\n")

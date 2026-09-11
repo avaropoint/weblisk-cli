@@ -367,6 +367,68 @@ func planOrder(p *Plan) ([]PlannedFile, error) {
 	return out, nil
 }
 
+// Levels groups the plan's files by dependency depth.
+//
+// Level 0 is every file that depends on nothing in the plan; level N is every
+// file whose deepest in-plan dependency is at level N-1. Files within one level
+// are independent of each other BY CONSTRUCTION — that is the whole content of
+// the grouping, and it is what a concurrent driver needs to know.
+//
+// Depth is the LONGEST path to a root, not the shortest. A file that depends on
+// both a level-0 and a level-3 file belongs at level 4: placing it any earlier
+// would put it beside something it depends on.
+//
+// A dependency naming a file the plan does not contain is ignored, exactly as
+// planOrder ignores it — the plan is the whole statement of what this component
+// consists of, so a name outside it is a reference to something already there.
+//
+// Returns nil when the plan's dependencies do not form a DAG; planOrder is the
+// one place that reports the cycle, and callers already fall back to Files.
+func (p *Plan) Levels() [][]PlannedFile {
+	if _, err := planOrder(p); err != nil {
+		return nil
+	}
+	byPath := map[string]PlannedFile{}
+	for _, f := range p.Files {
+		byPath[f.Path] = f
+	}
+	depth := map[string]int{}
+	var of func(path string) int
+	of = func(path string) int {
+		if d, ok := depth[path]; ok {
+			return d
+		}
+		// Marked before recursing so a cycle cannot loop forever. planOrder has
+		// already refused a cyclic plan, so this is a backstop, not a policy.
+		depth[path] = 0
+		best := 0
+		for _, d := range byPath[path].DependsOn {
+			if _, ok := byPath[d]; !ok {
+				continue
+			}
+			if n := of(d) + 1; n > best {
+				best = n
+			}
+		}
+		depth[path] = best
+		return best
+	}
+	deepest := 0
+	for _, f := range p.Files {
+		if d := of(f.Path); d > deepest {
+			deepest = d
+		}
+	}
+	levels := make([][]PlannedFile, deepest+1)
+	// Walked in planOrder's order so a level's contents are ordered the way the
+	// sequential driver would have produced them — a concurrent run and a
+	// sequential one then differ in timing and not in sequence.
+	for _, f := range p.Order() {
+		levels[depth[f.Path]] = append(levels[depth[f.Path]], f)
+	}
+	return levels
+}
+
 // Order returns the plan's files in dependency order.
 func (p *Plan) Order() []PlannedFile {
 	ordered, err := planOrder(p)
