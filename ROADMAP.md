@@ -330,6 +330,54 @@ worth knowing about because the code looked correct:
   ships into every generated hub — a fix applied only to the CLI would have
   left it running in every tenant already built.
 
+### 8. Model-interaction performance — measured, landed, and one refused
+
+An audit of six dimensions on 2026-09-11, each proposal adversarially verified
+by an agent instructed to refute it: **54 refuted, 7 unique survivors.** The
+ratio is the point — "parallelise repairs", "the cache key hashes the whole
+corpus", "AST-parsed three times" all sounded right and died on inspection.
+
+**Landed, each with the number it was measured at:**
+
+| Change | Measured |
+|---|---|
+| The platform blueprint was sent **twice** in every prompt | −36,474 bytes per call; **~1 MB (~255k tokens) per 24-file run**; plan prompt −8.6% |
+| Non-streaming deadline was a retryable `408` | Worst case was **~6.8 hours** on one stuck file (7 inner × 10 min, then Supervise ×5); now fails once |
+| `isTransient` used a bare type switch | The *existing* `idleAbort` guard was defeated by `%w` wrapping — proved with a failing test first |
+| Advisory budget never applied | `retryingProvider` had no `WithBounds`; every real run printed "cannot be time-bounded" about a missing method, not the backend. Also `WithBounds` never clamped `Timeout`, the only field codex reads |
+| `builtBinary` returned `""` for a build with no `-o` | Both callers guard on it, so `go build ./...` skipped conformance **and** interop in silence while printing `[ok] builds` |
+| Header line spent a model round-trip | `DiscoverProvider` probed to print `[ready]`; `RequireProvider` then probed again and *that* call is unskippable (it records the model for provenance) |
+| Hosted Anthropic path had no `cache_control` | Prefix is 99.81% shared; breakpoints on system + prefix; **~75–85% off billed input on that path, zero on the default local-CLI path** |
+| Retry note was *prepended* to the prompt | Threw away the cacheable prefix on every retry; now appended, where a correction belongs anyway |
+| Compiler ran once, after every file | `internal/protocol` now type-checks at **file 3 of 24 instead of 24**, via `go build -overlay` so nothing is written early. Three of four real runs had died on a session limit before the compiler ever ran |
+
+**Refused, and worth keeping the reason:** generating a dependency level
+concurrently. Measured on the live plan — depth 15, widths
+`[1,1,4,3,3,1,2,3,1,1,2,2,2,1,1]` — the win is **1.56× (78.5 → 50.3 min)**, not
+the 3× it looks like. It buys that with **cache poisoning that has no recovery
+path**: the per-file cache key is the rendered prompt with `written=nil,
+decls=nil`, so a same-level sibling collision is stored under a key that looks
+valid, and `Prune` has no production caller. The safer design makes it worse —
+snapshot per level and `redeclaresElsewhere` can *never* see a sibling.
+`Plan.Levels()` stays in the tree, unwired: the measurement was worth keeping,
+the rewrite was not. Any future attempt must start from the poisoning problem,
+not the loop.
+
+**Closed as a decision:** starting one component process for the three
+registered L4 tests instead of three. Saves two startups — seconds on an
+eleven-minute run — by coupling tests that are isolated today. Not worth it.
+
+**Two claims that were wrong and are corrected here.** `018f77e` (the
+conformance-method fix) said the suite was green; three tests it left red were
+found and fixed in `2fafa17`, and every check since has run with `-count=1`.
+And the verification standard for item 3 was met on the *fourth* real run —
+the first three died on the provider's session window before reaching the
+compiler, which is the origin of the incremental type-check above.
+
+**Still open on this list:** `cache_control` for other hosted providers that
+support it; a real `domain create` end to end (`gateway create` in flight at
+time of writing).
+
 ## Provider backends
 
 Not part of the CLI spec, but it is what decides whether any generating
