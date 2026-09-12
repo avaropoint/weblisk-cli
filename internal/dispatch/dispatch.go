@@ -655,32 +655,22 @@ func DiscoverProvider() string {
 		return info + " [ready]"
 	}
 
-	// Not the retrying provider: this answers "what is configured", and a
-	// status line that takes six minutes to print is not a status line.
-	provider, err := newRawProvider()
-	if err != nil {
+	// Constructing the provider is free and catches the faults worth naming in
+	// a header — a CLI that is not on the PATH, a hosted backend with no key,
+	// a WL_AI_BASE_URL that is missing. api is set here, so this does not walk.
+	//
+	// It does NOT ask the model anything. It used to: a full subprocess and a
+	// round-trip of readinessPrompt, to decorate this line with "[ready]" —
+	// and then RequireProvider, a few lines further into the same command,
+	// asked the same backend the same question for real. That second call
+	// cannot be skipped (it is what records the model for provenance; see its
+	// comment), so this one was pure duplication: one extra `claude` process
+	// per build whenever a provider was pinned. A status line reports what is
+	// configured; whether it answers is settled by the call that follows.
+	if _, err := newRawProvider(); err != nil {
 		return info + " [error: " + err.Error() + "]"
 	}
-
-	_, err = provider.Chat([]Message{
-		{Role: "user", Content: "Respond with exactly: ok"},
-	})
-	if err != nil {
-		// "unreachable" reads as not installed or misconfigured, and this line
-		// is printed at the top of every build. A run that says "unreachable"
-		// and then generates thirty-five files has told the operator something
-		// false. An overload is the provider being busy, which is a different
-		// fact and one the build will ride out.
-		if isTransient(err) {
-			return info + " [busy — will retry]"
-		}
-		if f := FaultOf(err); f != nil && f.Message != "" {
-			return info + " [" + firstErrorLine(f) + "]"
-		}
-		return info + " [unreachable]"
-	}
-
-	return info + " [ready]"
+	return info
 }
 
 // ProviderStatus returns a JSON-serializable status of the AI provider.

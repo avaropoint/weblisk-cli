@@ -3,6 +3,8 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -372,5 +374,44 @@ func TestOurOwnDeadlineDoesNotDisqualifyAProvider(t *testing.T) {
 	// A real refusal still does disqualify.
 	if !notReady(&ProviderFault{Provider: "codex", Message: codexUnauthorized}) {
 		t.Error("a 401 no longer disqualifies, which defeats the walk")
+	}
+}
+
+// The header line does not ask the model anything.
+//
+// It used to: a full subprocess and a round-trip of readinessPrompt to decorate
+// the "AI Model:" line with "[ready]" — and then RequireProvider, a few lines
+// into the same command, asked the same backend the same question for real.
+// That second call is not skippable, because it is the one that records which
+// model answered (see RequireProvider). So this one was an extra process per
+// build whenever a provider was pinned, spent on a status line.
+func TestTheHeaderLineDoesNotSpendAModelCall(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "was-invoked")
+	bin := fakeCLI(t, "touch "+marker+"\necho ok")
+	t.Setenv("WL_AI_PROVIDER", "local-cli")
+	t.Setenv("WL_AI_COMMAND", bin)
+	t.Setenv("WL_AI_MODEL", "")
+	saved := selected
+	selected.set = false
+	t.Cleanup(func() { selected = saved })
+
+	line := DiscoverProvider()
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("DiscoverProvider ran the provider binary — a status line spent a model call")
+	}
+	if !strings.Contains(line, "local-cli") {
+		t.Errorf("the header does not name the configured provider: %q", line)
+	}
+	for _, claim := range []string{"[ready]", "[unreachable]", "[busy"} {
+		if strings.Contains(line, claim) {
+			t.Errorf("the header claims %q without having asked: %q", claim, line)
+		}
+	}
+	// A provider that cannot even be constructed is still named as such, for
+	// free — that is a fact about configuration, not about the model.
+	t.Setenv("WL_AI_COMMAND", filepath.Join(t.TempDir(), "no-such-binary"))
+	if line := DiscoverProvider(); !strings.Contains(line, "[error:") {
+		t.Errorf("a missing binary was not reported in the header: %q", line)
 	}
 }
