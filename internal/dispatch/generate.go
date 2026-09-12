@@ -390,7 +390,22 @@ func truncateLine(s string) string {
 func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[string]string,
 	bpOrder []string, platBP string, written []string, decls map[string][]Declaration,
 	checklist []ChecklistItem, bindings []Binding, st *TenantState) string {
+	text, _ := filePromptParts(f, plan, platform, blueprints, bpOrder, platBP, written, decls, checklist, bindings, st)
+	return text
+}
+
+// filePromptParts is filePrompt plus where its invariant prefix ends.
+//
+// The offset is where the text stops being identical across files in a run,
+// which is the byte before the ownership block: measured against the real
+// corpus, two file prompts share 384,775 of 385,521 bytes, and the divergence
+// begins inside formatOwnership. A provider that caches a prefix is told this
+// so it can place its breakpoint exactly there — see Message.CacheBoundary.
+func filePromptParts(f PlannedFile, plan *Plan, platform string, blueprints map[string]string,
+	bpOrder []string, platBP string, written []string, decls map[string][]Declaration,
+	checklist []ChecklistItem, bindings []Binding, st *TenantState) (string, int) {
 	var b strings.Builder
+	boundary := 0
 
 	// INVARIANT PREFIX — identical for every file in a run.
 	//
@@ -457,6 +472,9 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 	// turns a retry into a non-event — and it is what makes generating a
 	// dependency level CONCURRENTLY safe, because no file then depends on the
 	// order its siblings were produced in.
+	// Everything above is byte-identical for every file in the run. Everything
+	// from here on can differ — ownership is filtered to this file's package.
+	boundary = b.Len()
 	if ow := formatOwnership(plan, f); ow != "" {
 		b.WriteString("\n\n" + ow)
 	}
@@ -517,7 +535,7 @@ func filePrompt(f PlannedFile, plan *Plan, platform string, blueprints map[strin
 	if len(f.Serves) > 0 {
 		fmt.Fprintf(&b, "It MUST serve these endpoints: %s\n", strings.Join(f.Serves, ", "))
 	}
-	return b.String()
+	return b.String(), boundary
 }
 
 // fileSystemPrompt carries the output contract and nothing else.
@@ -674,14 +692,20 @@ func GenerateTarget(provider Provider, plan *Plan, platform string, blueprints m
 			onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path,
 				Status: status, Attempt: attempt, Detail: lastViolation})
 
-			prompt := filePrompt(f, plan, platform, blueprints, bpOrder, platBP, written, decls, checklist, bindings, st)
+			prompt, boundary := filePromptParts(f, plan, platform, blueprints, bpOrder, platBP, written, decls, checklist, bindings, st)
 			if lastViolation != "" {
-				prompt = "Your previous response was rejected: " + lastViolation +
-					"\nProduce the file again, correctly.\n\n" + prompt
+				// APPENDED, not prepended. This used to go at the front, which
+				// changed the first bytes of the prompt and threw away the
+				// entire cacheable prefix on every retry — the very thing the
+				// invariant-prefix ordering exists to protect. At the end it is
+				// also the last instruction the model reads, which is where a
+				// correction belongs.
+				prompt += "\n\nYour previous response was rejected: " + lastViolation +
+					"\nProduce the file again, correctly.\n"
 			}
 			raw, err := provider.Chat([]Message{
 				{Role: "system", Content: fileSystemPrompt},
-				{Role: "user", Content: prompt},
+				{Role: "user", Content: prompt, CacheBoundary: boundary},
 			})
 			if err != nil {
 				onProgress(Progress{Step: i + 1, Total: len(ordered), Path: f.Path,

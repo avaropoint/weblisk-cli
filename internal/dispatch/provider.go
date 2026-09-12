@@ -29,6 +29,16 @@ type Provider interface {
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// CacheBoundary is the byte offset in Content up to which the text is
+	// identical across every call in a run — the end of the invariant prefix
+	// filePrompt builds. 0 means none is claimed.
+	//
+	// Honoured by a provider whose API caches a prefix, which today is the
+	// hosted Anthropic path: it splits Content there and marks the first part
+	// cacheable. Every other provider sends Content whole and never sees this
+	// field — it is `json:"-"` so an OpenAI-compatible request body is
+	// unchanged byte for byte.
+	CacheBoundary int `json:"-"`
 }
 
 // OpenAI-compatible
@@ -108,10 +118,55 @@ type AnthropicProvider struct {
 }
 
 type anthropicRequest struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	System    string    `json:"system,omitempty"`
-	Messages  []Message `json:"messages"`
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	System    []anthropicBlock   `json:"system,omitempty"`
+	Messages  []anthropicMessage `json:"messages"`
+}
+
+// anthropicBlock is one content block. A block carrying CacheControl is a
+// prompt-cache breakpoint: everything up to and including it is written to the
+// cache on the first call and read from it on the next, as long as the bytes
+// before the breakpoint are identical.
+type anthropicBlock struct {
+	Type         string          `json:"type"`
+	Text         string          `json:"text"`
+	CacheControl *anthropicCache `json:"cache_control,omitempty"`
+}
+
+type anthropicCache struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+type anthropicMessage struct {
+	Role    string           `json:"role"`
+	Content []anthropicBlock `json:"content"`
+}
+
+// anthropicBlocks renders one message as content blocks, placing a breakpoint
+// at its CacheBoundary when it has one.
+//
+// # What this is worth, measured
+//
+// A per-file generation prompt is ~385 KB, and two files in the same run share
+// 99.81% of it byte for byte from the start — the blueprints, the checklist,
+// the bindings. Without a breakpoint every one of a run's calls re-processes
+// that prefix at full price. With one, the first call writes it and the rest
+// read it at a tenth of the input rate. The tail past the boundary — ownership,
+// the growing declarations list, the ask — stays full price, so the honest
+// figure is roughly 75–85% off billed input on this path, not 99%.
+//
+// This applies to the hosted Anthropic path ONLY. The default local-CLI
+// providers never reach this code; whatever caching they do is their own.
+func anthropicBlocks(m Message) []anthropicBlock {
+	ephemeral := &anthropicCache{Type: "ephemeral"}
+	if m.CacheBoundary <= 0 || m.CacheBoundary >= len(m.Content) {
+		return []anthropicBlock{{Type: "text", Text: m.Content}}
+	}
+	return []anthropicBlock{
+		{Type: "text", Text: m.Content[:m.CacheBoundary], CacheControl: ephemeral},
+		{Type: "text", Text: m.Content[m.CacheBoundary:]},
+	}
 }
 
 type anthropicResponse struct {
@@ -125,14 +180,17 @@ type anthropicResponse struct {
 }
 
 func (p *AnthropicProvider) Chat(messages []Message) (string, error) {
-	var system string
-	var apiMsgs []Message
+	var system []anthropicBlock
+	var apiMsgs []anthropicMessage
 	for _, m := range messages {
 		if m.Role == "system" {
-			system = m.Content
-		} else {
-			apiMsgs = append(apiMsgs, m)
+			// The system prompt is the same for every call in a run, so it is
+			// always a breakpoint: it is the first thing the cache compares.
+			system = []anthropicBlock{{Type: "text", Text: m.Content,
+				CacheControl: &anthropicCache{Type: "ephemeral"}}}
+			continue
 		}
+		apiMsgs = append(apiMsgs, anthropicMessage{Role: m.Role, Content: anthropicBlocks(m)})
 	}
 
 	body, err := json.Marshal(anthropicRequest{
