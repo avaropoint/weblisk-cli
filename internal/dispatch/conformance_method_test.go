@@ -104,3 +104,25 @@ func TestAProbeOfNothingIsUnrunNotFailed(t *testing.T) {
 		t.Errorf("the reason does not say why nothing was probed: %q", stripped)
 	}
 }
+
+// A required capability is an auth requirement.
+//
+// architecture/orchestrator.md declares its admin surface in a second table
+// headed Capability rather than Auth, with cells like `admin:read`. Reading only
+// Auth-headed tables left every admin endpoint invisible to the protection
+// probe on the real corpus.
+func TestACapabilityColumnMarksAnEndpointProtected(t *testing.T) {
+	got := ProtectedEndpointsFor("orchestrator", fixtureCorpus())
+	have := map[string]bool{}
+	for _, e := range got {
+		have[e.Method+" "+e.Path] = true
+	}
+	for _, want := range []string{"GET /v1/services", "GET /v1/audit", "GET /v1/admin/overview"} {
+		if !have[want] {
+			t.Errorf("%s is not reported as protected: %+v", want, got)
+		}
+	}
+	if have["GET /v1/health"] {
+		t.Error("/v1/health, declared Auth=no, was reported as protected")
+	}
+}

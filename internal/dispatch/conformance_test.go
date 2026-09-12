@@ -35,6 +35,30 @@ func conformantServer() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+// fixtureCorpus is the blueprint an orchestrator under test is read against.
+//
+// Shaped like the real architecture/orchestrator.md — two tables, one headed
+// Auth and one headed Capability, because that is how the corpus actually
+// declares the admin surface. The tests used to pass nil here and lean on a
+// hardcoded fallback list inside the harness; that list was the ORCHESTRATOR's
+// surface handed to every component, and removing it was correct. A test of
+// the harness has to supply what a real run supplies.
+func fixtureCorpus() map[string]string {
+	return map[string]string{
+		"architecture/orchestrator.md": "" +
+			"## Endpoints\n\n" +
+			"| Method | Path | Operation | Auth | Purpose |\n" +
+			"|---|---|---|---|---|\n" +
+			"| GET | /v1/health | Health | no | Liveness |\n" +
+			"| GET | /v1/services | Services | yes | Service directory |\n" +
+			"| GET | /v1/audit | Audit | yes | Query audit log |\n\n" +
+			"## Admin\n\n" +
+			"| Method | Path | Operation | Capability | Purpose |\n" +
+			"|---|---|---|---|---|\n" +
+			"| GET | /v1/admin/overview | AdminOverview | `admin:read` | Summary |\n",
+	}
+}
+
 func runTest(t *testing.T, id, base string) ConformanceResult {
 	return runTestFor(t, id, base, "orchestrator")
 }
@@ -45,7 +69,7 @@ func runTestFor(t *testing.T, id, base, component string) ConformanceResult {
 		if tc.id != id {
 			continue
 		}
-		ok, detail, evidence := tc.run(base, component, nil)
+		ok, detail, evidence := tc.run(base, component, fixtureCorpus())
 		return ConformanceResult{ID: id, Passed: ok, Detail: detail, Evidence: evidence}
 	}
 	t.Fatalf("no test %s", id)

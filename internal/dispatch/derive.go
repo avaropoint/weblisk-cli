@@ -61,24 +61,36 @@ func ProtectedEndpointsFor(component string, blueprints map[string]string) []Pro
 	// so every protected endpoint in the corpus read as unprotected and the
 	// prober expected no token where the blueprint requires one. A table
 	// gaining a column is an ordinary edit; nothing may depend on cell order.
-	for _, t := range TablesWithColumns(body, "method", "path", "auth") {
-		for _, row := range t.Rows {
-			method := strings.ToUpper(strings.TrimSpace(row["method"]))
-			path := strings.Trim(strings.TrimSpace(row["path"]), "`")
-			if !isHTTPMethod(method) || !strings.HasPrefix(path, "/") {
-				continue
+	add := func(tables []MarkdownTable, protected func(row map[string]string) bool) {
+		for _, t := range tables {
+			for _, row := range t.Rows {
+				method := strings.ToUpper(strings.TrimSpace(row["method"]))
+				path := strings.Trim(strings.TrimSpace(row["path"]), "`")
+				if !isHTTPMethod(method) || !strings.HasPrefix(path, "/") || !protected(row) {
+					continue
+				}
+				key := method + " " + path
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, ProtectedEndpoint{Method: method, Path: path})
 			}
-			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(row["auth"])), "yes") {
-				continue
-			}
-			key := method + " " + path
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, ProtectedEndpoint{Method: method, Path: path})
 		}
 	}
+	// An Auth column: "yes" means a token is required.
+	add(TablesWithColumns(body, "method", "path", "auth"), func(row map[string]string) bool {
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(row["auth"])), "yes")
+	})
+	// A Capability column: architecture/orchestrator.md declares its admin
+	// surface in a SECOND table headed Capability rather than Auth, with cells
+	// like `admin:read`. A required capability is an auth requirement — no
+	// token, no capability — and reading only Auth-headed tables left every
+	// admin endpoint invisible to the protection probe on the real corpus.
+	add(TablesWithColumns(body, "method", "path", "capability"), func(row map[string]string) bool {
+		c := strings.ToLower(strings.Trim(strings.TrimSpace(row["capability"]), "`"))
+		return c != "" && c != "no" && c != "none" && c != "-" && c != "—"
+	})
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Path != out[j].Path {
 			return out[i].Path < out[j].Path
