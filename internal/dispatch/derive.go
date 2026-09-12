@@ -89,7 +89,7 @@ func ProtectedEndpointsFor(component string, blueprints map[string]string) []Pro
 	// admin endpoint invisible to the protection probe on the real corpus.
 	add(TablesWithColumns(body, "method", "path", "capability"), func(row map[string]string) bool {
 		c := strings.ToLower(strings.Trim(strings.TrimSpace(row["capability"]), "`"))
-		return c != "" && c != "no" && c != "none" && c != "-" && c != "—"
+		return c != "" && !unprotectedCell(c)
 	})
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Path != out[j].Path {
@@ -206,6 +206,23 @@ func LoadArchitectureCorpus(root string) map[string]string {
 func isHTTPMethod(s string) bool {
 	switch s {
 	case "GET", "POST", "PUT", "PATCH", "DELETE":
+		return true
+	}
+	return false
+}
+
+// unprotectedCell reports whether an Auth/Capability cell says "anyone may
+// call this". The corpus writes `no` and `no*` (footnoted: identity-verified
+// registration, but no token); the other words are the ordinary ways a
+// blueprint author would say the same thing. Anything else — `yes`, a
+// capability like `admin:read` — is a requirement.
+func unprotectedCell(c string) bool {
+	switch {
+	case c == "", c == "-", c == "—", c == "n/a":
+		return true
+	case strings.HasPrefix(c, "no"): // no, none, no*, not required
+		return true
+	case c == "public", c == "anonymous", c == "open", c == "unauthenticated":
 		return true
 	}
 	return false

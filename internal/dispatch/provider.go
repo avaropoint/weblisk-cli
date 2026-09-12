@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 )
 
 // Interface
@@ -159,6 +160,9 @@ type anthropicMessage struct {
 // This applies to the hosted Anthropic path ONLY. The default local-CLI
 // providers never reach this code; whatever caching they do is their own.
 func anthropicBlocks(m Message) []anthropicBlock {
+	if m.Content == "" {
+		return nil // the API rejects an empty text block; the caller drops the message
+	}
 	ephemeral := &anthropicCache{Type: "ephemeral"}
 	if m.CacheBoundary <= 0 || m.CacheBoundary >= len(m.Content) {
 		return []anthropicBlock{{Type: "text", Text: m.Content}}
@@ -179,47 +183,97 @@ type anthropicResponse struct {
 	} `json:"error"`
 }
 
-func (p *AnthropicProvider) Chat(messages []Message) (string, error) {
+// anthropicCacheRejected is set the first time the API refuses a request for
+// its cache_control blocks, so every later call in this process sends none
+// rather than paying a 400 each time to learn the same thing.
+var anthropicCacheRejected atomic.Bool
+
+// promptCacheEnabled reports whether requests should carry cache breakpoints.
+//
+// WL_AI_PROMPT_CACHE=0 turns them off without a rebuild. This is the one
+// change on this path that could not be exercised against the API on the
+// machine it was written on — no key — so an operator must be able to switch
+// it off if the request shape is refused, and the code must not make the
+// whole provider fail over an optimisation. See Chat.
+func promptCacheEnabled() bool {
+	if anthropicCacheRejected.Load() {
+		return false
+	}
+	return os.Getenv("WL_AI_PROMPT_CACHE") != "0"
+}
+
+// buildAnthropicRequest renders messages, with or without cache breakpoints.
+func buildAnthropicRequest(model string, messages []Message, useCache bool) ([]byte, error) {
 	var system []anthropicBlock
 	var apiMsgs []anthropicMessage
 	for _, m := range messages {
 		if m.Role == "system" {
 			// The system prompt is the same for every call in a run, so it is
 			// always a breakpoint: it is the first thing the cache compares.
-			system = []anthropicBlock{{Type: "text", Text: m.Content,
-				CacheControl: &anthropicCache{Type: "ephemeral"}}}
+			b := anthropicBlock{Type: "text", Text: m.Content}
+			if useCache && m.Content != "" {
+				b.CacheControl = &anthropicCache{Type: "ephemeral"}
+			}
+			if m.Content != "" {
+				system = []anthropicBlock{b}
+			}
 			continue
 		}
-		apiMsgs = append(apiMsgs, anthropicMessage{Role: m.Role, Content: anthropicBlocks(m)})
+		blocks := anthropicBlocks(m)
+		if !useCache {
+			for i := range blocks {
+				blocks[i].CacheControl = nil
+			}
+		}
+		if len(blocks) == 0 {
+			continue // an empty message is not a message; the API rejects an empty text block
+		}
+		apiMsgs = append(apiMsgs, anthropicMessage{Role: m.Role, Content: blocks})
 	}
-
-	body, err := json.Marshal(anthropicRequest{
-		Model: p.Model, MaxTokens: 8192, System: system, Messages: apiMsgs,
+	return json.Marshal(anthropicRequest{
+		Model: model, MaxTokens: 8192, System: system, Messages: apiMsgs,
 	})
+}
+
+func (p *AnthropicProvider) Chat(messages []Message) (string, error) {
+	send := func(useCache bool) (int, []byte, error) {
+		body, err := buildAnthropicRequest(p.Model, messages, useCache)
+		if err != nil {
+			return 0, nil, err
+		}
+		req, err := http.NewRequest("POST", p.BaseURL+"/messages", bytes.NewReader(body))
+		if err != nil {
+			return 0, nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", p.APIKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return 0, nil, &ProviderFault{Provider: "anthropic", Message: "request failed: " + err.Error()}
+		}
+		defer resp.Body.Close()
+		respBody, err := io.ReadAll(resp.Body)
+		return resp.StatusCode, respBody, err
+	}
+
+	useCache := promptCacheEnabled()
+	status, respBody, err := send(useCache)
 	if err != nil {
 		return "", err
 	}
-
-	req, err := http.NewRequest("POST", p.BaseURL+"/messages", bytes.NewReader(body))
-	if err != nil {
-		return "", err
+	// A 400 that names cache_control is the API refusing the OPTIMISATION, not
+	// the request. Retrying without breakpoints costs one extra call, once per
+	// process; failing the provider over it would turn a cache miss into a
+	// build that cannot run. The flag stays set, so this is paid once.
+	if status == 400 && useCache && bytes.Contains(respBody, []byte("cache_control")) {
+		anthropicCacheRejected.Store(true)
+		if status, respBody, err = send(false); err != nil {
+			return "", err
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", p.APIKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", &ProviderFault{Provider: "anthropic", Message: "request failed: " + err.Error()}
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != 200 {
-		return "", httpFault("anthropic", resp.StatusCode, respBody)
+	if status != 200 {
+		return "", httpFault("anthropic", status, respBody)
 	}
 
 	var result anthropicResponse

@@ -347,7 +347,7 @@ corpus", "AST-parsed three times" all sounded right and died on inspection.
 | Advisory budget never applied | `retryingProvider` had no `WithBounds`; every real run printed "cannot be time-bounded" about a missing method, not the backend. Also `WithBounds` never clamped `Timeout`, the only field codex reads |
 | `builtBinary` returned `""` for a build with no `-o` | Both callers guard on it, so `go build ./...` skipped conformance **and** interop in silence while printing `[ok] builds` |
 | Header line spent a model round-trip | `DiscoverProvider` probed to print `[ready]`; `RequireProvider` then probed again and *that* call is unskippable (it records the model for provenance) |
-| Hosted Anthropic path had no `cache_control` | Prefix is 99.81% shared; breakpoints on system + prefix; **~75–85% off billed input on that path, zero on the default local-CLI path** |
+| Hosted Anthropic path had no `cache_control` | Prefix is 99.81% shared; breakpoints on system + prefix; **~75–85% off billed input on that path, zero on the default local-CLI path**. **Shape-verified only, not exercised against the API — no key on this machine.** If the API refuses the blocks it retries once without them and stays off; `WL_AI_PROMPT_CACHE=0` turns them off outright |
 | Retry note was *prepended* to the prompt | Threw away the cacheable prefix on every retry; now appended, where a correction belongs anyway |
 | Compiler ran once, after every file | `internal/protocol` now type-checks at **file 3 of 24 instead of 24**, via `go build -overlay` so nothing is written early. Three of four real runs had died on a session limit before the compiler ever ran |
 

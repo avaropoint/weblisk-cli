@@ -126,3 +126,19 @@ func TestACapabilityColumnMarksAnEndpointProtected(t *testing.T) {
 		t.Error("/v1/health, declared Auth=no, was reported as protected")
 	}
 }
+
+// A Capability cell that says "anyone" must not read as a requirement. The
+// corpus writes `no*` for footnoted rows; `public` is the obvious other way
+// to say it. Getting this wrong makes L1-07 demand a 401 from an endpoint
+// that must serve anonymously.
+func TestACapabilityCellSayingAnyoneIsNotProtected(t *testing.T) {
+	body := "| Method | Path | Operation | Capability |\n|---|---|---|---|\n" +
+		"| POST | /v1/register | Register | no* |\n" +
+		"| GET | /v1/health | Health | public |\n" +
+		"| GET | /v1/open | Open | — |\n" +
+		"| GET | /v1/admin/x | X | `admin:read` |\n"
+	got := ProtectedEndpointsFor("orchestrator", map[string]string{"architecture/orchestrator.md": body})
+	if len(got) != 1 || got[0].Path != "/v1/admin/x" {
+		t.Errorf("protected = %+v, want only /v1/admin/x", got)
+	}
+}

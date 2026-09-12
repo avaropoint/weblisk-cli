@@ -115,3 +115,83 @@ func TestTheFilePromptBoundaryIsWhereFilesDiverge(t *testing.T) {
 		t.Error("filePrompt and filePromptParts render differently")
 	}
 }
+
+// The optimisation must never take the provider down with it.
+//
+// This is the one change on this path that could not be exercised against the
+// API on the machine it was written on. If the request shape is refused, the
+// provider retries once without breakpoints and stays off for the process —
+// one extra call, not a build that cannot run.
+func TestARefusedBreakpointDegradesRatherThanFails(t *testing.T) {
+	anthropicCacheRejected.Store(false)
+	t.Cleanup(func() { anthropicCacheRejected.Store(false) })
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var b map[string]any
+		_ = json.Unmarshal(raw, &b)
+		bodies = append(bodies, b)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(raw), "cache_control") {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.0.cache_control: Extra inputs are not permitted"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer srv.Close()
+
+	p := &AnthropicProvider{BaseURL: srv.URL, APIKey: "k", Model: "m"}
+	out, err := p.Chat([]Message{{Role: "system", Content: "s"}, {Role: "user", Content: "PREFIX-TAIL", CacheBoundary: 6}})
+	if err != nil {
+		t.Fatalf("a refused breakpoint failed the provider: %v", err)
+	}
+	if out != "ok" {
+		t.Errorf("answer = %q", out)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("made %d requests, want 2 (one refused, one clean)", len(bodies))
+	}
+	if strings.Contains(fmtJSON(bodies[1]), "cache_control") {
+		t.Error("the retry still carried breakpoints")
+	}
+	// And it stays off: a third call sends no breakpoints and is not refused.
+	if _, err := p.Chat([]Message{{Role: "user", Content: "PREFIX-TAIL", CacheBoundary: 6}}); err != nil {
+		t.Fatalf("a later call was refused again: %v", err)
+	}
+	if len(bodies) != 3 || strings.Contains(fmtJSON(bodies[2]), "cache_control") {
+		t.Errorf("breakpoints came back after being refused (requests=%d)", len(bodies))
+	}
+}
+
+// An operator can turn breakpoints off without a rebuild.
+func TestPromptCachingCanBeSwitchedOff(t *testing.T) {
+	anthropicCacheRejected.Store(false)
+	t.Setenv("WL_AI_PROMPT_CACHE", "0")
+	body, err := buildAnthropicRequest("m", []Message{
+		{Role: "system", Content: "s"}, {Role: "user", Content: "PREFIX-TAIL", CacheBoundary: 6},
+	}, promptCacheEnabled())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "cache_control") {
+		t.Error("WL_AI_PROMPT_CACHE=0 still sent breakpoints")
+	}
+}
+
+// An empty message is dropped rather than sent as an empty text block, which
+// the API rejects.
+func TestAnEmptyMessageIsNotSentAsAnEmptyBlock(t *testing.T) {
+	if got := anthropicBlocks(Message{Role: "user", Content: ""}); len(got) != 0 {
+		t.Errorf("empty content produced blocks %+v", got)
+	}
+	body, err := buildAnthropicRequest("m", []Message{{Role: "system", Content: ""}, {Role: "user", Content: ""}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), `"text":""`) {
+		t.Errorf("an empty text block was sent: %s", body)
+	}
+}
+
+func fmtJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
